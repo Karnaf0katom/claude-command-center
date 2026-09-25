@@ -24783,6 +24783,9 @@ _adopt_ccc_module("recent_search")
 # Ask tab — retrieval + one cheap-LLM call (/api/assistant/ask).
 _adopt_ccc_module("ask")
 
+# Session waste — on-demand `throughput analyze` from agent-throughput (/api/session/waste).
+_adopt_ccc_module("session_waste")
+
 # Test-patched globals kept here; ccc_server/usage_stats.py reads them via _core.
 _CCC_WEEKLY_CAL_FILE = COMMAND_CENTER_STATE_DIR / "usage" / "calibration.json"
 _WEEK_START_OVERRIDE_FILE = COMMAND_CENTER_STATE_DIR / "usage" / "week-start-override.json"
@@ -25092,6 +25095,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing session_id"}, 400)
             else:
                 self.send_json(_session_landed(sid))
+        elif path == "/api/session/waste":
+            # Where one session's money went (external agent-throughput CLI).
+            # Seconds per session, so on demand only; cached=1 never runs it.
+            # Not a background read: those share two slots and this can take a minute.
+            qs = urllib.parse.parse_qs(parsed.query)
+            sid = str((qs.get("session_id") or [""])[0] or "").strip()
+            if not sid:
+                self.send_json({"ok": False, "error": "missing session_id"}, 400)
+            else:
+                self.send_json(session_waste(sid, cached_only=(qs.get("cached") or [""])[0] == "1"))
         elif path == "/api/system/app-server":
             self.send_json(_app_server_status_preferring_worker())
         elif path == "/api/system/services":
