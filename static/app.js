@@ -42627,12 +42627,14 @@
     renderConversationBackgroundPalette(clone);
     // Cloned nodes lose their listeners — rebuild the row-style picker too.
     try { renderConvRowStylePalettes(); } catch (_) {}
-    // In cloned panes, hide workspace/spawn elements that rely on p1-singleton
-    // IDs. The [data-usage] slot (model + token pills) still works because
-    // renderSessionUsageIntoStrip mirrors into it after rendering to p1.
+    // In cloned panes, hide the spawn elements that rely on p1-singleton IDs
+    // (mountNewSessionChrome moves the real ones in when this pane composes a
+    // new session). [data-workspace] stays: renderSessionWorkspaceIntoSticky
+    // paints each pane's own strip (CCC-477), and hiding it here left the
+    // right pane with no repo path (CCC-1194).
     const ctxBar = clone.querySelector('.conv-input-context');
     if (ctxBar) {
-      ['[data-workspace]', '.spawn-cwd-quick-chips', '.spawn-cwd-row', '.spawn-worktree-row'].forEach(sel => {
+      ['.spawn-cwd-quick-chips', '.spawn-cwd-row', '.spawn-worktree-row'].forEach(sel => {
         ctxBar.querySelectorAll(sel).forEach(el => { el.style.display = 'none'; });
       });
     }

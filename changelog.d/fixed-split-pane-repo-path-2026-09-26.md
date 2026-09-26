@@ -1,0 +1,1 @@
+- In split view the right pane now shows its session's repo path and branch above the input, like the left pane.
