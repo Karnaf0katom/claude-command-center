@@ -9326,14 +9326,15 @@
     // so the spawn-cwd picker hides and the workspace pill returns. The
     // class is set in enterNewSessionMode(); this is the symmetric clear.
     if (sid || currentConversation !== '__new__') {
-      const _cic = document.getElementById('convInputContext');
-      if (_cic) {
-        _cic.classList.remove('is-new-session');
-        if (typeof syncPaneHasFlags === 'function') syncPaneHasFlags(_cic.closest('.conv-pane'));
-      }
       // Return the CWD picker row + quick chips home if the new-session
       // chooser borrowed them (see _adoptCwdControlsIntoChooser, CCC-86).
       try { _restoreCwdControlsToInputBar(); } catch (_) {}
+      // Re-home the new-session chrome: to another pane still composing a
+      // new session (split view), else back to p1 with .is-new-session off.
+      if (typeof mountNewSessionChrome === 'function') {
+        try { mountNewSessionChrome(); } catch (_) {}
+      }
+      if (typeof syncAllPaneHasFlags === 'function') syncAllPaneHasFlags();
     }
     const resolvedTranscriptPath = transcriptPath || (row && row.jsonl_path) || '';
     setCopyableSessionId($convSessionId, sid, resolvedTranscriptPath);
@@ -10292,16 +10293,18 @@
         activeEffortSelect.style.display = isNewSession && canPickEffort ? '' : 'none';
       }
       const pickerStrip = document.getElementById('convModelPickerStrip');
+      // Another split pane may be the one composing the new session.
+      const _stripOn = isNewSession || !!newSessionPaneId();
       if (pickerStrip) {
-        pickerStrip.style.display = isNewSession ? 'flex' : 'none';
-        pickerStrip.classList.toggle('is-new-session', isNewSession);
+        pickerStrip.style.display = _stripOn ? 'flex' : 'none';
+        pickerStrip.classList.toggle('is-new-session', _stripOn);
         if (isNewSession && typeof syncNsModelPickerPillsSelection === 'function') {
           syncNsModelPickerPillsSelection();
         }
       }
     } else {
       const pickerStrip = document.getElementById('convModelPickerStrip');
-      if (pickerStrip) {
+      if (pickerStrip && !newSessionPaneId()) {
         pickerStrip.style.display = 'none';
         pickerStrip.classList.remove('is-new-session');
       }
@@ -42477,9 +42480,52 @@
     // to the left pane while the right pane shows "New session". CSS lays
     // it out by flex `order` on `.conv-pane`, so reparenting is safe
     // regardless of DOM position.
-    const pickerStrip = document.getElementById('convModelPickerStrip');
-    if (pickerStrip && pickerStrip.parentElement !== pane) pane.appendChild(pickerStrip);
+    mountNewSessionChrome(paneId);
     syncAllPaneHasFlags();
+  }
+
+  // CCC-1189 (split view): the new-session chrome — the folder row, recent
+  // folder chips, object context, worktree toggle (all ids inside p1's
+  // input-context strip) and the model picker strip — is a set of p1
+  // singletons. It must live in the pane that is COMPOSING the new session,
+  // not whichever pane has focus: before this, opening New Session in the
+  // right pane left the folder/model pickers in the left pane, and focusing
+  // the left pane dragged the model strip over too.
+  function newSessionPaneId() {
+    const hit = (splitState.panes || []).find(p => p && p.conversationId === '__new__');
+    return hit ? hit.id : null;
+  }
+  function mountNewSessionChrome(fallbackPaneId) {
+    const home = document.getElementById('convInputContext');
+    if (!home) return;
+    const newPid = newSessionPaneId();
+    const targetPid = newPid || 'p1';
+    const target = (targetPid === 'p1' ? home : getInputContextSlot(targetPid)) || home;
+    const pieces = [
+      document.getElementById('newSessionObjectContext'),
+      document.getElementById('spawnCwdQuickChips'),
+      (document.getElementById('spawnCwdPicker') || { closest: () => null }).closest('.spawn-cwd-row'),
+      (document.getElementById('inlineWorktreeToggle') || { closest: () => null }).closest('.spawn-worktree-row'),
+    ].filter(Boolean);
+    const anchor = target.querySelector(':scope > [data-workspace]');
+    let after = anchor;
+    pieces.forEach(el => {
+      if (el.parentElement === target && (!after || el.previousElementSibling === after)) { after = el; return; }
+      target.insertBefore(el, after ? after.nextSibling : target.firstChild);
+      after = el;
+    });
+    document.querySelectorAll('#convSplit > .conv-pane > .conv-input-context[data-role="input-context"]').forEach(slot => {
+      const on = !!newPid && slot === target;
+      if (slot.classList.contains('is-new-session') !== on) slot.classList.toggle('is-new-session', on);
+      if (typeof syncInputContextVisibility === 'function') syncInputContextVisibility(slot);
+    });
+    const pickerStrip = document.getElementById('convModelPickerStrip');
+    const stripPane = document.querySelector(`.conv-pane[data-pane-id="${newPid || fallbackPaneId || activePaneId() || 'p1'}"]`);
+    if (pickerStrip && stripPane && pickerStrip.parentElement !== stripPane) stripPane.appendChild(pickerStrip);
+    if (pickerStrip && newPid) {
+      pickerStrip.style.display = 'flex';
+      pickerStrip.classList.add('is-new-session');
+    }
   }
 
   function mountStatusRailForActivePane() {
@@ -77230,7 +77276,8 @@
       });
     }
     document.addEventListener('click', (ev) => {
-      const row = document.querySelector('.spawn-cwd-row');
+      const picker = document.getElementById('spawnCwdPicker');
+      const row = picker && picker.closest('.spawn-cwd-row');
       if (row && row.contains(ev.target)) return;
       closeSpawnCwdMenu();
     });
@@ -78008,7 +78055,8 @@
     // Toggle the context strip into new-session mode so the picker is
     // visible and the workspace pill is hidden (the workspace pill
     // describes an existing session and has no meaning before spawn).
-    const _cic = document.getElementById('convInputContext');
+    mountNewSessionChrome(paneId);
+    const _cic = getInputContextSlot(paneId) || document.getElementById('convInputContext');
     if (_cic) {
       _cic.classList.add('is-new-session');
       _cic.classList.add('visible');
