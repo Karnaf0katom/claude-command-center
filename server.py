@@ -37446,6 +37446,27 @@ def _apply_session_query_params(rows, qs):
     return out
 
 
+def _annotate_target():
+    """Where the annotate overlay should send a report: "queue" or "github".
+
+    Annotations about CCC itself file into a WatchTower queue, which only helps
+    when a queue is configured for this checkout (the maintainer's setup). On
+    any other install the ticket would sit in an auto-created queue with no
+    worker, so the UI offers a pre-filled GitHub issue instead.
+    CCC_ANNOTATE_TARGET=queue|github overrides the detection.
+    """
+    forced = os.environ.get("CCC_ANNOTATE_TARGET", "").strip().lower()
+    if forced in ("queue", "github"):
+        return forced
+    try:
+        match = getattr(_q, "_queue_for_repo_path", None)
+        if match is not None and match(str(CCC_ROOT)):
+            return "queue"
+    except Exception:
+        pass
+    return "github"
+
+
 def get_app_config():
     """Surface the detected environment to the frontend so the UI can
     conditionally render panels (Vercel, pkood) and avoid hardcoded
@@ -37464,6 +37485,7 @@ def get_app_config():
         "gh_enabled": bool(shutil.which("gh")),
         "orgs": [label for label, _ in ORG_PATTERNS],
         "capabilities": _platform_capabilities(),
+        "annotate_target": _annotate_target(),
     }
     _app_config_cache = config
     _app_config_cache_ts = time.time()

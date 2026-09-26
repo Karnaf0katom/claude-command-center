@@ -12598,6 +12598,15 @@
   .ann-ux-preview-actions {
     display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
   }
+  .ann-gh-title {
+    width: 100%; box-sizing: border-box;
+    font: 13px var(--font-ui); color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+  }
+  .ann-gh-status {
+    font: 12px var(--font-ui); color: var(--orange); line-height: 1.4;
+  }
+  .ann-gh-status a { color: var(--accent, var(--blue)); }
   .uxq-detail-meta {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
