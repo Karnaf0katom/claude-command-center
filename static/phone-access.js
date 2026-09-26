@@ -108,7 +108,7 @@
       '.fleet-phone-list h3{margin:0 0 2px;font-size:13px}',
       '.fleet-phone-node{display:flex;gap:10px;align-items:center;flex-wrap:wrap;border:1px solid var(--border,#333);border-radius:8px;padding:6px 10px;font-size:12px}',
       '.fleet-phone-node .name{font-weight:600;min-width:120px}',
-      '.fleet-phone-node .url{font-family:ui-monospace,monospace;word-break:break-all;flex:1}',
+      '.fleet-phone-node .url{font-family:ui-monospace,monospace;word-break:break-all;flex:1;color:var(--accent,#58a6ff)}',
       '.fleet-phone-node .state.ok{color:var(--success,#3fb950)}',
       '.fleet-phone-node .state.err{color:var(--danger,#f07070)}',
       '.fleet-phone-node button{font-size:11px;padding:2px 9px;border-radius:9px;border:1px solid var(--border,#555);background:transparent;color:inherit;cursor:pointer}',
