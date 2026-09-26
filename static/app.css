@@ -7628,6 +7628,30 @@
       max-width: 73px;
     }
   }
+  /* CCC-1193: in a really narrow list the context-% badge and the time chip
+     eat ~80px of a ~250px row, wrapping titles to two clipped lines. Both
+     yield to the title here. Context fill still shows through the row's
+     ctx-* tint and the action-bar copy of the % badge keeps /compact
+     reachable. The hover kebab/trash overlay now sits over the title, so it
+     gets a solid backing. */
+  @container sidebar (max-width: 400px) {
+    .conv-item .conv-main-row > .conv-pct-badge,
+    .conv-item .conv-row-end > .conv-rel {
+      display: none;
+    }
+    .conv-item .conv-row-end,
+    .conv-item.is-archived-row .conv-row-end {
+      min-width: 0;
+    }
+    .conv-item .conv-row-hover-slot {
+      background: var(--surface-2);
+      border-radius: 4px;
+      box-shadow: -8px 0 10px -2px var(--surface-2);
+    }
+    .conv-item:hover:not(.active) .conv-hover-meta-row {
+      right: 52px;
+    }
+  }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
   }
@@ -29098,6 +29122,13 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   border-radius: 0 !important;
 }
 #convList.workers-dense .conv-item:last-child { border-bottom: 0 !important; }
+/* CCC-1193: the % and age cells are hidden in a very narrow list (see the
+   sidebar 400px tier); collapse their fixed tracks so the title gets them. */
+@container sidebar (max-width: 400px) {
+  #convList.workers-dense .conv-item {
+    grid-template-columns: auto minmax(0, 1fr) auto auto 0 0;
+  }
+}
 #convList.workers-dense .conv-item .conv-title {
   font-size: 13px !important;
   line-height: 1.25 !important;
