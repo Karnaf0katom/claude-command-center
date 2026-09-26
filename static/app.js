@@ -42004,14 +42004,17 @@
 
   function updateSessionOutcomeBanner(view) {
     if (!view) return;
-    // Drop any stale banner first so re-renders never stack duplicates.
+    // An already-painted banner stays put when the recomputed outcome is
+    // identical: this runs on every 5s liveStatus poll, and the 'incomplete'
+    // path re-renders only after an async not-live confirm, so removing it
+    // up front blinked the banner out and back in on every poll (CCC-1191).
     const existing = view.querySelector(':scope > .conv-outcome-banner');
-    if (existing) existing.remove();
+    const clearExisting = () => { if (existing && existing.isConnected) existing.remove(); };
     // A live (or actively-working) session is still in flight — never
     // second-guess it.
-    if (liveStatus && (liveStatus.live || liveStatus.sidecarInFlight || liveStatus.questionWaiting)) return;
+    if (liveStatus && (liveStatus.live || liveStatus.sidecarInFlight || liveStatus.questionWaiting)) { clearExisting(); return; }
     // Need real content to reason about; skip empty / still-loading panes.
-    if (!view.querySelector(':scope > .event, :scope > .tool-call-group')) return;
+    if (!view.querySelector(':scope > .event, :scope > .tool-call-group')) { clearExisting(); return; }
 
     // Walk back to the last meaningful node, skipping the sticky header, the
     // pinned original ask, hidden tool_result markers, the load-earlier
@@ -42067,7 +42070,15 @@
       detail = (action ? 'Last action: ' + action + '. ' : '')
         + 'No final response was produced - type below to resume it.';
     }
-    if (!kind) return;
+    if (!kind) { clearExisting(); return; }
+
+    // Same outcome, still after the last meaningful node: keep the painted
+    // banner (an 'incomplete' one is still re-confirmed below, and removed
+    // only if the session turns out to be live). Anything else is replaced.
+    const sig = kind + '|' + title + '|' + detail;
+    const keep = !!(existing && existing.dataset.outcomeSig === sig
+      && (!lastNode || (lastNode.compareDocumentPosition(existing) & Node.DOCUMENT_POSITION_FOLLOWING)));
+    if (!keep) clearExisting();
 
     if (kind === 'incomplete') {
       // A long extended-thinking pause after a big context reload writes
@@ -42086,6 +42097,7 @@
         return;
       }
     }
+    if (keep) return;
     _renderOutcomeBanner(view, kind, title, detail);
   }
 
@@ -42103,10 +42115,16 @@
           || data.codex_state === 'working');
       }
     } catch (_) { /* couldn't confirm either way — fall through, still show it */ }
-    if (fresh === true) return; // confirmed live after all — say nothing
     // The pane may have switched sessions, or a newer render already handled
     // this, while the confirm fetch was in flight.
     if (!view.isConnected || window.currentConversation !== convIdAtStart) return;
+    if (fresh === true) {
+      // Confirmed live after all — say nothing, and drop a banner kept from
+      // an earlier (not-live) pass.
+      const kept = view.querySelector(':scope > .conv-outcome-banner.conv-outcome-' + kind);
+      if (kept) kept.remove();
+      return;
+    }
     if (view.querySelector(':scope > .conv-outcome-banner')) return;
     _renderOutcomeBanner(view, kind, title, detail);
   }
@@ -42116,6 +42134,7 @@
     const canWakeCodex = !!(wakeSessionId && currentSession && currentSession.source === 'codex');
     const banner = document.createElement('div');
     banner.className = 'conv-outcome-banner conv-outcome-' + kind;
+    banner.dataset.outcomeSig = kind + '|' + title + '|' + detail;
     banner.setAttribute('role', 'status');
     const icon = kind === 'error' ? '⚠' : '⏹';
     banner.innerHTML =
