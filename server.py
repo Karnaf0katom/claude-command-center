@@ -12467,6 +12467,7 @@ def _claude_task_agent_row(
         "subagent_recent": tail_meta.get("subagent_recent", []),
         "workflows": [],
         "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
+        "claude_auth_failed": claude_auth_failed_from_meta(tail_meta),
         "goal": "",
         "goal_status": "",
         "parent_session_id": parent_sid,
@@ -13099,6 +13100,7 @@ def find_all_conversations(
                     if session_id in _ARCHIVE_WORKFLOW_SESSION_DIRS else []
                 ),
                 "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
+                "claude_auth_failed": claude_auth_failed_from_meta(tail_meta),
                 "goal": tail_meta.get("goal") or "",
                 "goal_status": tail_meta.get("goal_status") or "",
                 "parent_session_id": parent_session_id,
@@ -13411,7 +13413,9 @@ def find_all_conversations(
 # v8: Codex rows now carry a computed cost_usd/cost_breakdown_usd; bump so
 # persisted rows from before that row-shaping change get rebuilt instead of
 # permanently reusing their stale (cost-less) dict.
-_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 8
+# v9: Codex subagent rows (guardian auto-reviews) now carry parent_session_id
+# from the rollout's session_meta; cached v8 rows would stay parent-less.
+_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 9
 if test_isolation_active():
     # Same isolation as ACTIVITY_LOG_FILE: archive-build tests persist rows
     # for synthetic session ids into this shared cache (CCC-1165).
@@ -14398,6 +14402,7 @@ _ARCHIVE_LIST_FIELDS = (
     "codex_fresh", "codex_state_reason", "codex_writer", "codex_desktop_attached",
     "bridge_session_id", "registry_status", "registry_status_updated_at",
     "registry_tmux", "messaging_socket_path", "usage_limit_resume_at",
+    "claude_auth_failed",
 )
 
 
@@ -18801,9 +18806,12 @@ def _resolve_apps(include_disabled=False):
     apps.append({"id": "decision-inbox", "label": "Decisions",
                  "icon": "\N{BALLOT BOX WITH CHECK}", "url": "/decision-inbox.html",
                  "builtin": False})
-    apps.append({"id": "spawn-ledger", "label": "Spawn Ledger",
-                 "icon": "\N{BAR CHART}", "url": "/spawn-ledger",
-                 "builtin": False})
+    # Spawn Ledger reads a grade ledger written by an external tool; list it
+    # only on machines that have one (SPAWN_LEDGER_PATH or the default file).
+    if spawn_ledger_path().is_file():
+        apps.append({"id": "spawn-ledger", "label": "Spawn Ledger",
+                     "icon": "\N{BAR CHART}", "url": "/spawn-ledger",
+                     "builtin": False})
     # Pipeline Canvas: the fleet-topology node graph over WatchTower truth
     # (spec: 2026-09-15-pipeline-canvas-design.md). Not core navigation —
     # switchable from the Applications page like the other satellites.
@@ -20811,6 +20819,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             # pass. See find_all_conversations for the broader rationale.
             "pr_state": None,
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
+            "claude_auth_failed": claude_auth_failed_from_meta(tail_meta),
             "goal": tail_meta.get("goal") or "",
             "goal_status": tail_meta.get("goal_status") or "",
             "parent_session_id": parent_session_id,
@@ -25018,6 +25027,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if self._phone_pin_blocked(path):
+            return
         is_background = _is_background_api_read(
             path, self.headers.get("X-CCC-Background") == "1"
         )
@@ -27838,6 +27849,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             force = qs.get("force", ["0"])[0] in ("1", "true")
             self.send_json(_version_check(force=force))
+        elif path == "/phone-unlock":
+            self.send_html(phone_access.UNLOCK_PAGE)
+        elif path == "/api/phone-access/status":
+            # Phone access wizard state (ccc_server/phone_access.py), or a
+            # paired peer's with ?node_id=. Localhost-only: it reveals setup.
+            if not self._phone_access_local_only():
+                return
+            qs_pa = urllib.parse.parse_qs(parsed.query)
+            payload, status = phone_access.phone_access_handle("status", {
+                "node_id": (qs_pa.get("node_id") or [""])[0].strip()})
+            self.send_json(payload, status)
+        elif path == "/api/phone-access/nodes":
+            # Every node's phone URL + status for the Fleet page.
+            if not self._phone_access_local_only():
+                return
+            self.send_json(phone_access.nodes_overview())
         elif path == "/api/network-config":
             # What origins / bind host are trusted on this run, plus a live
             # snapshot of the tailnet so the UI can offer a "trust my
@@ -28133,6 +28160,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "version": __version__,
                 "node_id": federation.node_identity()["node_id"],
             })
+        elif path == "/api/claude-auth/status":
+            # Claude Code login state for this node (or ?node_id=<peer>).
+            # Preview-gated; returns no tokens, only loggedIn/email/attempt.
+            qs_ca = urllib.parse.parse_qs(parsed.query)
+            payload, status = claude_auth_handle("status", {
+                "node_id": (qs_ca.get("node_id") or [""])[0].strip()})
+            self.send_json(payload, status)
         elif path == "/api/federation/v1/hello":
             # Unauthenticated identity card — pairing preflight. No secrets.
             self.send_json(_federation_self_hello())
@@ -28280,8 +28314,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 return
             file_path = Path(resolved["path"])
             media_category = _categorize_file_target(str(file_path))
-            if media_category not in ("videos", "html") or not file_path.is_file():
-                self.send_json({"ok": False, "error": "not a streamable video/html file"}, 404)
+            if media_category not in ("videos", "html", "images", "pdfs") or not file_path.is_file():
+                self.send_json({"ok": False, "error": "not a streamable media file"}, 404)
                 return
             try:
                 st = file_path.stat()
@@ -28299,8 +28333,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 ".m4v": "video/mp4",
                 ".html": "text/html; charset=utf-8",
                 ".htm": "text/html; charset=utf-8",
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+                ".svg": "image/svg+xml",
+                ".pdf": "application/pdf",
             }
-            content_type = ct_map.get(ext, "application/octet-stream")
+            content_type = ct_map.get(ext)
+            if content_type is None:
+                # Whitelisted extension without a known type (e.g. .heic,
+                # .avif): don't guess — force a download, never render it.
+                content_type = "application/octet-stream"
             start, end = 0, max(0, size - 1)
             status = 200
             range_header = self.headers.get("Range")
@@ -28328,7 +28373,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Disposition", "inline")
             self.send_header("Cache-Control", "private, max-age=3600")
-            if media_category == "html":
+            if media_category == "html" or ext == ".svg":
                 # An arbitrary local HTML file rendered same-origin as the
                 # dashboard would otherwise run script with the dashboard's
                 # own ambient authority (cookies, same-origin fetch — which
@@ -28385,6 +28430,43 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return ip in ipaddress.ip_network("100.64.0.0/10")
         return ip in ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
+    def _phone_pin_blocked(self, path):
+        """Phone access PIN gate. When a PIN is set, a request that arrived
+        from off this machine (tailscale serve, a tunnel, a non-loopback
+        bind) needs the session cookie minted by /api/phone-access/unlock.
+        Loopback is never gated. Sends the refusal itself; True = refused."""
+        try:
+            blocked = phone_access.pin_gate_blocks(path, self.client_address[0], self.headers)
+        except Exception:
+            # Fail closed for off-machine callers only.
+            blocked = phone_access.is_remote_request(self.client_address[0], self.headers)
+        if not blocked:
+            return False
+        if self.command == "GET" and not path.startswith("/api/"):
+            body = phone_access.UNLOCK_PAGE.encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_json({"error": "pin_required", "pin_required": True}, 401)
+        return True
+
+    def _phone_access_local_only(self):
+        """Phone-access admin endpoints (turn on/off, PIN, test) are for this
+        machine only: a tailnet peer that is allowed to use CCC must still not
+        be able to reconfigure how it is exposed. Sends the 403 itself."""
+        origin = (self.headers.get("Origin") or "").strip()
+        loopback_origin = not origin or re.match(
+            r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$", origin)
+        if loopback_origin and not phone_access.is_remote_request(
+                self.client_address[0], self.headers):
+            return True
+        self.send_json({"error": "phone-access settings are localhost-only", "origin": origin}, 403)
+        return False
+
     def _check_same_origin(self):
         """SECURITY: reject cross-origin POSTs (CSRF defence).
 
@@ -28414,6 +28496,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return True
         if origin in ALLOWED_ORIGINS:
             return True
+        # Hot-reloaded layers: network.json allowed_origins and the origin
+        # Phone access recorded when it set up `tailscale serve`. Re-read on
+        # mtime change, so trusting a new origin never needs a restart.
+        if origin in phone_access.live_extra_origins():
+            return True
         # Tailscale Serve/Funnel fronts CCC on https:443, so the phone's
         # Origin is `https://<node>.ts.net` (no port) — which never matches
         # the auto-detected `http://<node>:PORT`. When trust_tailnet is on,
@@ -28422,7 +28509,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         # browser only sends this Origin for a page actually served from that
         # host, which means the request is on the (opted-into) tailnet.
         net = RUNTIME_NETWORK_INFO or {}
-        if net.get("trust_tailnet"):
+        if net.get("trust_tailnet") or phone_access.live_trust_tailnet():
             tailnet = net.get("tailnet") or {}
             host = self._origin_host(origin).lower()
             allowed_hosts = {(tailnet.get("hostname") or "").rstrip(".").lower()}
@@ -28430,11 +28517,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             allowed_hosts.discard("")
             if host and host in allowed_hosts:
                 return True
+            if host and self._looks_like_tailscale_origin(origin):
+                # The node's name may have changed since startup (renamed
+                # machine, cloned disk carrying an old hostname). Re-detect,
+                # rate-limited to one `tailscale status` per 30 s on misses.
+                fresh = phone_access.refreshed_tailnet_identity()
+                fresh_hosts = {(fresh.get("hostname") or "").lower()}
+                fresh_hosts.update((ip or "").lower() for ip in fresh.get("ips") or [])
+                fresh_hosts.discard("")
+                if host in fresh_hosts:
+                    return True
         error = "cross-origin POST rejected"
         if self._looks_like_tailscale_origin(origin):
             error += (
-                " — this looks like a Tailscale address; enable 'Trust this "
-                "tailnet' in the sidebar's Network access… settings to allow it"
+                " — this looks like a Tailscale address; run Settings > Phone "
+                "access… (or enable 'Trust this tailnet' under Network access…) "
+                "to allow it"
             )
         self.send_json({"error": error, "origin": origin}, 403)
         return False
@@ -28518,6 +28616,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if not self._check_same_origin():
             return
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if self._phone_pin_blocked(path):
+            return
         if path.startswith("/api/codex/client/"):
             from ccc_server.codex_client import codex_client_call
             action = path.rsplit("/", 1)[-1]
@@ -28567,6 +28667,56 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 return
             resp, status = handle_assistant_ask(data)
             self.send_json(resp, status)
+            return
+
+        if path == "/api/assistant/warm":
+            # Ask tab opened: boot the warm Mazkir process before the first
+            # question so it doesn't pay the CLI + MCP boot. Idempotent.
+            from ccc_server import mazkir as _mazkir
+            try:
+                self.send_json(_mazkir.warm_up())
+            except Exception as e:  # never let a warm-up hint 500 the tab
+                self.send_json({"ok": False, "error": str(e)[:200]}, 200)
+            return
+
+        if path.startswith("/api/assistant/actions/"):
+            # Mazkir's hands: `propose` is what the ccc-state MCP calls (no
+            # token back); `<id>/confirm` and `<id>/dismiss` need the token
+            # that only the /api/assistant/ask response to the browser carries.
+            # See ccc_server/assistant_actions.py.
+            from ccc_server import assistant_actions as _aa
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+            except (ValueError, OSError):
+                self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                data = {}
+            rest = path[len("/api/assistant/actions/"):].strip("/")
+            try:
+                if rest == "propose":
+                    self.send_json(_aa.store().propose(str(data.get("kind") or ""),
+                                                       data.get("params") or {},
+                                                       str(data.get("reason") or "")))
+                    return
+                aid, _, verb = rest.partition("/")
+                if verb == "confirm":
+                    base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                    item = _aa.store().confirm(aid, str(data.get("token") or ""),
+                                               _aa.make_executor(base))
+                    _log_activity("assistant", "ACTION", f"kind={item['kind']} id={aid} status={item['status']}")
+                    self.send_json({"ok": item["status"] == "done", "action": item})
+                    return
+                if verb == "dismiss":
+                    self.send_json({"ok": True, "action": _aa.store().dismiss(aid, str(data.get("token") or ""))})
+                    return
+                self.send_json({"ok": False, "error": "unknown action route"}, 404)
+            except PermissionError as e:
+                self.send_json({"ok": False, "error": str(e)}, 403)
+            except _aa.ActionError as e:
+                self.send_json({"ok": False, "error": str(e)}, 400)
             return
 
         if path == "/api/model-picker/record":
@@ -28892,6 +29042,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(_fleet_attribute_path(str(repo_path), target))
             else:
                 self.send_json({"ok": False, "error": "not_found"}, 404)
+            return
+
+        if path.startswith("/api/claude-auth/"):
+            # One-click Claude Code re-login (ccc_server/claude_auth.py).
+            # Same-origin enforced above. The one-time code in /submit is
+            # never logged: it goes straight to tmux over stdin.
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+            except (ValueError, OSError) as e:
+                self.send_json({"error": f"invalid JSON: {e}"}, 400)
+                return
+            payload, status = claude_auth_handle(path[len("/api/claude-auth/"):], data)
+            self.send_json(payload, status)
             return
 
         if path.startswith("/api/federation/"):
@@ -29329,6 +29494,47 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
             return
+        if path.startswith("/api/phone-access/"):
+            sub = path[len("/api/phone-access/"):]
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self.send_json({"ok": False, "error": "invalid JSON"}, 400)
+                return
+            if not isinstance(data, dict):
+                data = {}
+            if sub == "echo":
+                # Round-trip probe for the wizard's Test button. It already
+                # passed the same-origin check above, which is the point.
+                self.send_json({"ok": True, "nonce": str(data.get("nonce") or "")[:64]})
+                return
+            if sub == "unlock":
+                result = phone_access.unlock(str(data.get("pin") or ""))
+                if not result.get("ok"):
+                    code = 429 if result.get("error") == "rate_limited" else 401
+                    self.send_json(result, code)
+                    return
+                secure = (self.headers.get("X-Forwarded-Proto") == "https"
+                          or (self.headers.get("Host") or "").split(":")[0].endswith(".ts.net"))
+                cookie = (f"{phone_access.PHONE_PIN_COOKIE}={result['token']}; Path=/; "
+                          f"Max-Age={result['max_age']}; HttpOnly; SameSite=Strict"
+                          + ("; Secure" if secure else ""))
+                body = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Set-Cookie", cookie)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not self._phone_access_local_only():
+                return
+            payload, status = phone_access.phone_access_handle(sub, data)
+            self.send_json(payload, status)
+            return
         if path == "/api/network-config":
             # SECURITY: localhost-only — even if the user has allowlisted a
             # tailnet origin, that peer must NOT be able to expand its own
@@ -29347,6 +29553,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 if not ok:
                     self.send_json({"error": "network-config is localhost-only", "origin": origin}, 403)
                     return
+            if phone_access.is_remote_request(self.client_address[0], self.headers):
+                # No Origin, but proxied in from off-machine (tailscale serve,
+                # a tunnel): same localhost-only rule applies.
+                self.send_json({"error": "network-config is localhost-only", "origin": origin}, 403)
+                return
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
@@ -29368,10 +29579,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "allowed_origins": payload.get("allowed_origins") or [],
                 "trust_tailnet": bool(payload.get("trust_tailnet")),
             })
-            # bind_host can't change without rebinding the socket; restart
-            # in-place if anything network-shaped changed at all. Cheaper
-            # than diffing — restart is fast, ~1s.
-            self.send_json({"ok": True, "saved": saved, "restart": True})
+            # Origins and trust_tailnet are hot-reloaded by _check_same_origin
+            # (phone_access.live_extra_origins / live_trust_tailnet). Only a
+            # bind_host change needs the socket rebound, i.e. a restart.
+            env_pins_bind = bool(((RUNTIME_NETWORK_INFO or {}).get("env_overrides") or {}).get("bind_host"))
+            needs_restart = (not env_pins_bind) and ((saved.get("bind_host") or "127.0.0.1") != BIND_HOST)
+            self.send_json({"ok": True, "saved": saved, "restart": needs_restart})
+            if not needs_restart:
+                return
             try:
                 self.wfile.flush()
             except Exception:
@@ -38390,6 +38605,16 @@ _adopt_ccc_module("fleet")
 _adopt_ccc_module("fleet_reco")
 
 _adopt_ccc_module("fleet_jobs")
+_adopt_ccc_module("claude_auth")
+# Phone access (ccc_server/phone_access.py) is imported as a namespace, not
+# adopted: its short names (enable, overview, load_state...) would collide
+# with other adopted modules. Reloaded on re-import for fresh caches, like
+# _adopt_ccc_module.
+if "ccc_server.phone_access" in sys.modules:
+    import importlib as _pa_importlib
+    phone_access = _pa_importlib.reload(sys.modules["ccc_server.phone_access"])
+else:
+    from ccc_server import phone_access
 
 def main():
     # State files, logs and transcripts hold secrets: create everything owner-only.
@@ -38419,6 +38644,9 @@ def main():
     if not 1 <= port <= 65535:
         print(f"Invalid --port value: {port} (must be 1-65535)", file=sys.stderr)
         raise SystemExit(2)
+    # Publish the port actually served: code that reads PORT at call time
+    # (Phone access points `tailscale serve` at it) must see `--port`.
+    globals()["PORT"] = port
     _raise_open_file_limit()
     migrate_state_dir()
     _install_python_stack_dump_handler()
