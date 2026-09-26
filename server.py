@@ -29553,6 +29553,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 if not ok:
                     self.send_json({"error": "network-config is localhost-only", "origin": origin}, 403)
                     return
+            if phone_access.is_remote_request(self.client_address[0], self.headers):
+                # No Origin, but proxied in from off-machine (tailscale serve,
+                # a tunnel): same localhost-only rule applies.
+                self.send_json({"error": "network-config is localhost-only", "origin": origin}, 403)
+                return
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
