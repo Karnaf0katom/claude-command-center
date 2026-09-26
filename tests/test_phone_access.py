@@ -209,3 +209,32 @@ def test_state_origin_feeds_live_allowlist(state, monkeypatch):
     assert pa.live_extra_origins() == []
     state.write_text(json.dumps({"serve": {"origin": "https://laptop.example-tailnet.ts.net:10000"}}))
     assert pa.live_extra_origins() == ["https://laptop.example-tailnet.ts.net:10000"]
+
+
+def test_rebinding_style_host_on_loopback_is_remote():
+    assert pa.is_remote_request("127.0.0.1", {"Host": "evil.example.com"})
+    assert not pa.is_remote_request("::1", {"Host": "[::1]:8090"})
+    assert not pa.is_remote_request("127.0.0.1", {"Host": "localhost:8090"})
+
+
+def test_concurrent_pin_guesses_cannot_outrun_the_limit(state):
+    import threading
+    pa.set_pin("482913")
+    results = []
+
+    def guess():
+        results.append(pa.unlock("bad-guess").get("error"))
+    ts = [threading.Thread(target=guess) for _ in range(30)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert results.count("wrong_pin") <= pa._PIN_MAX_FAILS_PER_MIN
+
+
+def test_enable_refuses_funnel_exposed_entry(state, monkeypatch):
+    monkeypatch.setattr(pa, "tailscale_status", lambda max_age_s=3.0: {
+        "installed": True, "running": True, "hostname": "n.ts.net", "ips": []})
+    monkeypatch.setattr(pa, "serve_status", lambda: {"ok": True, "funnel": ["n.ts.net:443"],
+        "occupied_ports": [443], "entries": [{"host": "n.ts.net", "https_port": 443,
+        "path": "/", "proxy": "http://127.0.0.1:8090", "target": "http://127.0.0.1:8090"}]})
+    r = pa.enable(8090)
+    assert r["ok"] is False and r["error"] == "funnel_on"
