@@ -10004,6 +10004,11 @@
   }
   .compact-run-card[data-stage="failed"] .compact-run-head,
   .compact-run-card[data-stage="failed"] .compact-run-glyph { color: var(--red, #f87171); }
+  .compact-run-card[data-stage="unconfirmed"] {
+    border-color: color-mix(in srgb, var(--amber, #fbbf24) 40%, var(--border) 60%);
+  }
+  .compact-run-card[data-stage="unconfirmed"] .compact-run-head,
+  .compact-run-card[data-stage="unconfirmed"] .compact-run-glyph { color: var(--amber, #fbbf24); }
   .compact-run-card.is-slow[data-stage="working"] {
     border-color: color-mix(in srgb, var(--amber, #fbbf24) 40%, var(--border) 60%);
   }

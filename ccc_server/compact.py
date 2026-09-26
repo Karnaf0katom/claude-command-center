@@ -858,9 +858,16 @@ def _compact_session_context_impl(session_id, *, terminal_app=None, _from_termin
                 _core._acp_session("devin", raw_id, create=True, cwd=cwd)
         result = _core._acp_prompt("devin", raw_id, "/compact")
         if not result.get("ok"):
-            queued = _core._queue_devin_steer(sid, "/compact")
-            queued.setdefault("engine", "devin")
-            return queued
+            # _queue_devin_steer returns a bool, not a result dict — calling
+            # .setdefault on it raised AttributeError and 500'd the request.
+            _core._queue_devin_steer(sid, "/compact")
+            return _compact_result({
+                "ok": True,
+                "queued": True,
+                "via": "devin-steer-queued",
+                "queued_reason": "Devin is busy; /compact runs when the turn ends.",
+                "engine": "devin",
+            })
         result = _compact_result(result)
         result.setdefault("engine", "devin")
         return result

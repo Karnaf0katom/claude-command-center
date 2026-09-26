@@ -13960,6 +13960,15 @@
       note = escapeHtml(run.error || 'The engine did not confirm the compaction.')
         + ' <span class="compact-run-quiet">Nothing was changed — your conversation is intact.</span>';
       extra = '<button type="button" class="compact-run-retry">Try /compact again</button>';
+    } else if (run.stage === 'unconfirmed') {
+      // CCC-1188: the engine's turn ended but it never reported a compaction.
+      // Not "failed" (it may have compacted without saying so) and not a
+      // spinner that runs forever — just the truth: we can't confirm it.
+      glyph = '?';
+      title = 'Compaction not confirmed';
+      note = escapeHtml(run.error || (engine + ' went idle without reporting a compaction.'))
+        + ' <span class="compact-run-quiet">Re-running <code>/compact</code> is safe.</span>';
+      extra = '<button type="button" class="compact-run-retry">Try /compact again</button>';
     } else if (run.stage === 'done') {
       glyph = '✓';
       title = 'Context compacted';
@@ -14016,7 +14025,7 @@
       +   '<span class="compact-run-title">' + title + '</span>'
       +   '<span class="compact-run-clock">' + escapeHtml(elapsed) + '</span>'
       + '</div>'
-      + (run.stage === 'failed' ? '' : _compactRunStepsHtml(run))
+      + (run.stage === 'failed' || run.stage === 'unconfirmed' ? '' : _compactRunStepsHtml(run))
       + bar
       + result
       + '<div class="compact-run-note">' + note + '</div>'
@@ -14072,6 +14081,7 @@
     if (!run.el || !run.el.isConnected) _compactRunMount();
     const elapsed = Date.now() - run.startedAt;
     if (elapsed >= _COMPACT_STALL_MS) run.slow = true;
+    if (_compactRunSettleAcpTurn(run, elapsed)) return;
     _compactRunPaint();
     // Active poll: pull the transcript every ~4s so the boundary that ends
     // this run is caught promptly instead of waiting on the slow list poll.
@@ -14082,15 +14092,72 @@
     }
   }
 
+  // COMPACT_ACP_SETTLE_START
+  // CCC-1188: Devin runs /compact inside an ordinary `devin acp` turn. It
+  // never returns a compacted status and writes no Claude-style boundary row,
+  // so nothing ever ended the card — it spun "Compacting context" forever,
+  // even when the turn had long finished (or never compacted at all). The ACP
+  // turn state on liveStatus is the honest end signal: once the turn has gone
+  // idle and stayed idle, settle the card. A new Devin context summary lands
+  // it on "done" first (see _compactRunAdoptDevinSummary); reaching here
+  // without one means we cannot confirm a compaction happened.
+  const _COMPACT_ACP_IDLE_SETTLE_MS = 10 * 1000;
+  const _COMPACT_ACP_NEVER_RAN_MS = 20 * 1000;
+  function _compactRunSettleAcpTurn(run, elapsed) {
+    if (!run || run.source !== 'devin-cli') return false;
+    if (typeof liveStatusMatchesOpenConv !== 'function' || !liveStatusMatchesOpenConv()) return false;
+    if (!liveStatus || liveStatus.kind !== 'acp') return false;
+    if (liveStatus.status === 'running') {
+      run.acpSawRunning = true;
+      run.acpIdleSince = 0;
+      return false;
+    }
+    if (!run.acpIdleSince) run.acpIdleSince = Date.now();
+    if (Date.now() - run.acpIdleSince < _COMPACT_ACP_IDLE_SETTLE_MS) return false;
+    if (!run.acpSawRunning && elapsed < _COMPACT_ACP_NEVER_RAN_MS) return false;
+    settleCompactRunUnconfirmed(run.sid, run.acpSawRunning
+      ? run.engineLabel + ' finished the /compact turn without writing a new context summary.'
+      : run.engineLabel + ' never started a turn for /compact.');
+    return true;
+  }
+  function settleCompactRunUnconfirmed(sid, reason) {
+    const run = sid ? _compactRunFor(sid) : _compactRun;
+    if (!run || (run.stage !== 'requested' && run.stage !== 'working')) return;
+    run.stage = 'unconfirmed';
+    run.slow = false;
+    run.error = String(reason || '');
+    run.endedAt = Date.now();
+    _stopCompactRunTimer();
+    _compactRunMount();
+    _compactRunPaint();
+  }
+  // A Devin compactor summary ("Context summary") written AFTER this run
+  // started is the proof the compaction ran. Older summaries re-render on
+  // every full rebuild, so the timestamp gate is what keeps them from
+  // completing a fresh run.
+  function _compactRunAdoptDevinSummary(ev) {
+    const run = _compactRun;
+    if (!run || run.source !== 'devin-cli' || !_compactRunIsForeground()) return;
+    if (run.stage !== 'requested' && run.stage !== 'working' && run.stage !== 'unconfirmed') return;
+    const ts = Date.parse(String((ev && ev.ts) || ''));
+    // ev.ts is second-precision; allow that truncation plus a little skew.
+    if (!Number.isFinite(ts) || ts < run.startedAt - 5000) return;
+    if (run.stage === 'unconfirmed') { run.stage = 'working'; run.error = ''; }
+    completeCompactRun(run.sid);
+  }
+  // COMPACT_ACP_SETTLE_END
+
   // Called synchronously on submit — BEFORE the fetch — so the card is on
   // screen in the same frame as the keystroke.
   function beginCompactRun(sid, source) {
     if (!sid) return null;
-    const engineLabel = _compactEngineLabel(source || (currentSession && currentSession.source));
+    const runSource = source || (currentSession && currentSession.source) || '';
+    const engineLabel = _compactEngineLabel(runSource);
     if (_compactRunActive() && _compactRun.sid === sid) return _compactRun;
     if (_compactRun && _compactRun.el && _compactRun.el.parentNode) _compactRun.el.remove();
     _compactRun = {
       sid,
+      source: runSource,
       engineLabel,
       stage: 'requested',
       startedAt: Date.now(),
@@ -60147,6 +60214,7 @@
                 + renderDevinSummaryBlock(_sumText)
                 + '</details>');
               hasNonTool = true;
+              if (_compactRun) _compactRunAdoptDevinSummary(ev);
             }
           } else if (b.kind === 'plan') {
             // ACP plan snapshot (kimi TodoList): compact todo card.
