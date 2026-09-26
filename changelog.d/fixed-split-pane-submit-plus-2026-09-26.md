@@ -1,0 +1,1 @@
+- Submit+ (phone mode) and Send-queue buttons now work in the second pane of split view.

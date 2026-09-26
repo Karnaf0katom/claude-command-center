@@ -11301,6 +11301,9 @@
 
   async function submitPlus(paneId) {
     paneId = paneId || activePaneId();
+    // Activate the pane before arming the read below: _armPhoneModeRead keys
+    // off currentSession, which follows the active pane.
+    setActivePaneById(paneId);
     const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId}"]`);
     const $input = (_paneEl && _paneEl.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]')) || $convInput;
     if (!$input) return;
@@ -42654,6 +42657,23 @@
       sendBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         sendToTerminal(paneId);
+      });
+    }
+    // Submit+ (phone mode) and Send-queue are bound by id on p1 only; the
+    // clone keeps the buttons but not the listeners, so they did nothing in
+    // split view (CCC-1192).
+    const submitPlusBtn = clone.querySelector('.submit-plus-btn');
+    if (submitPlusBtn) {
+      submitPlusBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        submitPlus(paneId);
+      });
+    }
+    const sendQueueBtn = clone.querySelector('.send-queue-btn');
+    if (sendQueueBtn) {
+      sendQueueBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        sendToTerminal(paneId, 'send_queue');
       });
     }
     if (steerBtn) {
