@@ -59,3 +59,15 @@ test('rail log exposes one control that toggles every visible entry',()=>{
  const render=app.slice(app.indexOf('  function _renderRailLogPane()'),app.indexOf('  async function refreshRailLogPane()'));
  assert.match(render,/if \(!events\.length\) \{[^}]*_syncRailLogToggleAll\(\);/);
 });
+test('CCC-1189: inject rows lead with the text, then from -> to', ()=>{
+ const h=helpers();
+ const p=h._readableLogPresentation(event('INJECT','session=3084fe5f-e761-4691-9cb4-e3a26626a8fc mode=send source=composer idem=inject:x wt_origin=False via=acp-prompt queued=True text="this is me sshing"','inject'));
+ assert.equal(p.headline,'→ “this is me sshing”');
+ assert.equal(p.origin,'From Dashboard composer → to 6626a8fc · queued');
+ const html=h._readableLogGroupHtml(h._readableLogGroups([event('INJECT','session=abc source=api text="hi <b>"','inject')])[0],false);
+ assert.ok(html.includes('From API → to abc'));
+ assert.ok(html.includes('“hi &lt;b&gt;”'));
+ const rej=h._readableLogPresentation(event('INJECT_REJECT','session=s1 source=wt code=busy error="nope" text="x"','inject'));
+ assert.equal(rej.level,'error');
+ assert.match(rej.origin,/From WatchTower → to s1 · rejected/);
+});

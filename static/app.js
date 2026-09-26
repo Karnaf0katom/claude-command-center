@@ -61498,6 +61498,24 @@
     return date.toDateString() === new Date().toDateString() ? time
       : date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' · ' + time;
   }
+  // CCC-1189: an inject row leads with WHAT was sent, then says who sent it
+  // and to which session — "Message injection requested" said none of that.
+  const _INJECT_SOURCE_LABELS = {
+    composer: 'Dashboard composer', api: 'API', wt: 'WatchTower',
+    announced_from: 'Another session', ask: 'Ask', 'fleet-ping': 'Fleet ping',
+    'archive-bulk': 'Archive bulk send', 'annotate-queue-approved': 'Annotation queue',
+  };
+  function _readableInjectParts(metadata, detail) {
+    const field = (name) => (metadata.match(new RegExp('(?:^|\\s)' + name + '=([^\\s]+)')) || [])[1] || '';
+    const textMatch = detail.match(/(?:^|\s)text="([\s\S]*)"\s*$/) || detail.match(/(?:^|\s)text=([\s\S]*)$/);
+    const text = textMatch ? textMatch[1] : '';
+    const source = field('source');
+    const from = _INJECT_SOURCE_LABELS[source]
+      || (/^group-chat/.test(source) ? 'Group chat'
+        : source ? source.replace(/[-_]/g, ' ').replace(/^./, ch => ch.toUpperCase()) : 'Unknown');
+    const session = field('session');
+    return { text, from, to: session ? session.slice(-8) : '?', queued: field('queued') === 'True' };
+  }
   function _readableLogPresentation(ev) {
     const verb = String(ev.verb || '').toUpperCase();
     const category = String(ev.category || '');
@@ -61509,6 +61527,7 @@
       : ['TIMEOUT', 'LATE', 'BLOCKED', 'SHARED_STATE_BLOCK', 'SHARED_ST', 'CCC-PEER-'].includes(verb) ? 'warning'
       : ['SPAWN', 'DELIVERED', 'COMPLETE', 'COMPLETED', 'SUCCESS', 'RESOLVED'].includes(verb) ? 'success' : 'info';
     let headline = verb.replace(/[-_]/g, ' ').toLowerCase().replace(/^./, ch => ch.toUpperCase()) || 'Activity';
+    let origin = '';
     if (verb === 'TIMEOUT') {
       const wait = (detail.match(/no reply within ([\d.]+s)/) || [])[1];
       headline = subject + ' timed out' + (wait ? ' after ' + wait : '');
@@ -61518,7 +61537,13 @@
     } else if (verb === 'TITLED') {
       const title = (detail.match(/(?:^|\s)title=(.*)/) || [])[1];
       headline = title ? 'Session named “' + title + '”' : 'Session title updated';
-    } else if (verb === 'INJECT') headline = 'Message injection requested';
+    } else if (verb === 'INJECT' || verb === 'INJECT_REJECT') {
+      const inj = _readableInjectParts(metadata, detail);
+      headline = (verb === 'INJECT_REJECT' ? '✕ ' : '→ ')
+        + (inj.text ? '“' + inj.text + '”' : '(empty message)');
+      origin = 'From ' + inj.from + ' → to ' + inj.to
+        + (verb === 'INJECT_REJECT' ? ' · rejected' : inj.queued ? ' · queued' : '');
+    }
     else if (verb === 'SPAWN') headline = 'Agent started';
     else if (verb === 'KILL' && /(?:^|\s)source=spawn_idle_ttl(?:\s|$)/.test(metadata)) {
       const idleHours = (metadata.match(/(?:^|\s)idle_hours=([^\s]+)/) || [])[1];
@@ -61553,7 +61578,7 @@
     // Only known repeated RPC diagnostics share a key despite differing ids
     // or durations. Unknown failures group only when their exact text matches.
     const key = JSON.stringify([category, verb, method && ['TIMEOUT', 'LATE'].includes(verb) ? method : detail]);
-    return { level, headline, key, verb, category };
+    return { level, headline, key, verb, category, origin };
   }
   function _readableLogGroups(events) {
     const groups = [];
@@ -61587,7 +61612,8 @@
       + '<time class="activity-log-time" title="' + escapeAttr(_activityLogTimestampLocal(latest.ts)) + '">' + escapeHtml(_readableLogTime(latest.ts)) + '</time>'
       + (group.events.length > 1 ? '<span class="activity-log-repeat" title="Expand to see every occurrence">×' + group.events.length + '</span>' : '')
       + '</span><span class="activity-log-headline">' + escapeHtml(p.headline) + '</span>'
-      + '<span class="activity-log-origin">' + escapeHtml(p.category || 'Activity') + ' · ' + escapeHtml(p.verb) + '<span class="activity-log-disclosure">Details ▾</span></span></summary>'
+      + '<span class="activity-log-origin"' + (p.origin ? ' title="' + escapeAttr((p.category || 'Activity') + ' · ' + p.verb) + '"' : '') + '>'
+      + escapeHtml(p.origin || ((p.category || 'Activity') + ' · ' + p.verb)) + '<span class="activity-log-disclosure">Details ▾</span></span></summary>'
       + '<div class="activity-log-occurrences">' + group.events.map(ev => '<div class="activity-log-occurrence">'
         + '<div class="activity-log-occurrence-time">' + escapeHtml(_activityLogTimestampLocal(ev.ts)) + '</div>'
         + '<pre class="activity-log-raw">' + escapeHtml(ev.detail || '(No additional details)') + '</pre></div>').join('') + '</div></details>';

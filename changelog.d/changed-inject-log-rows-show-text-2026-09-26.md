@@ -1,0 +1,1 @@
+- Activity log inject rows now lead with the message text (`→ "…"`) and say who sent it and to which session (`From Dashboard composer → to 1a2b3c4d`), instead of a generic "Message injection requested". (CCC-1189)
