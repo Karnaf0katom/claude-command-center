@@ -445,6 +445,13 @@ def enable(local_port: int | None = None) -> dict:
         return {"ok": False, "error": "no_free_port", "plan": plan,
                 "detail": "Every candidate HTTPS port already serves something else. "
                           "Free one with `tailscale serve status`."}
+    funnel_keys = {str(k).lower() for k in before.get("funnel") or []}
+    if plan["action"] == "reuse" and any(
+            k.endswith(f":{plan['https_port']}") for k in funnel_keys):
+        return {"ok": False, "error": "funnel_on", "plan": plan,
+                "detail": "Tailscale Funnel is ON for this CCC's serve entry, which would "
+                          "expose it to the public internet. Run `tailscale funnel "
+                          f"--https={plan['https_port']} off` first, then retry."}
     created_by = "existing"
     if plan["action"] == "create":
         rc, out, err = _run_tailscale(
@@ -565,6 +572,10 @@ def unlock(pin: str) -> dict:
         if len(_pin_fail_times) >= _PIN_MAX_FAILS_PER_MIN:
             return {"ok": False, "error": "rate_limited",
                     "detail": "Too many wrong PINs. Wait a minute."}
+        # Reserve the attempt BEFORE the slow PBKDF2 check: otherwise a burst of
+        # concurrent guesses all pass the limit check before any failure is
+        # recorded. The slot is released on success.
+        _pin_fail_times.append(now)
     rec = load_state().get("pin") or {}
     if not rec.get("hash"):
         return {"ok": False, "error": "no_pin"}
@@ -574,9 +585,12 @@ def unlock(pin: str) -> dict:
     except (ValueError, TypeError):
         return {"ok": False, "error": "no_pin"}
     if not hmac.compare_digest(_hash_pin((pin or "").strip(), salt, iterations), rec["hash"]):
-        with _lock:
-            _pin_fail_times.append(now)
         return {"ok": False, "error": "wrong_pin"}
+    with _lock:
+        try:
+            _pin_fail_times.remove(now)
+        except ValueError:
+            pass
     token = secrets.token_urlsafe(32)
     digest = hashlib.sha256(token.encode()).hexdigest()
 
@@ -612,8 +626,13 @@ def is_remote_request(client_ip: str, headers) -> bool:
     for name in _FORWARD_HEADERS:
         if headers.get(name):
             return True
-    host = (headers.get("Host") or "").lower()
-    return host.split(":", 1)[0].endswith(".ts.net")
+    host = (headers.get("Host") or "").strip().lower()
+    if not host:
+        return False
+    # A genuinely local caller addresses CCC by a loopback name. Anything else
+    # arriving over loopback is a proxy or a DNS-rebinding page, not this user.
+    hostname = host[1:host.index("]")] if host.startswith("[") and "]" in host else host.split(":", 1)[0]
+    return hostname not in ("localhost", "127.0.0.1", "::1")
 
 
 # Paths a locked-out phone may reach: the unlock page/endpoint and the echo

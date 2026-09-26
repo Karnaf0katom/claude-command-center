@@ -49,6 +49,13 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+  // Values below can come from a paired peer: only render a well-formed https
+  // URL as a link and only an svg made of rect/path as the QR.
+  function safeHttps(u) { return /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/?$/.test(String(u || '')) ? String(u) : ''; }
+  function safeSvg(s) {
+    s = String(s || '');
+    return /^<svg [^<>]*>(<rect [^<>]*\/>)(<path [^<>]*\/>)<\/svg>$/.test(s) ? s : '';
+  }
   function link(href, text) {
     return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer">' + esc(text) + '</a>';
   }
@@ -177,7 +184,7 @@
     }
     const login = (st.tailscale && st.tailscale.login_name) || '';
     return '<div class="ccc-phone-step"><h4>' + dot(null) + '3. Open it on your phone</h4>'
-      + '<div class="ccc-phone-qr">' + (st.qr_svg || '')
+      + '<div class="ccc-phone-qr">' + safeSvg(st.qr_svg)
       + '<ol><li>Install Tailscale on your phone: ' + link(LINKS.ios, 'iPhone') + ' / ' + link(LINKS.android, 'Android') + '.</li>'
       + '<li>Sign in with the same account' + (login ? ' (<strong>' + esc(login) + '</strong>)' : '') + ' and switch the VPN on.</li>'
       + '<li>Scan this code with the camera, or open the link below.</li>'
@@ -358,7 +365,7 @@
       else if (!ts.installed) state = '<span class="state err">Tailscale not installed</span>';
       else if (!ts.running) state = '<span class="state err">Tailscale not connected</span>';
       else state = '<span class="state">off</span>';
-      const url = n.enabled && n.url ? '<a class="url" href="' + esc(n.url) + '" target="_blank" rel="noopener noreferrer">' + esc(n.url) + '</a>' : '<span class="url"></span>';
+      const url = n.enabled && safeHttps(n.url) ? '<a class="url" href="' + esc(n.url) + '" target="_blank" rel="noopener noreferrer">' + esc(n.url) + '</a>' : '<span class="url"></span>';
       return '<div class="fleet-phone-node"><span class="name">' + esc(name) + (n.self ? ' <span class="fleet-self-marker">self</span>' : '') + '</span>'
         + state + url
         + '<button type="button" data-phone-node="' + esc(n.self ? '' : n.node_id) + '" data-phone-name="' + esc(name) + '">' + (n.enabled ? 'Details…' : 'Set up…') + '</button></div>';
