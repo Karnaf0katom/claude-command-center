@@ -128,6 +128,8 @@ Each worker reads its queue's shared learnings file before it starts and writes 
 
 The whole fleet on your phone — monitor sessions, answer agents, and steer from anywhere on your trusted network. Loopback by default, never the open internet.
 
+**Settings > Phone access…** sets it up in about a minute over Tailscale: one button, a QR code, a live test. See [`docs/phone-access.md`](docs/phone-access.md).
+
 </td>
 <td width="50%" align="center">
   <img src="docs/images/feature-wall/mobile.gif" alt="CCC session list and transcript on a phone screen" width="46%" />
@@ -893,6 +895,8 @@ For more depth: [`docs/architecture.md`](docs/architecture.md),
 | `CCC_BIND_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to expose on the LAN. **No auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_ALLOWED_ORIGIN` | *(empty)* | Comma-separated origins (e.g. `http://my-mac.tailnet.ts.net:8090`) added to the same-origin POST allowlist. Use with `CCC_BIND_HOST=0.0.0.0` to reach the UI from another device on a trusted network (Tailscale / VPN). **No auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_TRUST_TAILNET` | *(off)* | When set (`1`/`true`/`yes`/`on`), CCC shells out to `tailscale status --json` at startup and adds the local node's MagicDNS hostname + Tailscale IPs to the allowlist automatically. Same trust caveat as `CCC_ALLOWED_ORIGIN`. |
+| `CCC_TAILSCALE_BIN` | *(auto)* | Path to the `tailscale` CLI used by Phone access. Auto-detected from `PATH`, Homebrew and the Mac app bundle. |
+| `CCC_PHONE_ACCESS_FILE` | `~/.claude/command-center/phone-access.json` | Where Phone access records its serve entry and PIN hash. |
 | `CCC_TITLE_STRIP` | *(empty)* | Comma-separated prefixes to strip from GitHub issue titles (e.g. `ACME,FOO` strips `[ACME ...]` and `[FOO ...]`) |
 | `CCC_SPAWN_IDLE_TTL_HOURS` | `3` | Hours of total inactivity (spawn log, stdin FIFO, and session transcript all quiet, no running tool) before a CCC-spawned persistent headless worker is retired with a graceful SIGTERM. Their FIFO stdin means finished workers never exit on their own; retired sessions stay resumable. Set `0` to disable the sweep. |
 | `CCC_ORG_PATTERNS` | *(empty)* | Multi-tenant org-tagger. Format: `Label1:pat1a\|pat1b;Label2:pat2`. Each issue body is scanned and tagged with the first matching label so the UI can group backlog by org. |

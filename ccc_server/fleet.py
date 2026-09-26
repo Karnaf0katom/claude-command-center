@@ -138,6 +138,7 @@ def _federation_sessions_inventory(limit=200):
             "timestamp": r.get("timestamp") or r.get("mtime"),
             "model": r.get("model"),
             "parent_session_id": r.get("parent_session_id"),
+            "claude_auth_failed": bool(r.get("claude_auth_failed")),
         })
     return {
         "ok": True,
@@ -356,6 +357,19 @@ _FEDERATION_ROUTE_ACTIONS = {
     "group_chat_create": ("POST", "/api/coordinate", True),
     "fleet_step": ("POST", "/api/fleet/step", True),
     "attribute": ("POST", "/api/fleet/attribute", False),
+    # One-click Claude Code re-login on the node that lost it. submit is
+    # deduped so a retried envelope never pastes the one-time code twice.
+    "claude_auth_status": ("POST", "/api/claude-auth/status", False),
+    "claude_auth_start": ("POST", "/api/claude-auth/start", False),
+    "claude_auth_submit": ("POST", "/api/claude-auth/submit", True),
+    "claude_auth_cancel": ("POST", "/api/claude-auth/cancel", False),
+    "claude_auth_nudge": ("POST", "/api/claude-auth/nudge", True),
+    # Phone access (ccc_server/phone_access.py): the Fleet page shows and
+    # sets up each node's tailnet phone URL on that node's own loopback.
+    "phone_access_status": ("POST", "/api/phone-access/status", False),
+    "phone_access_enable": ("POST", "/api/phone-access/enable", True),
+    "phone_access_disable": ("POST", "/api/phone-access/disable", True),
+    "phone_access_test": ("POST", "/api/phone-access/test", False),
 }
 
 
@@ -412,6 +426,14 @@ def _federation_execute_route(envelope):
                                   "this node"}, 404
             args["repo_path"] = mapped
     timeout = 60.0
+    if action.startswith("phone_access_"):
+        # Same as claude_auth: the pairing secret authorised this call.
+        args = {**args, "via_route": True}
+    if action.startswith("claude_auth_"):
+        # The pairing secret authorised this call; don't also demand the
+        # peer's own Settings preview toggle (see claude_auth_handle).
+        args = {**args, "via_route": True}
+        timeout = 240.0 if action == "claude_auth_submit" else 90.0
     if action == "ask":
         try:
             timeout = min(630.0, max(30.0, float(args.get("timeout_ms") or 30000) / 1000.0 + 30.0))
