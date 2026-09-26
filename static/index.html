@@ -2858,6 +2858,16 @@
               </div>
             </div>
 
+            <div class="settings-row" id="phoneAccessRow" hidden data-keywords="phone access mobile iphone android tailscale serve qr remote">
+              <div class="settings-row-main">
+                <div class="settings-row-label">Phone access</div>
+                <div class="settings-row-desc">Open this dashboard on your phone over Tailscale: one-click setup, QR code, and a round-trip test.</div>
+              </div>
+              <div class="settings-row-control">
+                <button type="button" class="settings-action-btn" id="phoneAccessBtn">Set up…</button>
+              </div>
+            </div>
+
             <div class="settings-row" data-keywords="nodes peers pair federation ssh loopback">
               <div class="settings-row-main">
                 <div class="settings-row-label">Nodes &amp; peers</div>
@@ -3455,6 +3465,7 @@
 })();
 </script>
 <script src="/static/claude-reauth.js"></script>
+<script src="/static/phone-access.js"></script>
 <script src="/static/q2-worker-idle.js"></script>
 <script src="/static/wt-log-bursts.js"></script>
 <script src="/static/ticket-prose.js"></script>

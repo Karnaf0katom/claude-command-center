@@ -75384,6 +75384,12 @@
     closeSettingsModal();
     networkOpen();
   });
+  // Phone access wizard (static/phone-access.js, preview flag phone_access).
+  const $phoneAccessBtn = document.getElementById('phoneAccessBtn');
+  if ($phoneAccessBtn) $phoneAccessBtn.addEventListener('click', () => {
+    closeSettingsModal();
+    if (window.cccPhoneAccess) window.cccPhoneAccess.open();
+  });
   if ($networkBackdrop) $networkBackdrop.addEventListener('click', networkClose);
   if ($networkCancelBtn) $networkCancelBtn.addEventListener('click', networkClose);
   if ($networkSaveBtn) $networkSaveBtn.addEventListener('click', networkSave);
@@ -79738,6 +79744,8 @@
     refreshSpawnEngineValue();
     refreshEngineUpdateStatus();
     refreshByokSettings();
+    const $phoneRow = document.getElementById('phoneAccessRow');
+    if ($phoneRow) $phoneRow.hidden = !ff('phone_access');
     setActiveSettingsRailSection(_settingsCurrentSection || 'appearance', { scroll: false });
     setTimeout(() => { if ($settingsSearchInput) $settingsSearchInput.focus(); }, 0);
   }

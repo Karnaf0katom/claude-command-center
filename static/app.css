@@ -26075,6 +26075,7 @@ body.status-pos-right.status-rail-collapsed .conv-pane.has-status-rail.has-new-s
    affordances per row (setting / action / launcher) — never mixed.
    No per-row borders (kimi-web look: the section hairline does the
    grouping); compact 38px minimum row height. */
+.settings-row[hidden] { display: none; }
 .settings-row {
   display: flex; align-items: center; gap: 16px;
   min-height: 38px;
