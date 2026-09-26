@@ -73523,6 +73523,187 @@
     });
   }
 
+  // Public installs have no WatchTower queue wired to CCC, so a queued
+  // annotation would never reach the maintainer. There the overlay offers a
+  // pre-filled GitHub issue instead (APP_CONFIG.annotate_target === 'github').
+  // A new-issue URL cannot carry an attachment, so the screenshot rides the
+  // clipboard: one ⌘V in the issue body uploads it.
+  const ANN_GITHUB_ISSUES_URL = 'https://github.com/amirfish1/claude-command-center/issues/new';
+
+  function annAnnotateTarget() {
+    const t = APP_CONFIG && APP_CONFIG.annotate_target;
+    return t === 'github' ? 'github' : 'queue';
+  }
+
+  // Strip home-directory prefixes so a public issue never leaks a username
+  // or local layout (/Users/<name>/… → ~/…).
+  function annScrubLocalPaths(text) {
+    return String(text || '').replace(/(?:\/Users|\/home)\/[^\/\s]+\//g, '~/');
+  }
+
+  function annGithubIssueTitle(ann) {
+    const first = annScrubLocalPaths((ann && ann.note) || '').split('\n')[0].trim();
+    return first.length > 80 ? first.slice(0, 79) + '…' : (first || 'Annotation from CCC');
+  }
+
+  function annGithubIssueBody(ann, version, hasShot) {
+    const el = (ann && ann.element) || {};
+    const selector = el.selector || (ann && ann.selector) || '';
+    let page = '';
+    try { page = new URL((ann && ann.url) || '', window.location.origin).pathname; } catch (_) {}
+    const caps = (APP_CONFIG && APP_CONFIG.capabilities) || {};
+    const env = ['CCC ' + (version || 'unknown'), caps.platform || navigator.platform || '',
+      (typeof isCccMacApp === 'function' && isCccMacApp()) ? 'Mac app' : 'browser']
+      .filter(Boolean).join(' · ');
+    const pasteKey = /Mac/i.test(navigator.platform || '') ? '⌘V' : 'Ctrl+V';
+    const lines = [
+      annScrubLocalPaths(((ann && ann.note) || '').slice(0, 2000)),
+      '',
+      '**Where**',
+      page ? '- Page: `' + page + '`' : '',
+      selector ? '- Element: `' + String(selector).slice(0, 200).replace(/`/g, "'") + '`' : '',
+      '- ' + env,
+    ].filter((line, i) => line !== '' || i === 1);
+    if (hasShot) {
+      lines.push('', '**Screenshot**', '_The screenshot is on your clipboard. Click here and press ' + pasteKey + ' to attach it, then delete this line._');
+    }
+    return lines.join('\n');
+  }
+
+  // Resolve the annotation screenshot as a PNG blob (the only image type
+  // every Clipboard API implementation accepts).
+  async function annScreenshotPngBlob(src) {
+    const res = await fetch(src, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    if (blob.type === 'image/png') return blob;
+    const bmp = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas');
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    canvas.getContext('2d').drawImage(bmp, 0, 0);
+    return await new Promise((resolve, reject) => canvas.toBlob(
+      b => (b ? resolve(b) : reject(new Error('PNG conversion failed'))), 'image/png'));
+  }
+
+  function annOpenExternalUrl(url) {
+    if (typeof isCccMacApp === 'function' && isCccMacApp()) {
+      // The app's web view can't sign in to GitHub; hand off to the default
+      // browser, where the user already is.
+      return fetch('/api/open-browser', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url }),
+      }).then(r => r.json()).then(d => !!(d && d.ok)).catch(() => false);
+    }
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return Promise.resolve(true);
+  }
+
+  function annShowGithubReport(ann) {
+    const existing = document.getElementById('annUxPreviewModal');
+    if (existing) existing.remove();
+    const hasShot = !!(ann && ann.screenshot_path);
+    const shotSrc = hasShot ? ('/api/pasted-image?path=' + encodeURIComponent(ann.screenshot_path)) : '';
+    // Fetch the PNG now so the click handler can hand the clipboard a
+    // ready blob instead of racing the user gesture against a download.
+    const shotBlob = hasShot ? annScreenshotPngBlob(shotSrc) : null;
+    if (shotBlob) shotBlob.catch(() => {});
+    const modal = document.createElement('div');
+    modal.id = 'annUxPreviewModal';
+    modal.className = 'ann-ux-preview-modal';
+    modal.innerHTML =
+      '<div class="ann-ux-preview-card">' +
+        '<div class="ann-ux-preview-title">Report this on GitHub</div>' +
+        '<div class="ann-ux-preview-label">This opens a new issue on the public CCC repo. Nothing is posted until you press Submit there.</div>' +
+        '<div class="ann-ux-preview-shot">' +
+          (hasShot
+            ? '<span class="ann-ux-ok">✓ Screenshot will be copied to your clipboard</span>'
+              + '<img class="ann-ux-preview-thumb" src="' + shotSrc + '" alt="Annotation screenshot">'
+            : '<span class="ann-ux-warn">No screenshot captured</span>') +
+        '</div>' +
+        '<div class="ann-ux-preview-label">Title</div>' +
+        '<input type="text" class="ann-gh-title" spellcheck="true">' +
+        '<div class="ann-ux-preview-label">Body (edit anything you don\'t want public)</div>' +
+        '<textarea class="ann-ux-preview-text" rows="12" spellcheck="true"></textarea>' +
+        '<div class="ann-gh-status" hidden></div>' +
+        '<div class="ann-ux-preview-actions">' +
+          '<button type="button" class="ann-btn" data-gh-cancel>Cancel</button>' +
+          '<button type="button" class="ann-btn ann-primary" data-gh-open>' +
+            (hasShot ? 'Copy screenshot & open GitHub' : 'Open GitHub') +
+          '</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    const titleEl = modal.querySelector('.ann-gh-title');
+    const bodyEl = modal.querySelector('.ann-ux-preview-text');
+    const statusEl = modal.querySelector('.ann-gh-status');
+    const openBtn = modal.querySelector('[data-gh-open]');
+    titleEl.value = annGithubIssueTitle(ann);
+    bodyEl.value = annGithubIssueBody(ann, '', hasShot);
+    fetch('/api/version', { cache: 'no-store' }).then(r => r.json()).then(d => {
+      // Fill in the version only if the user hasn't started editing.
+      if (d && d.version && bodyEl.value === annGithubIssueBody(ann, '', hasShot)) {
+        bodyEl.value = annGithubIssueBody(ann, d.version, hasShot);
+      }
+    }).catch(() => {});
+    const close = () => { modal.remove(); document.removeEventListener('keydown', onKey, true); };
+    const onKey = (e) => { if (isImeKey(e)) return; if (e.key === 'Escape') { e.preventDefault(); close(); } };
+    document.addEventListener('keydown', onKey, true);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    modal.querySelector('[data-gh-cancel]').addEventListener('click', close);
+    openBtn.addEventListener('click', async () => {
+      openBtn.disabled = true;
+      let copied = false;
+      if (shotBlob && navigator.clipboard && typeof navigator.clipboard.write === 'function'
+          && typeof ClipboardItem === 'function') {
+        try {
+          // Pass the promise straight in: Safari/WebKit only honours a
+          // clipboard write started synchronously inside the click.
+          // Bounded: an unfocused or headless page can leave the write
+          // pending forever, and that must not block opening the issue.
+          await Promise.race([
+            navigator.clipboard.write([new ClipboardItem({ 'image/png': shotBlob })]),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 3000)),
+          ]);
+          copied = true;
+        } catch (_) {}
+      }
+      const params = new URLSearchParams({ title: titleEl.value.trim() || 'Annotation from CCC', body: bodyEl.value });
+      const opened = await annOpenExternalUrl(ANN_GITHUB_ISSUES_URL + '?' + params.toString());
+      if (!opened) {
+        statusEl.textContent = 'Could not open the browser. Copy the text above and file it at github.com/amirfish1/claude-command-center/issues.';
+        statusEl.hidden = false;
+        openBtn.disabled = false;
+        return;
+      }
+      if (!hasShot || copied) {
+        close();
+        showOpToast(copied
+          ? 'Screenshot copied. Paste it into the GitHub issue body.'
+          : 'GitHub issue opened', 'success');
+        return;
+      }
+      // Clipboard refused the image: keep the dialog open with a way to get
+      // the file into the issue by hand.
+      statusEl.innerHTML = 'Your browser blocked copying the screenshot. '
+        + '<a href="' + shotSrc + '" download="ccc-annotation.png">Download it</a> '
+        + 'and drag the file into the issue.';
+      statusEl.hidden = false;
+      openBtn.textContent = 'Done';
+      openBtn.disabled = false;
+      openBtn.onclick = close;
+    });
+    setTimeout(() => titleEl.focus(), 0);
+  }
+
   async function annOpenUxFixesQueue(ann, closeFn, _errEl, textOverride) {
     if (!ann) return;
     // Require an actionable anchor before sending. A note alone leaves the
@@ -73641,8 +73822,10 @@
         // CCC-179: split the single "Add to UX fixes queue" into two — a 1-click
         // "Queue" that enqueues the note as-is, and "Queue + edit" that opens the
         // pre-submit preview to tweak the prompt first (the prior flow).
-        '<button type="button" class="ann-btn ann-queue-btn" data-ann-ux-queue title="Edit the prompt before adding to the UX-fixes queue">Queue + edit</button>' +
-        '<button type="button" class="ann-btn ann-primary ann-queue-btn" data-ann-ux-queue-now title="Add this annotation to the UX-fixes queue immediately, no edit">Queue</button>' +
+        (annAnnotateTarget() === 'github'
+          ? '<button type="button" class="ann-btn ann-primary" data-ann-github title="Open a pre-filled issue on the CCC GitHub repo, with the screenshot on your clipboard">Report on GitHub</button>'
+          : '<button type="button" class="ann-btn ann-queue-btn" data-ann-ux-queue title="Edit the prompt before adding to the UX-fixes queue">Queue + edit</button>' +
+            '<button type="button" class="ann-btn ann-primary ann-queue-btn" data-ann-ux-queue-now title="Add this annotation to the UX-fixes queue immediately, no edit">Queue</button>') +
         // CCC-171: the standalone "Save" button was redundant — both action
         // buttons above already persist the annotation first (persistAnnotation),
         // and ⌘/Ctrl+Enter still saves a note-only annotation for agent context.
@@ -73815,6 +73998,21 @@
         // already persisted; the overlay can close, the preview is its own modal.
         annStop();
         annShowUxFixesPreview(ann, (editedText) => annOpenUxFixesQueue(ann, null, errEl, editedText));
+      });
+    }
+    const githubBtn = editor.querySelector('[data-ann-github]');
+    if (githubBtn) {
+      githubBtn.addEventListener('click', async () => {
+        githubBtn.disabled = true;
+        githubBtn.textContent = 'Saving…';
+        const ann = await persistAnnotation('Saving…');
+        if (!ann) {
+          githubBtn.disabled = false;
+          githubBtn.textContent = 'Report on GitHub';
+          return;
+        }
+        annStop();
+        annShowGithubReport(ann);
       });
     }
     if (uxQueueNowBtn) {
@@ -76307,6 +76505,55 @@
     updateNewSessionCwdNotice();
   }
 
+  // CCC-1187: a New Session aimed at a folder that doesn't exist offers to
+  // create it (the same /api/project/create path the New-project card uses)
+  // and then starts the session there, instead of only failing.
+  async function spawnCwdIsMissing(path) {
+    const wanted = normalizeSpawnCwdPath(path);
+    if (!wanted || spawnCwdKnownToExist(wanted)) return false;
+    if (spawnCwdMissing.has(wanted)) return true;
+    try {
+      const res = await fetch('/api/fs/list?path=' + encodeURIComponent(wanted), { cache: 'no-store' });
+      const d = await res.json();
+      return !!(d && d.ok === false && /^not a directory/.test(d.error || ''));
+    } catch (_) {
+      return false;  // can't tell: let the spawn itself report
+    }
+  }
+  function offerCreateMissingSpawnCwd(path, body) {
+    const target = normalizeSpawnCwdPath(path);
+    if (!target) return;
+    showOpToast('Folder doesn’t exist: ' + escapeHtml(target) + '. Create it and start the session there?', 'error', {
+      label: 'Create folder & start',
+      onClick: () => createMissingSpawnCwdAndSpawn(target, body),
+    });
+  }
+  async function createMissingSpawnCwdAndSpawn(target, body) {
+    try {
+      const res = await fetch('/api/project/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: target }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+      spawnCwdMissing.delete(target);
+      spawnCwdMissing.delete(data.path);
+      if (Array.isArray(data.repos)) repoListState.repos = data.repos;
+      populateSpawnCwdPicker();
+      setSpawnCwdInputValue(data.path);
+      showOpToast('Folder created: ' + escapeHtml(data.path), 'success');
+    } catch (err) {
+      showOpToast('Could not create folder: ' + escapeHtml((err && err.message) || 'unknown'), 'error');
+      return;
+    }
+    // Start the session only if the composer is still on New Session; the
+    // draft restored after the failure may have been edited since.
+    if (typeof currentConversation !== 'undefined' && currentConversation !== '__new__') return;
+    const text = ($convInput && $convInput.value.trim()) ? $convInput.value : body;
+    if (text && text.trim()) spawnFromInlineInput(text);
+  }
+
   // Check a restored cwd once per page load; drop it if it no longer exists.
   function verifySavedSpawnCwd(path) {
     if (!path || spawnCwdChecked.has(path) || spawnCwdKnownToExist(path)) return;
@@ -77926,6 +78173,13 @@
       }
       return;
     }
+    // Catch a missing folder BEFORE spawning: the draft is still in the box
+    // and nothing has been launched, so offering to create it is clean.
+    if (!knownRepo && await spawnCwdIsMissing(launchCwd)) {
+      forgetMissingSpawnCwd(launchCwd);
+      offerCreateMissingSpawnCwd(launchCwd, body);
+      return;
+    }
     const claudePrewarmPromise = engine === 'claude'
       ? requestClaudePrewarm()
       : Promise.resolve(null);
@@ -78044,9 +78298,8 @@
         if (missingCwd) forgetMissingSpawnCwd(launchCwd);
         restoreDraftAfterFailure();
         flashRed();
-        showOpToast(missingCwd
-          ? 'Spawn failed: folder no longer exists (' + launchCwd + '). Pick a folder and send again.'
-          : 'Spawn failed: ' + (data.error || 'HTTP ' + res.status), 'error');
+        if (missingCwd) offerCreateMissingSpawnCwd(launchCwd, body);
+        else showOpToast('Spawn failed: ' + (data.error || 'HTTP ' + res.status), 'error');
         console.error('[New session] spawn failed', data);
       }
     } catch (err) {
