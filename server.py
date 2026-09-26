@@ -25027,6 +25027,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if self._phone_pin_blocked(path):
+            return
         is_background = _is_background_api_read(
             path, self.headers.get("X-CCC-Background") == "1"
         )
@@ -27847,6 +27849,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             force = qs.get("force", ["0"])[0] in ("1", "true")
             self.send_json(_version_check(force=force))
+        elif path == "/phone-unlock":
+            self.send_html(phone_access.UNLOCK_PAGE)
+        elif path == "/api/phone-access/status":
+            # Phone access wizard state (ccc_server/phone_access.py), or a
+            # paired peer's with ?node_id=. Localhost-only: it reveals setup.
+            if not self._phone_access_local_only():
+                return
+            qs_pa = urllib.parse.parse_qs(parsed.query)
+            payload, status = phone_access.phone_access_handle("status", {
+                "node_id": (qs_pa.get("node_id") or [""])[0].strip()})
+            self.send_json(payload, status)
+        elif path == "/api/phone-access/nodes":
+            # Every node's phone URL + status for the Fleet page.
+            if not self._phone_access_local_only():
+                return
+            self.send_json(phone_access.nodes_overview())
         elif path == "/api/network-config":
             # What origins / bind host are trusted on this run, plus a live
             # snapshot of the tailnet so the UI can offer a "trust my
@@ -28412,6 +28430,43 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return ip in ipaddress.ip_network("100.64.0.0/10")
         return ip in ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
+    def _phone_pin_blocked(self, path):
+        """Phone access PIN gate. When a PIN is set, a request that arrived
+        from off this machine (tailscale serve, a tunnel, a non-loopback
+        bind) needs the session cookie minted by /api/phone-access/unlock.
+        Loopback is never gated. Sends the refusal itself; True = refused."""
+        try:
+            blocked = phone_access.pin_gate_blocks(path, self.client_address[0], self.headers)
+        except Exception:
+            # Fail closed for off-machine callers only.
+            blocked = phone_access.is_remote_request(self.client_address[0], self.headers)
+        if not blocked:
+            return False
+        if self.command == "GET" and not path.startswith("/api/"):
+            body = phone_access.UNLOCK_PAGE.encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_json({"error": "pin_required", "pin_required": True}, 401)
+        return True
+
+    def _phone_access_local_only(self):
+        """Phone-access admin endpoints (turn on/off, PIN, test) are for this
+        machine only: a tailnet peer that is allowed to use CCC must still not
+        be able to reconfigure how it is exposed. Sends the 403 itself."""
+        origin = (self.headers.get("Origin") or "").strip()
+        loopback_origin = not origin or re.match(
+            r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$", origin)
+        if loopback_origin and not phone_access.is_remote_request(
+                self.client_address[0], self.headers):
+            return True
+        self.send_json({"error": "phone-access settings are localhost-only", "origin": origin}, 403)
+        return False
+
     def _check_same_origin(self):
         """SECURITY: reject cross-origin POSTs (CSRF defence).
 
@@ -28441,6 +28496,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return True
         if origin in ALLOWED_ORIGINS:
             return True
+        # Hot-reloaded layers: network.json allowed_origins and the origin
+        # Phone access recorded when it set up `tailscale serve`. Re-read on
+        # mtime change, so trusting a new origin never needs a restart.
+        if origin in phone_access.live_extra_origins():
+            return True
         # Tailscale Serve/Funnel fronts CCC on https:443, so the phone's
         # Origin is `https://<node>.ts.net` (no port) — which never matches
         # the auto-detected `http://<node>:PORT`. When trust_tailnet is on,
@@ -28449,7 +28509,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         # browser only sends this Origin for a page actually served from that
         # host, which means the request is on the (opted-into) tailnet.
         net = RUNTIME_NETWORK_INFO or {}
-        if net.get("trust_tailnet"):
+        if net.get("trust_tailnet") or phone_access.live_trust_tailnet():
             tailnet = net.get("tailnet") or {}
             host = self._origin_host(origin).lower()
             allowed_hosts = {(tailnet.get("hostname") or "").rstrip(".").lower()}
@@ -28457,11 +28517,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             allowed_hosts.discard("")
             if host and host in allowed_hosts:
                 return True
+            if host and self._looks_like_tailscale_origin(origin):
+                # The node's name may have changed since startup (renamed
+                # machine, cloned disk carrying an old hostname). Re-detect,
+                # rate-limited to one `tailscale status` per 30 s on misses.
+                fresh = phone_access.refreshed_tailnet_identity()
+                fresh_hosts = {(fresh.get("hostname") or "").lower()}
+                fresh_hosts.update((ip or "").lower() for ip in fresh.get("ips") or [])
+                fresh_hosts.discard("")
+                if host in fresh_hosts:
+                    return True
         error = "cross-origin POST rejected"
         if self._looks_like_tailscale_origin(origin):
             error += (
-                " — this looks like a Tailscale address; enable 'Trust this "
-                "tailnet' in the sidebar's Network access… settings to allow it"
+                " — this looks like a Tailscale address; run Settings > Phone "
+                "access… (or enable 'Trust this tailnet' under Network access…) "
+                "to allow it"
             )
         self.send_json({"error": error, "origin": origin}, 403)
         return False
@@ -28545,6 +28616,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if not self._check_same_origin():
             return
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if self._phone_pin_blocked(path):
+            return
         if path.startswith("/api/codex/client/"):
             from ccc_server.codex_client import codex_client_call
             action = path.rsplit("/", 1)[-1]
@@ -29421,6 +29494,47 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
             return
+        if path.startswith("/api/phone-access/"):
+            sub = path[len("/api/phone-access/"):]
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                self.send_json({"ok": False, "error": "invalid JSON"}, 400)
+                return
+            if not isinstance(data, dict):
+                data = {}
+            if sub == "echo":
+                # Round-trip probe for the wizard's Test button. It already
+                # passed the same-origin check above, which is the point.
+                self.send_json({"ok": True, "nonce": str(data.get("nonce") or "")[:64]})
+                return
+            if sub == "unlock":
+                result = phone_access.unlock(str(data.get("pin") or ""))
+                if not result.get("ok"):
+                    code = 429 if result.get("error") == "rate_limited" else 401
+                    self.send_json(result, code)
+                    return
+                secure = (self.headers.get("X-Forwarded-Proto") == "https"
+                          or (self.headers.get("Host") or "").split(":")[0].endswith(".ts.net"))
+                cookie = (f"{phone_access.PHONE_PIN_COOKIE}={result['token']}; Path=/; "
+                          f"Max-Age={result['max_age']}; HttpOnly; SameSite=Strict"
+                          + ("; Secure" if secure else ""))
+                body = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Set-Cookie", cookie)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not self._phone_access_local_only():
+                return
+            payload, status = phone_access.phone_access_handle(sub, data)
+            self.send_json(payload, status)
+            return
         if path == "/api/network-config":
             # SECURITY: localhost-only — even if the user has allowlisted a
             # tailnet origin, that peer must NOT be able to expand its own
@@ -29460,10 +29574,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "allowed_origins": payload.get("allowed_origins") or [],
                 "trust_tailnet": bool(payload.get("trust_tailnet")),
             })
-            # bind_host can't change without rebinding the socket; restart
-            # in-place if anything network-shaped changed at all. Cheaper
-            # than diffing — restart is fast, ~1s.
-            self.send_json({"ok": True, "saved": saved, "restart": True})
+            # Origins and trust_tailnet are hot-reloaded by _check_same_origin
+            # (phone_access.live_extra_origins / live_trust_tailnet). Only a
+            # bind_host change needs the socket rebound, i.e. a restart.
+            env_pins_bind = bool(((RUNTIME_NETWORK_INFO or {}).get("env_overrides") or {}).get("bind_host"))
+            needs_restart = (not env_pins_bind) and ((saved.get("bind_host") or "127.0.0.1") != BIND_HOST)
+            self.send_json({"ok": True, "saved": saved, "restart": needs_restart})
+            if not needs_restart:
+                return
             try:
                 self.wfile.flush()
             except Exception:
@@ -38483,6 +38601,15 @@ _adopt_ccc_module("fleet_reco")
 
 _adopt_ccc_module("fleet_jobs")
 _adopt_ccc_module("claude_auth")
+# Phone access (ccc_server/phone_access.py) is imported as a namespace, not
+# adopted: its short names (enable, overview, load_state...) would collide
+# with other adopted modules. Reloaded on re-import for fresh caches, like
+# _adopt_ccc_module.
+if "ccc_server.phone_access" in sys.modules:
+    import importlib as _pa_importlib
+    phone_access = _pa_importlib.reload(sys.modules["ccc_server.phone_access"])
+else:
+    from ccc_server import phone_access
 
 def main():
     # State files, logs and transcripts hold secrets: create everything owner-only.

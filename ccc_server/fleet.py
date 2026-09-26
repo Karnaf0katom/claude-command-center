@@ -364,6 +364,12 @@ _FEDERATION_ROUTE_ACTIONS = {
     "claude_auth_submit": ("POST", "/api/claude-auth/submit", True),
     "claude_auth_cancel": ("POST", "/api/claude-auth/cancel", False),
     "claude_auth_nudge": ("POST", "/api/claude-auth/nudge", True),
+    # Phone access (ccc_server/phone_access.py): the Fleet page shows and
+    # sets up each node's tailnet phone URL on that node's own loopback.
+    "phone_access_status": ("POST", "/api/phone-access/status", False),
+    "phone_access_enable": ("POST", "/api/phone-access/enable", True),
+    "phone_access_disable": ("POST", "/api/phone-access/disable", True),
+    "phone_access_test": ("POST", "/api/phone-access/test", False),
 }
 
 
@@ -420,6 +426,9 @@ def _federation_execute_route(envelope):
                                   "this node"}, 404
             args["repo_path"] = mapped
     timeout = 60.0
+    if action.startswith("phone_access_"):
+        # Same as claude_auth: the pairing secret authorised this call.
+        args = {**args, "via_route": True}
     if action.startswith("claude_auth_"):
         # The pairing secret authorised this call; don't also demand the
         # peer's own Settings preview toggle (see claude_auth_handle).

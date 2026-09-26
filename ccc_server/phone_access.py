@@ -50,10 +50,16 @@ from ccc_server import core as _core
 from ccc_server import qrcode as _qrcode
 
 PHONE_ACCESS_FLAG = "phone_access"
-PHONE_ACCESS_FILE = Path(
-    os.environ.get("CCC_PHONE_ACCESS_FILE")
-    or (_core.COMMAND_CENTER_STATE_DIR / "phone-access.json")
-)
+
+
+def state_file() -> Path:
+    """phone-access.json, resolved per call so tests can point the state dir
+    (or CCC_PHONE_ACCESS_FILE) somewhere private."""
+    override = os.environ.get("CCC_PHONE_ACCESS_FILE")
+    if override:
+        return Path(override)
+    return Path(_core.COMMAND_CENTER_STATE_DIR) / "phone-access.json"
+
 PHONE_PIN_COOKIE = "ccc_phone_session"
 # Tried in order when CCC has no serve entry yet. 443 gives the cleanest URL;
 # the rest are the HTTPS ports Tailscale has always accepted, then a few more.
@@ -95,14 +101,15 @@ def _file_key(path: Path):
 
 def load_state() -> dict:
     """phone-access.json, cached by (mtime, size). Missing/corrupt -> {}."""
-    key = _file_key(PHONE_ACCESS_FILE)
+    path = state_file()
+    key = (str(path), _file_key(path))
     with _lock:
-        if key is not None and _state_cache["key"] == key:
+        if key[1] is not None and _state_cache["key"] == key:
             return dict(_state_cache["data"])
     data = {}
-    if key is not None:
+    if key[1] is not None:
         try:
-            raw = json.loads(PHONE_ACCESS_FILE.read_text())
+            raw = json.loads(path.read_text())
             if isinstance(raw, dict):
                 data = raw
         except (OSError, ValueError):
@@ -114,8 +121,9 @@ def load_state() -> dict:
 
 
 def save_state(data: dict) -> None:
-    PHONE_ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = PHONE_ACCESS_FILE.with_suffix(".json.tmp")
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
@@ -123,7 +131,7 @@ def save_state(data: dict) -> None:
         os.chmod(tmp, 0o600)  # holds the PIN hash and session hashes
     except OSError:
         pass
-    tmp.replace(PHONE_ACCESS_FILE)
+    tmp.replace(path)
     with _lock:
         _state_cache["key"] = None
 
@@ -149,12 +157,12 @@ def phone_origin(hostname: str, https_port: int) -> str:
 def _network_file_live():
     """(allowed_origins, trust_tailnet) from network.json, re-read on change."""
     path = Path(_core.NETWORK_CONFIG_FILE)
-    key = _file_key(path)
+    key = (str(path), _file_key(path))
     with _lock:
         if _network_cache["key"] == key:
             return list(_network_cache["origins"]), _network_cache["trust_tailnet"]
     origins, trust = [], False
-    if key is not None:
+    if key[1] is not None:
         try:
             cfg = _core._load_network_config()
             origins = list(cfg.get("allowed_origins") or [])

@@ -174,6 +174,13 @@ _PREVIEW_FLAGS = {
                 "\"Failed to authenticate\" / \"Not logged in\", and run the "
                 "Claude Code login on that node (local or paired peer) from the browser.",
     },
+    "phone_access": {
+        "default": False,
+        "label": "Phone access",
+        "desc": "Show Settings > Phone access…: expose this CCC on your Tailscale "
+                "tailnet with one click (tailscale serve), trust that address "
+                "without a restart, and show a QR code to open it on your phone.",
+    },
     # "flow_v2": {
     #     "default": False,
     #     "label": "Flow v2 canvas",
