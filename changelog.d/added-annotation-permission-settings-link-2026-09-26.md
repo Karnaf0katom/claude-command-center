@@ -1,0 +1,1 @@
+- Annotation toasts that report a missing macOS Accessibility or Screen Recording permission now include a button that opens the matching System Settings pane.

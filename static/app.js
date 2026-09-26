@@ -30187,6 +30187,25 @@
     return withRepoPath(payload, rowRepoPath(row));
   }
 
+  // A screenshot-capture warning that names a missing macOS privacy
+  // permission gets a one-click "Open settings" button instead of making the
+  // user walk System Settings by hand. The x-apple.systempreferences: URL is
+  // handed to the OS by browsers and by the Mac app's navigation delegate.
+  // Accessibility wins when both are named: it's the first failure (window
+  // bounds), and the Screen Recording hint is the downstream fallback's.
+  function annPermissionSettingsAction(warn) {
+    const text = String(warn || '');
+    let pane = '', label = '';
+    if (/Accessibility/.test(text)) {
+      pane = 'Privacy_Accessibility'; label = 'Open Accessibility settings';
+    } else if (/Screen Recording/.test(text)) {
+      pane = 'Privacy_ScreenCapture'; label = 'Open Screen Recording settings';
+    }
+    if (!pane) return undefined;
+    const url = 'x-apple.systempreferences:com.apple.preference.security?' + pane;
+    return { label, onClick: () => { window.location.href = url; } };
+  }
+
   function showOpToast(msg, kind, action) {
     if (!debugModeEnabled() && kind === 'info') return;
     const toast = document.createElement('div');
@@ -74080,7 +74099,8 @@
         } else {
           const warn = (data && data.screenshot_warning)
             || 'No screenshot. Use the Screen button for a manual region capture, or paste an image before queueing.';
-          showOpToast('Annotation saved (no screenshot): ' + warn, 'error');
+          showOpToast('Annotation saved (no screenshot): ' + warn, 'error',
+            annPermissionSettingsAction(warn));
         }
         return savedAnnotation;
       } catch (err) {
