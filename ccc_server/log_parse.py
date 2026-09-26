@@ -72,7 +72,7 @@ _CWD_RELOCATION_CACHE_FILE = (
 )
 _CWD_RELOCATION_CACHE_SCHEMA = 1
 # Per-request budget for _relocate_missing_session_cwd's filesystem walks.
-# A single cold scan of a worktree-heavy repo (e.g. BYM+Finie with 128 missing
+# A single cold scan of a worktree-heavy repo (e.g. one with 128 missing
 # cwds) used to burn ~40s here. Once exceeded, individual relocations return
 # None and the row falls back to the recorded cwd; subsequent requests pick
 # up the slack as the cache fills.
@@ -166,6 +166,20 @@ _PREVIEW_FLAGS = {
         "default": False,
         "label": "$ cost in bottom bar",
         "desc": "Show the API list-price cost pill next to token usage in the input bar.",
+    },
+    "claude_reauth": {
+        "default": False,
+        "label": "Claude re-authenticate",
+        "desc": "Show a Re-authenticate action when a session or node fails with "
+                "\"Failed to authenticate\" / \"Not logged in\", and run the "
+                "Claude Code login on that node (local or paired peer) from the browser.",
+    },
+    "phone_access": {
+        "default": False,
+        "label": "Phone access",
+        "desc": "Show Settings > Phone access…: expose this CCC on your Tailscale "
+                "tailnet with one click (tailscale serve), trust that address "
+                "without a restart, and show a QR code to open it on your phone.",
     },
     # "flow_v2": {
     #     "default": False,
@@ -569,7 +583,7 @@ def get_model_picker_picks() -> list:
 
 # {path: {mtime, custom_title, last_prompt, agent_name, ...}}
 # Persistent across restarts via _CONV_META_CACHE_FILE — without it, every
-# repo switch on a project with hundreds of large JSONLs (BYM+Finie has
+# repo switch on a project with hundreds of large JSONLs (one real repo has
 # 1.8 GB of conversation logs) re-walks every file and the API stalls
 # for a minute or more. The cache is mtime-keyed so admin writes
 # (custom-title, /rename) correctly invalidate the entry; bump
@@ -1057,6 +1071,10 @@ def _extract_tail_meta(path):
         "pending_tool": None,     # tool awaiting approval (last assistant had tool_use, no result yet)
         "pending_file": None,     # file path from pending tool
         "last_assistant_text": None,  # last text block from an assistant message (the "outcome")
+        # Claude Code's synthetic API-error turn (isApiErrorMessage) carries a
+        # machine-readable `error`, e.g. "authentication_failed". Cleared by the
+        # next real assistant turn. Drives the Re-authenticate row action.
+        "last_api_error": None,
         "model": None,
         "latest_input_tokens": 0,
         "peak_input_tokens": 0,
@@ -1292,6 +1310,10 @@ def _extract_tail_meta(path):
                         content = []
                     last_tool_name = None
                     last_tool_file = None
+                    if ev.get("isApiErrorMessage"):
+                        meta["last_api_error"] = str(ev.get("error") or "api_error")[:64]
+                    else:
+                        meta["last_api_error"] = None
                     # Capture last text block from this assistant turn as the "outcome"
                     for block in content:
                         if block.get("type") == "text":

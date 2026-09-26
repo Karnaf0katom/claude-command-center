@@ -105,6 +105,8 @@
 
     <div class="fleet-progress" id="fleetProgress"></div>
     <div class="fleet-health-strip" id="fleetHealthStrip"></div>
+    <!-- Each node's phone URL + status (static/phone-access.js, flag phone_access). -->
+    <div id="fleetPhoneAccess" hidden></div>
     <div class="upd-error" id="fleetError"></div>
     <div class="fleet-matrix" id="fleetMatrix"></div>
   </div>
@@ -130,6 +132,9 @@
     </div>
   </div>
 
+  <script src="/static/claude-reauth.js"></script>
+  <script src="/static/phone-access.js"></script>
   <script src="/static/fleet.js"></script>
+  <script>window.cccPhoneAccess.renderFleet(document.getElementById('fleetPhoneAccess'));</script>
 </body>
 </html>
