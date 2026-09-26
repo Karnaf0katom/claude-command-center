@@ -38644,6 +38644,9 @@ def main():
     if not 1 <= port <= 65535:
         print(f"Invalid --port value: {port} (must be 1-65535)", file=sys.stderr)
         raise SystemExit(2)
+    # Publish the port actually served: code that reads PORT at call time
+    # (Phone access points `tailscale serve` at it) must see `--port`.
+    globals()["PORT"] = port
     _raise_open_file_limit()
     migrate_state_dir()
     _install_python_stack_dump_handler()
