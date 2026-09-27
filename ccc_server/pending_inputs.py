@@ -5132,6 +5132,22 @@ def _force_restart_devin_session(sid):
             )
             action = "retired_spawn"
         else:
+            # The `devin acp` connection is shared by every Devin session;
+            # closing it would kill another session's running turn.
+            with _core._ACP_LOCK:
+                busy = [
+                    other for other, st in
+                    (_core._ACP_SESSION_STATE.get("devin") or {}).items()
+                    if isinstance(st, dict) and st.get("status") == "active"
+                ]
+            if busy:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"{len(busy)} other Devin session(s) are mid-turn on "
+                        "the shared connection; retry when they finish"
+                    ),
+                }
             with _core._ACP_LOCK:
                 conn = _core._ACP_CONNS.get("devin")
                 transport = (conn or {}).get("transport") if conn else None
