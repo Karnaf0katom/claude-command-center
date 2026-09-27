@@ -1,6 +1,10 @@
 ---
-globs: "static/app.js,static/app.css,static/index.html"
+paths:
+  - "static/app.js"
+  - "static/app.css"
+  - "static/index.html"
 ---
+
 # Flow workspace
 
 Flow is CCC's canvas-style workspace for arranging repos, objects, sessions,
