@@ -65,6 +65,12 @@ _sync_lock = threading.Lock()
 _last_sync_ts = 0.0
 _SYNC_TTL = 5.0  # seconds between directory scans
 
+# A cold-start (or any catch-up this large) parses too many transcripts to do
+# inline on a request thread -- see _start_background_sync().
+_BG_SYNC_THRESHOLD = int(os.environ.get("CCC_SESSION_FTS_SYNC_INLINE_MAX", "50"))
+_bg_sync_state_lock = threading.Lock()
+_bg_sync_running = False
+
 
 def _get_db_path() -> Path:
     env = os.environ.get("CCC_SESSION_FTS_DB")
@@ -394,7 +400,16 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
     if not force and (now - _last_sync_ts < _SYNC_TTL):
         return
 
-    with _sync_lock:
+    # Non-blocking acquire for regular (non-forced) callers: if a sync is
+    # already running -- most commonly the background warm/catch-up kicked
+    # off below -- a request just uses whatever is indexed so far instead of
+    # queueing up behind a multi-second (or cold-start, multi-minute) parse.
+    # `force=True` (explicit force_refresh, and the background worker's own
+    # call) still blocks for a fully deterministic result.
+    got = _sync_lock.acquire(blocking=force)
+    if not got:
+        return
+    try:
         if not force and (time.time() - _last_sync_ts < _SYNC_TTL):
             return
 
@@ -416,6 +431,15 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
 
         if not todo and not deleted_paths:
             _last_sync_ts = time.time()
+            return
+
+        # Cold start (or any large catch-up): don't block this request for
+        # tens of seconds parsing thousands of transcripts. Hand the full
+        # sync to a background thread and return with whatever is already
+        # indexed; is_indexing() tells recall() to say so.
+        if not force and len(todo) > _BG_SYNC_THRESHOLD:
+            _last_sync_ts = time.time()
+            _start_background_sync()
             return
 
         parsed_results = []
@@ -473,6 +497,53 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                 conn.execute("DELETE FROM file_cache WHERE path = ?", (p,))
 
         _last_sync_ts = time.time()
+    finally:
+        _sync_lock.release()
+
+
+def is_indexing() -> bool:
+    """True while a background cold-start/catch-up sync is in flight.
+
+    recall() surfaces this so a caller hitting a cold index gets an honest
+    'indexing: true' instead of silently-incomplete results.
+    """
+    return _bg_sync_running
+
+
+def _start_background_sync() -> None:
+    """Kick a full (blocking, force=True) sync on a background thread against
+    its own connection. Idempotent while already running. This is what turns
+    a 66s cold-start parse into a non-blocking warm-up: the request thread
+    returns immediately and future requests see is_indexing() until it's done.
+    """
+    global _bg_sync_running
+    with _bg_sync_state_lock:
+        if _bg_sync_running:
+            return
+        _bg_sync_running = True
+
+    def _worker() -> None:
+        global _bg_sync_running
+        try:
+            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            try:
+                _sync_index(conn2, force=True)
+            finally:
+                conn2.close()
+        except Exception:
+            pass
+        finally:
+            with _bg_sync_state_lock:
+                _bg_sync_running = False
+
+    threading.Thread(target=_worker, daemon=True, name="session-fts-warm").start()
+
+
+def warm_start() -> None:
+    """Call once at process/server start to begin warming the index in the
+    background before the first real request arrives, per CLAUDE.md's perf
+    gates (no O(all sessions) work inline on a user-facing path)."""
+    _start_background_sync()
 
 
 def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) -> list[dict]:
