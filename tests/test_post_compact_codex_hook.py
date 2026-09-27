@@ -149,6 +149,26 @@ def test_asks_keeps_last_three():
     assert state["asks"][-3:] == ["ask 2", "ask 3", "ask 4"]
 
 
+def test_continuation_origin_marker_is_captured_and_excluded_from_asks():
+    state = {"asks": [], "ticket_ref": "", "ticket_title": "", "continued_from": ""}
+    hook._scan_into(_jsonl([
+        _user_message(
+            "You are continuing a task from an earlier Codex session, "
+            "which ran long.\n\nOrigin session id: 93580c29-29f9-4ce3-8077-db00ea0a920f\n"
+            "Task: Continue the work from where it left off."
+        ),
+        _user_message("keep going on the relaunch"),
+    ]), state)
+    assert state["continued_from"] == "93580c29-29f9-4ce3-8077-db00ea0a920f"
+    assert state["asks"] == ["keep going on the relaunch"]
+
+
+def test_build_block_includes_continued_from_line():
+    from _reorient_shared import build_block
+    block = build_block(["do the thing"], "", "", "abc12345")
+    assert "Continued from: abc12345" in block
+
+
 def test_malformed_tool_output_json_is_skipped_not_raised():
     state = {"asks": [], "ticket_ref": "", "ticket_title": ""}
     hook._scan_into(
@@ -191,6 +211,35 @@ def test_prints_via_stdin(tmp_path):
     assert "Codex hook parity" in proc.stdout
     assert "ccc recall" in proc.stdout
     assert len(proc.stdout) <= hook.MAX_BLOCK_CHARS + 1  # trailing newline from print()
+
+
+def test_prints_continued_from_via_stdin(tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(_jsonl([
+        _user_message(
+            "You are continuing a task from an earlier session, which ran long.\n\n"
+            "Origin session id: 93580c29-29f9-4ce3-8077-db00ea0a920f\n"
+            "Task: Continue the work from where it left off."
+        ),
+        _user_message("finish the relaunch runbook"),
+    ]))
+    payload = json.dumps({
+        "hook_event_name": "PostCompact",
+        "session_id": "abc123",
+        "transcript_path": str(rollout),
+        "trigger": "auto",
+        "cwd": str(tmp_path),
+        "model": "gpt-5.6-sol",
+        "turn_id": "turn-1",
+    })
+
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=payload, capture_output=True, text=True, timeout=5,
+    )
+
+    assert proc.returncode == 0
+    assert "Continued from: 93580c29-29f9-4ce3-8077-db00ea0a920f" in proc.stdout
 
 
 def test_never_fails_the_turn_on_bad_input():

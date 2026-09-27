@@ -32,6 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ccc_server import lineage as _lineage
+from ccc_server import ship_graph as _sg
+
 # Query sanitization reuse from history_search
 try:
     from ccc_server.history_search import (
@@ -1722,6 +1725,11 @@ def search_sessions_enriched(
             "_source": source,
             "transcript_path": m.get("path") or "",
         })
-        if len(out) >= limit:
+        # MEMO-FIX-lineage: collapsing below can fold two of these `out` rows
+        # into one, so keep building past `limit` (bounded by `hits`, itself
+        # capped at limit*5/100 above) rather than an early break that could
+        # leave fewer than `limit` rows after collapsing.
+        if len(out) >= limit * 2:
             break
+    out = _lineage.collapse_chain_hits(out, _sg._get_connection())[:limit]
     return out

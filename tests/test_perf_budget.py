@@ -4085,12 +4085,16 @@ def _session_fts_perf_env(tmp_path, monkeypatch, n_docs=300):
     """MEMO-FIX-19 fixture: a warm session_fts corpus large enough that an
     O(corpus) regression on the two sidebar-search endpoints would show up as
     a real slowdown or a growing SQL call count, not just wrong results."""
-    from ccc_server import session_fts
+    from ccc_server import session_fts, ship_graph
 
     projects_dir = tmp_path / "projects"
     repo_dir = projects_dir / "repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    # search_sessions_enriched()'s lineage collapsing (MEMO-FIX-lineage) reads
+    # continuation_origin from ship_graph's own DB -- point it at an isolated
+    # file too, or it falls through to the real ~/.claude/command-center one.
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(tmp_path / "ship_graph.sqlite"))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex-empty"))
     monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
@@ -4099,10 +4103,12 @@ def _session_fts_perf_env(tmp_path, monkeypatch, n_docs=300):
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
-    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
-        session_fts._tls.conn.close()
-        session_fts._tls.conn = None
+    for mod in (session_fts, ship_graph):
+        if hasattr(mod._tls, "conn") and mod._tls.conn:
+            mod._tls.conn.close()
+            mod._tls.conn = None
     session_fts._last_sync_ts = 0.0
+    ship_graph._last_sync_ts = 0.0
 
     for i in range(n_docs):
         sid = f"perf-session-{i:05d}"
@@ -4194,6 +4200,34 @@ def test_search_sessions_enriched_keystroke_latency_is_bounded(tmp_path, monkeyp
     assert max(durations) < 0.5, (
         f"search_sessions_enriched took {max(durations):.3f}s against an 800-session "
         "corpus -- likely scanning per-hit instead of batching"
+    )
+
+
+def test_lineage_spawn_edges_cached_by_mtime_size(tmp_path, monkeypatch):
+    """MEMO-FIX-lineage: session-graph.json accumulates one entry per spawn
+    ever made (hundreds of KB on a machine with months of history) and
+    collapse_chain_hits() can run once per sidebar keystroke via
+    search_sessions_enriched() -- it must not re-parse the file on every
+    call, only when a spawn actually changes it (see lineage._spawn_edges_cache)."""
+    from ccc_server import lineage
+
+    lineage._spawn_edges_cache.update(path=None, mtime=None, size=None, parent_of={}, children_of={})
+    graph_path = str(tmp_path / "session-graph.json")
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"edges": [{
+            "parent": "orch-1", "child": "child-1", "source": "test",
+            "engine": "claude", "resumable": True, "name": "", "model": "",
+        }]}, f)
+
+    parse_calls = []
+    real_load = lineage.json.load
+    monkeypatch.setattr(lineage.json, "load", lambda fh: (parse_calls.append(1), real_load(fh))[1])
+
+    for _ in range(5):
+        assert lineage.spawn_parent_of("child-1", path=graph_path) == "orch-1"
+    assert len(parse_calls) == 1, (
+        f"session-graph.json was re-parsed {len(parse_calls)} times across 5 calls against an "
+        "unchanged file -- collapse_chain_hits()/spawn_parent_of() can run once per keystroke"
     )
 
 

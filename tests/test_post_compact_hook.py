@@ -113,6 +113,25 @@ def test_asks_skip_injected_notifications():
     assert state["ticket_ref"] == ""
 
 
+def test_continuation_origin_marker_is_captured_and_excluded_from_asks():
+    state = {"asks": [], "ticket_ref": "", "ticket_title": "", "continued_from": ""}
+    hook._scan_into(_jsonl([
+        _user_text(
+            "You are continuing a task from an earlier Claude Code session, "
+            "which ran long.\n\nOrigin session id: 93580c29-29f9-4ce3-8077-db00ea0a920f\n"
+            "Task: Continue the work from where it left off."
+        ),
+        _user_text("keep going on the relaunch"),
+    ]), state)
+    assert state["continued_from"] == "93580c29-29f9-4ce3-8077-db00ea0a920f"
+    assert state["asks"] == ["keep going on the relaunch"]
+
+
+def test_build_block_includes_continued_from_line():
+    block = hook._build_block(["do the thing"], "", "", "abc12345")
+    assert "Continued from: abc12345" in block
+
+
 def test_asks_keeps_true_last_three_including_repeats():
     """Head/tail windows never overlap (see main()'s size check), so a
     literal repeat ("continue" asked twice) must survive, not collapse."""
@@ -168,6 +187,27 @@ def test_prints_via_stdin(tmp_path):
     assert "Lean PostCompact hook" in proc.stdout
     assert "ccc recall" in proc.stdout
     assert len(proc.stdout) <= hook.MAX_BLOCK_CHARS + 1  # trailing newline from print()
+
+
+def test_prints_continued_from_via_stdin(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_jsonl([
+        _user_text(
+            "You are continuing a task from an earlier session, which ran long.\n\n"
+            "Origin session id: 93580c29-29f9-4ce3-8077-db00ea0a920f\n"
+            "Task: Continue the work from where it left off."
+        ),
+        _user_text("finish the relaunch runbook"),
+    ]))
+    payload = json.dumps({"session_id": "abc123", "transcript_path": str(transcript)})
+
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=payload, capture_output=True, text=True, timeout=5,
+    )
+
+    assert proc.returncode == 0
+    assert "Continued from: 93580c29-29f9-4ce3-8077-db00ea0a920f" in proc.stdout
 
 
 def test_never_fails_the_turn_on_bad_input():

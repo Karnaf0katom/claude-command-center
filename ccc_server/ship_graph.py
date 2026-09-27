@@ -70,6 +70,11 @@ TICKET_STOP = re.compile(r"^(UTF|SHA|ISO|RFC|CVE|HTTP|TLS|GPT|MD|X|UUID|AES|RSA|
 SCRATCH_RE = re.compile(r"(command-center-scratch|/private/var/|/tmp/|/var/folders/|scratch-|ccc-claude-midstream)", re.I)
 CODEX_SID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", re.I)
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+#-]*")
+# MEMO-FIX-lineage: "Continue in a new session" / auto-resume stamps this line
+# into the successor's first user turn. Mirrors engines.py's
+# _CONTINUATION_ORIGIN_RE -- duplicated (not imported) because ship_graph.py
+# stays stdlib-only and independent of the live server's engines module.
+CONTINUATION_ORIGIN_RE = re.compile(r"Origin session id: ([A-Za-z0-9][A-Za-z0-9_.-]{7,127})")
 
 STOPWORDS = frozenset("""
 a about above after again all also am an and any are as at be because been before being below
@@ -599,7 +604,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
             end_ts REAL,
             tickets TEXT,
             commits TEXT,
-            files TEXT
+            files TEXT,
+            continuation_origin TEXT
         );
 
         -- MEMO-FIX-21: every file a session wrote or read, as a normalized
@@ -617,6 +623,20 @@ def _init_db(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(commits)")}
     if "on_main" not in cols:
         conn.execute("ALTER TABLE commits ADD COLUMN on_main INTEGER DEFAULT 0")
+
+    sm_cols = {r[1] for r in conn.execute("PRAGMA table_info(session_meta)")}
+    if "continuation_origin" not in sm_cols:
+        conn.execute("ALTER TABLE session_meta ADD COLUMN continuation_origin TEXT DEFAULT ''")
+    # Column is guaranteed to exist above this line (fresh DB: created in the
+    # executescript above; existing DB: just ALTERed in) -- only now is it
+    # safe to index it. Creating this index inside the executescript above
+    # would break on a pre-existing session_meta table that predates the
+    # column, since CREATE INDEX IF NOT EXISTS still requires the column to
+    # exist to parse.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_meta_continuation_origin "
+        "ON session_meta(continuation_origin)"
+    )
 
     row_v = conn.execute("SELECT val FROM meta WHERE key = 'schema_v'").fetchone()
     if not row_v or row_v[0] != "2":
@@ -874,6 +894,8 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
     files = set()
     reads = set()
     ts0 = ts1 = None
+    continuation_origin = ""
+    first_user_seen = False
 
     if engine == "claude":
         try:
@@ -899,6 +921,11 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
                     if txt:
                         alltext.append(txt[:1000])
                     if t == "user":
+                        if not first_user_seen and not d.get("isMeta"):
+                            first_user_seen = True
+                            m_origin = CONTINUATION_ORIGIN_RE.search(txt or "")
+                            if m_origin:
+                                continuation_origin = m_origin.group(1).strip()
                         tb = _tool_blob(content)
                         if tb:
                             tools.append(tb[:2000])
@@ -945,6 +972,11 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
                         txt = _text_of(p.get("content"))
                         if txt:
                             alltext.append(txt[:1000])
+                        if not first_user_seen and p.get("role") == "user":
+                            first_user_seen = True
+                            m_origin = CONTINUATION_ORIGIN_RE.search(txt or "")
+                            if m_origin:
+                                continuation_origin = m_origin.group(1).strip()
                     elif t == "response_item" and pt in ("function_call_output", "custom_tool_call_output"):
                         out = p.get("output")
                         tb = out if isinstance(out, str) else _text_of(out)
@@ -980,6 +1012,7 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
         "tickets": tickets,
         "files": sorted(files)[:200],
         "file_ops": _file_ops(cwd, files, reads),
+        "continuation_origin": continuation_origin,
     }
 
 
@@ -1083,6 +1116,7 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
             json.dumps(r["tickets"]),
             json.dumps(r["commits"]),
             json.dumps(r["files"]),
+            r.get("continuation_origin") or "",
         ))
         trans_rows.append((path, sid, mt, sz, 1))
         reparsed_sids.append(sid)
@@ -1116,7 +1150,7 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
             conn.execute("DELETE FROM edges WHERE src = ? AND kind IN ('made', 'window', 'ref')", (sid,))
             conn.execute("DELETE FROM session_files WHERE sid = ?", (sid,))
         conn.executemany("INSERT OR REPLACE INTO transcripts VALUES (?,?,?,?,?)", trans_rows)
-        conn.executemany("INSERT OR REPLACE INTO session_meta VALUES (?,?,?,?,?,?,?,?)", session_rows)
+        conn.executemany("INSERT OR REPLACE INTO session_meta VALUES (?,?,?,?,?,?,?,?,?)", session_rows)
         conn.executemany("INSERT INTO edges VALUES (?,?,?,?)", edge_rows)
         conn.executemany("INSERT INTO session_files VALUES (?,?,?)", file_rows)
 
@@ -1142,6 +1176,48 @@ def _migrate_session_files(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute("UPDATE transcripts SET mtime = -1")
         conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('session_files_v', ?)", (SESSION_FILES_SCHEMA,))
+
+
+CONTINUATION_ORIGIN_SCHEMA = "1"
+
+
+def _continuation_origin_migration_pending(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("SELECT val FROM meta WHERE key = 'continuation_origin_v'").fetchone()
+    if row and row[0] == CONTINUATION_ORIGIN_SCHEMA:
+        return False
+    if not conn.execute("SELECT 1 FROM transcripts LIMIT 1").fetchone():
+        # Fresh DB: every transcript will be parsed with continuation_origin anyway.
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('continuation_origin_v', ?)",
+                         (CONTINUATION_ORIGIN_SCHEMA,))
+        return False
+    return True
+
+
+def _migrate_continuation_origin(conn: sqlite3.Connection) -> None:
+    """Invalidate the transcripts (mtime, size) gate so the sync that follows
+    re-parses every session and fills session_meta.continuation_origin."""
+    with conn:
+        conn.execute("UPDATE transcripts SET mtime = -1")
+        conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('continuation_origin_v', ?)",
+                     (CONTINUATION_ORIGIN_SCHEMA,))
+
+
+def continuation_origin_of(conn: sqlite3.Connection, sid: str) -> str:
+    """The session id `sid`'s transcript named as "Origin session id: X" in
+    its first user turn -- i.e. the ancestor it auto-resumed/continued from.
+    Empty string if `sid` is unknown or wasn't a continuation."""
+    row = conn.execute("SELECT continuation_origin FROM session_meta WHERE sid = ?", (sid,)).fetchone()
+    return (row[0] if row else "") or ""
+
+
+def continuation_children_of(conn: sqlite3.Connection, sid: str) -> list[str]:
+    """Sessions that named `sid` as their continuation origin, newest first."""
+    rows = conn.execute(
+        "SELECT sid FROM session_meta WHERE continuation_origin = ? ORDER BY start_ts DESC",
+        (sid,),
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def _count_pending_transcripts(conn: sqlite3.Connection, days: float) -> int:
@@ -1174,11 +1250,18 @@ def _sync_all(conn: sqlite3.Connection, force: bool = False) -> None:
 
         # MEMO-FIX-21: one-time re-parse so session_files covers transcripts
         # indexed before it existed. Background-only, like any cold catch-up.
-        if _session_files_migration_pending(conn):
+        # MEMO-FIX-lineage: same shape for continuation_origin -- both flags
+        # share the one re-parse pass rather than triggering two.
+        files_pending = _session_files_migration_pending(conn)
+        origin_pending = _continuation_origin_migration_pending(conn)
+        if files_pending or origin_pending:
             if not force:
                 _start_background_sync()
                 return
-            _migrate_session_files(conn)
+            if files_pending:
+                _migrate_session_files(conn)
+            if origin_pending:
+                _migrate_continuation_origin(conn)
 
         if not force:
             # MEMO-FIX-14: `_count_pending_transcripts()` calls

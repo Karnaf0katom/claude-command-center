@@ -32,6 +32,13 @@ INJECTED_PREFIXES = (
     "Another Claude session sent a message",
     "[SYSTEM NOTIFICATION",
 )
+# MEMO-FIX-lineage: "Continue in a new session" / usage-limit auto-resume
+# stamps this line into the successor's own first user turn (see
+# usage_limit.py's _usage_limit_retrieval_prompt and ccc_server/ship_graph.py's
+# CONTINUATION_ORIGIN_RE, which this mirrors). Since it always lands within
+# HEAD_BYTES of a continuation's transcript, the same bounded head scan that
+# already looks for a ticket ref picks it up for free.
+CONTINUATION_ORIGIN_RE = re.compile(r"Origin session id: ([A-Za-z0-9][A-Za-z0-9_.-]{7,127})")
 
 
 def read_chunk(path, size, from_end):
@@ -61,9 +68,18 @@ def records(text):
 def consider_ask(text, state):
     """Record one candidate user-ask string into `state["asks"]`, skipping
     empty/tag-wrapped/injected text, and update `state["ticket_ref"]` if the
-    text names a WatchTower ticket."""
+    text names a WatchTower ticket. Also updates `state["continued_from"]`
+    when the text carries an "Origin session id:" marker -- that marker is
+    synthetic (auto-resume tooling wrote it, not the user), so it's excluded
+    from `asks` the same way an injected queue notification would be."""
     t = re.sub(r"\s+", " ", text or "").strip()
-    if not t or t.startswith("<") or t.startswith(INJECTED_PREFIXES):
+    if not t:
+        return
+    m_origin = CONTINUATION_ORIGIN_RE.search(t)
+    if m_origin:
+        state["continued_from"] = m_origin.group(1).strip()
+        return
+    if t.startswith("<") or t.startswith(INJECTED_PREFIXES):
         return
     state["asks"].append(t)
     m = TICKET_REF_RE.search(t)
@@ -75,7 +91,7 @@ def scan_transcript(path, scan_into):
     """Bounded head+tail scan of `path`, calling `scan_into(text, state)` on
     each chunk in file order (so tail matches overwrite head matches).
     Returns the resulting state dict."""
-    state = {"asks": [], "ticket_ref": "", "ticket_title": ""}
+    state = {"asks": [], "ticket_ref": "", "ticket_title": "", "continued_from": ""}
     size = os.path.getsize(path)
     if size <= HEAD_BYTES + TAIL_BYTES:
         # Small enough to read once — a separate head+tail read would cover
@@ -98,8 +114,10 @@ def truncate(text, limit):
     return text[: limit - 1].rstrip() + "…"
 
 
-def build_block(asks, ticket_ref, ticket_title):
+def build_block(asks, ticket_ref, ticket_title, continued_from=""):
     lines = ["Re-orientation after compaction:"]
+    if continued_from:
+        lines.append(f"Continued from: {continued_from}")
     if ticket_ref:
         head = ticket_ref
         if ticket_title:

@@ -28329,6 +28329,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             from ccc_server.session_brief import brief as _memory_brief
             query = urllib.parse.unquote(path[len("/api/memory/brief/"):])
             self.send_json(_memory_brief(query))
+        elif re.match(r"^/api/memory/where/.+$", path):
+            # ccc_server/where_answer.py — "where are we?" across a session's
+            # whole lineage chain: one cached, read-only headless Sonnet call
+            # renders a plain-language status, a human action-item checklist,
+            # and a "Continue" button. Powers `ccc where <query|sid>`.
+            from ccc_server.where_answer import answer_where as _memory_where
+            query = urllib.parse.unquote(path[len("/api/memory/where/"):])
+            try:
+                self.send_json(_memory_where(query))
+            except RuntimeError as exc:
+                self.send_json({"found": True, "error": str(exc)}, 502)
         elif path == "/api/memory/decisions":
             # Heuristic decision-shaped filter over ship_graph.search_sessions()
             # — see ccc_server/memory_api.py. Powers `ccc decisions`. Stand-in

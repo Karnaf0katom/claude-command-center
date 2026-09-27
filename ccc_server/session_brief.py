@@ -29,6 +29,7 @@ import sys
 import time
 from pathlib import Path
 
+from ccc_server import lineage as _lineage
 from ccc_server import session_fts as _sfts
 from ccc_server import ship_graph as _sg
 
@@ -284,6 +285,7 @@ def brief(query: str) -> dict:
 
     roots = _sg.discover_repo_roots()
     repo_root = roots.get(meta.get("repo", ""), "")
+    lineage = _lineage.chain_summary(conn, sid)
 
     def _date(ts):
         return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
@@ -307,4 +309,7 @@ def brief(query: str) -> dict:
         "artifacts_outside_repos": _artifacts_outside_repos(meta.get("files") or [], roots),
         "resume_command": _resume_command(engine, sid, meta.get("cwd", "")),
         "indexing": _sfts.is_indexing() or _sg.is_indexing(),
+        "parent": lineage["parent"],
+        "latest": lineage["latest"],
+        "continuation_ancestors": lineage["continuation_ancestors"],
     }

@@ -132,6 +132,30 @@ def test_recall_unmatched_query_returns_empty_results(mock_memory_env):
     assert res["results"] == []
 
 
+def test_recall_collapses_continuation_chain_to_newest(mock_memory_env):
+    """MEMO-FIX-lineage: a session that continued from session-abc must not
+    show up as a second, separate row -- it collapses into one hit with
+    chain_collapsed pointing at the count folded in."""
+    _write_session(mock_memory_env["projects_dir"] / "widget-repo" / "session-abc-2.jsonl", [
+        {"type": "user", "cwd": str(mock_memory_env["repo_dir"]), "timestamp": "2026-09-21T10:00:00Z",
+         "message": {"role": "user", "content": (
+             "You are continuing a task from an earlier session.\n\n"
+             "Origin session id: session-abc\n"
+             "Task: keep adding confetti animation polish."
+         )}},
+        {"type": "assistant", "cwd": str(mock_memory_env["repo_dir"]), "timestamp": "2026-09-21T10:01:00Z",
+         "message": {"role": "assistant", "content": "Polished the confetti animation timing."}},
+    ])
+    res = memory_api.recall("confetti animation", limit=10)
+    sids = [r["session_id"] for r in res["results"]]
+    assert sids.count("session-abc") + sids.count("session-abc-2") == 1
+    survivor = next(r for r in res["results"]
+                     if r["session_id"] in ("session-abc", "session-abc-2"))
+    assert survivor["session_id"] == "session-abc-2"
+    assert survivor["chain_collapsed"] == 1
+    assert survivor["chain_collapsed_sids"] == ["session-abc"]
+
+
 def test_shipped_contract_passthrough_with_topic_echo(mock_memory_env):
     res = memory_api.shipped("confetti animation")
     assert res["topic"] == "confetti animation"

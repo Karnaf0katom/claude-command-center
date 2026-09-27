@@ -27,6 +27,7 @@ import pytest
 import server  # noqa: F401  (registers the core module gemini/cursor bind to)
 from ccc_server import cursor as ccc_cursor
 from ccc_server import session_fts
+from ccc_server import ship_graph
 
 
 @pytest.fixture
@@ -40,6 +41,10 @@ def fts_env(tmp_path, monkeypatch):
         d.mkdir(parents=True)
 
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    # search_sessions_enriched()'s lineage collapsing (MEMO-FIX-lineage) reads
+    # continuation_origin from ship_graph's own DB -- point it at an isolated
+    # file too, or it falls through to the real ~/.claude/command-center one.
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(tmp_path / "ship_graph.sqlite"))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
     monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(kimi_dir))
@@ -49,9 +54,10 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
 
-    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
-        session_fts._tls.conn.close()
-        session_fts._tls.conn = None
+    for mod in (session_fts, ship_graph):
+        if hasattr(mod._tls, "conn") and mod._tls.conn:
+            mod._tls.conn.close()
+            mod._tls.conn = None
     session_fts._last_sync_ts = 0.0
     session_fts._ollama_state["ts"] = 0.0
     session_fts._ollama_state["ok"] = False
@@ -59,6 +65,7 @@ def fts_env(tmp_path, monkeypatch):
     session_fts._vec_cache["vecs"] = []
     session_fts._bg_sync_running = False
     session_fts._backfill_running = False
+    ship_graph._last_sync_ts = 0.0
 
     return {
         "projects": projects_dir,

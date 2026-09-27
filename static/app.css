@@ -6587,6 +6587,20 @@
     margin: 0;
   }
   .conv-brief-chevron:hover { color: var(--text, #e6edf3); }
+  /* "Where are we?" trigger button (MEMO-FIX-where). */
+  .conv-where-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--border, #30363d);
+    border-radius: 4px;
+    color: var(--text-dim, #8b949e);
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 1.4;
+    padding: 1px 5px;
+    margin: 0 0 0 4px;
+  }
+  .conv-where-btn:hover { color: var(--text, #e6edf3); border-color: var(--text-dim, #8b949e); }
   /* Hover extras wrapper. display:contents by default → transparent in every
      list/mode, so layout is identical to before everywhere except where we
      explicitly show it in the current-sessions panel above. */
@@ -29321,6 +29335,44 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   white-space: nowrap;
   flex: 0 0 auto;
 }
+
+/* "Where are we?" overlay body (MEMO-FIX-where): server-rendered safe HTML
+   from ccc_server/where_answer.py, shown inside the #cccWhereOverlay panel. */
+.where-status {
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+.where-checklist {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.where-action-item {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-inset, rgba(255, 255, 255, 0.03));
+}
+.where-action-item a { color: var(--accent, #58a6ff); }
+.where-no-actions {
+  opacity: 0.7;
+  margin: 0 0 14px;
+}
+.where-continue-btn {
+  appearance: none;
+  border: 1px solid var(--accent, #58a6ff);
+  background: transparent;
+  color: var(--accent, #58a6ff);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.where-continue-btn:hover { background: var(--accent, #58a6ff); color: var(--bg, #0d1117); }
+.where-continue-btn:disabled { opacity: 0.6; cursor: default; }
 
 /* display:contents everywhere else, so the wrapper is invisible to the flex
    layouts every other list uses. */

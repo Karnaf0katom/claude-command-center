@@ -36,6 +36,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ccc_server import lineage as _lineage
 from ccc_server import session_fts as _sfts
 from ccc_server import ship_graph as _sg
 
@@ -55,6 +56,7 @@ def _session_meta_rows(conn: sqlite3.Connection, sids: list[str]) -> dict[str, d
         out[sid] = {
             "repo": repo or "",
             "date": time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "",
+            "ts": ts or 0.0,
         }
     return out
 
@@ -88,7 +90,10 @@ def recall(query: str, limit: int = 20) -> dict:
     and a request that lands mid-warm just gets whatever is indexed so far
     plus `indexing: true` rather than waiting tens of seconds.
     """
-    hits = _sg.search_sessions(query, limit=limit)
+    # MEMO-FIX-lineage: over-fetch so collapsing lineage-linked hits into
+    # their newest member still leaves `limit` rows on the table, rather than
+    # quietly returning fewer than asked for.
+    hits = _sg.search_sessions(query, limit=max(limit * 2, limit + 10))
     sids = [h["session_id"] for h in hits if h.get("session_id")]
     session_meta = _session_meta_rows(_sg._get_connection(), sids) if sids else {}
     sdoc = _sdoc_rows(sids) if sids else {}
@@ -106,10 +111,15 @@ def recall(query: str, limit: int = 20) -> dict:
             "repo": sm.get("repo", ""),
             "date": sm.get("date", ""),
             "snippet": sd.get("snippet", ""),
+            "_ts": sm.get("ts", 0.0),
         }
         if sid in sections:
             row["match"] = sections[sid]
         results.append(row)
+    conn = _sg._get_connection()
+    results = _lineage.collapse_chain_hits(results, conn, ts_key="_ts")[:limit]
+    for row in results:
+        row.pop("_ts", None)
     indexing = _sfts.is_indexing() or _sg.is_indexing()
     return {"query": query, "results": results, "indexing": indexing}
 
