@@ -117,7 +117,30 @@ unload_service() {
 
 load_service() {
   if launchctl_supports_bootstrap; then
-    launchctl bootstrap "$(service_domain)" "$PLIST_PATH"
+    if ! launchctl bootstrap "$(service_domain)" "$PLIST_PATH"; then
+      # The LaunchAgent Label is the same string as the .app's bundle
+      # identifier (both "com.github.claude-command-center"). While the .app
+      # is open, macOS registers a per-PID "application" XPC domain under
+      # that identifier, and bootstrapping a LaunchAgent with the same Label
+      # into the same gui/<uid> session collides with it — launchctl fails
+      # with a bare "Bootstrap failed: 5: Input/output error" that gives no
+      # hint why. Detect that case and say so instead of leaving the raw error.
+      if pgrep -f "Command Center for Claude, Codex, Antigravity.app/Contents/MacOS/CCC" >/dev/null 2>&1; then
+        cat >&2 <<'EOF'
+
+That failure is expected: the CCC.app is currently open, and it shares its
+launchd Label with the app's own bundle identifier
+(com.github.claude-command-center). macOS won't bootstrap a LaunchAgent job
+under a Label that collides with a running app's bundle ID.
+
+The .app already self-manages its own server.py child when nothing else is
+serving the port — quit the CCC.app and relaunch it instead of installing
+the launchd service, or quit the app first if you specifically want the
+launchd-managed service running instead.
+EOF
+      fi
+      return 1
+    fi
     launchctl enable "$(service_target)" >/dev/null 2>&1 || true
     launchctl kickstart -k "$(service_target)" >/dev/null 2>&1 || true
   else
