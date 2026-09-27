@@ -65,7 +65,7 @@ def test_rrf_fusion_surfaces_vector_only_match(fts_env, monkeypatch):
 
     monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
 
-    def fake_embed(texts, batch=32):
+    def fake_embed(texts, batch=32, timeout=None):
         out = []
         for t in texts:
             if t == "search_query: zephyrion signal drift" or "omega marker" in t:
@@ -112,7 +112,7 @@ def test_search_degrades_silently_when_embed_call_fails(fts_env, monkeypatch):
     ])
 
     monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
-    monkeypatch.setattr(session_fts, "_embed_texts", lambda texts, batch=32: None)
+    monkeypatch.setattr(session_fts, "_embed_texts", lambda texts, batch=32, timeout=None: None)
 
     results = session_fts.search_sessions("narwhal telemetry parsing", force_refresh=True)
     assert len(results) == 1
@@ -126,7 +126,7 @@ def test_embeddings_incremental_by_mtime_size(fts_env, monkeypatch):
 
     index_calls = []  # batches of document (session) chunks -- the incremental path
 
-    def counting_embed(texts, batch=32):
+    def counting_embed(texts, batch=32, timeout=None):
         if texts and texts[0].startswith("search_document: "):
             index_calls.append(len(texts))
         return [[1.0, 0.0] for _ in texts]

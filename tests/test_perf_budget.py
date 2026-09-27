@@ -3834,7 +3834,7 @@ def test_session_fts_embeddings_warm_search_does_no_reembed(tmp_path, monkeypatc
 
     doc_embed_calls = []
 
-    def counting_embed(texts, batch=32):
+    def counting_embed(texts, batch=32, timeout=None):
         if texts and texts[0].startswith("search_document: "):
             doc_embed_calls.append(len(texts))
         return [[1.0, 0.0] for _ in texts]
@@ -3873,6 +3873,104 @@ def test_session_fts_embeddings_warm_search_does_no_reembed(tmp_path, monkeypatc
     assert doc_embed_calls[0] == 1, (
         f"re-embedding 1 changed session should embed 1 chunk (its card), not the whole 20-session corpus: {doc_embed_calls}"
     )
+
+
+def test_recall_path_search_does_not_block_on_document_embedding(tmp_path, monkeypatch):
+    """MEMO-FIX-13: measured live, a cold Ollama model-load takes ~10s vs
+    ~0.05s warm. recall() -> ship_graph.search_sessions() ->
+    session_fts.search_sessions() runs with force_refresh=False -- the real
+    request-thread path -- so a newly-changed transcript's document
+    embedding (a side effect of sync) must be handed to a background thread,
+    never awaited inline, or every recall() call after a restart eats the
+    full cold-load time."""
+    from ccc_server import session_fts
+
+    db_path = tmp_path / "session_fts.sqlite"
+    projects_dir = tmp_path / "projects"
+    repo_dir = projects_dir / "repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "1")
+
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+    session_fts._ollama_state["ts"] = 0.0
+    session_fts._ollama_state["ok"] = False
+    session_fts._vec_cache["sids"] = []
+    session_fts._vec_cache["vecs"] = []
+
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
+
+    embed_started = threading.Event()
+    release_embed = threading.Event()
+
+    def slow_embed(texts, batch=32, timeout=None):
+        embed_started.set()
+        # Stands in for a cold Ollama model-load. If this ever runs on the
+        # request thread, search_sessions() below blocks on it and the
+        # test's elapsed-time assertion fails.
+        release_embed.wait(timeout=5)
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(session_fts, "_embed_texts", slow_embed)
+
+    path = repo_dir / "session-0000.jsonl"
+    lines = [
+        {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": "kernel optimization task"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "done"}},
+    ]
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    try:
+        start = time.monotonic()
+        results = session_fts.search_sessions("kernel optimization")  # force_refresh=False
+        elapsed = time.monotonic() - start
+
+        assert results, "FTS should still return the newly-indexed session"
+        assert elapsed < 2.0, (
+            f"search_sessions(force_refresh=False) took {elapsed:.2f}s -- document "
+            "embedding must be backgrounded, not awaited on the request thread"
+        )
+        assert embed_started.wait(timeout=2.0), "embedding should still happen, just off the request thread"
+    finally:
+        release_embed.set()
+
+
+def test_vector_rank_caps_query_embed_to_short_timeout(monkeypatch):
+    """MEMO-FIX-13: the per-query embed in _vector_rank() must run
+    synchronously on the request thread (it has to, to rank *this* call's
+    results) -- so unlike document embedding, it can't be backgrounded.
+    It must instead ask for a short timeout so a cold Ollama model-load
+    (measured ~10s) degrades this one call to FTS-only instead of blocking
+    recall() for the full model-load time."""
+    from ccc_server import session_fts
+
+    session_fts._vec_cache["sids"] = ["sid-a"]
+    session_fts._vec_cache["vecs"] = [[1.0, 0.0]]
+    try:
+        seen = {}
+
+        def fake_embed(texts, batch=32, timeout=None):
+            seen["timeout"] = timeout
+            return [[1.0, 0.0]]
+
+        monkeypatch.setattr(session_fts, "_embed_texts", fake_embed)
+        session_fts._vector_rank("some query", 10)
+
+        assert seen.get("timeout") == session_fts._QUERY_EMBED_TIMEOUT
+        assert seen["timeout"] < session_fts._EMBED_TIMEOUT, (
+            "query-time embed must use a short budget, not the full document-embedding timeout"
+        )
+    finally:
+        session_fts._vec_cache["sids"] = []
+        session_fts._vec_cache["vecs"] = []
 
 
 def test_decision_extraction_warm_scan_does_no_reparse_or_subprocesses(tmp_path, monkeypatch):

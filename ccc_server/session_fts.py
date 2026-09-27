@@ -87,6 +87,12 @@ _bg_sync_running = False
 EMB_MODEL = "nomic-embed-text"
 _EMBED_BATCH = 32
 _EMBED_TIMEOUT = float(os.environ.get("CCC_SESSION_FTS_EMBED_TIMEOUT", "20"))
+# The per-query embed in _vector_rank() runs synchronously on the request
+# thread (it must, to rank *this* call's results) -- unlike document
+# embedding, it can't be backgrounded. Capped short so a cold Ollama model
+# (MEMO-FIX-13: measured ~10s to load vs ~0.05s warm) degrades this one call
+# to FTS-only instead of blocking recall() for the full model-load time.
+_QUERY_EMBED_TIMEOUT = float(os.environ.get("CCC_SESSION_FTS_QUERY_EMBED_TIMEOUT", "1.5"))
 _OLLAMA_PROBE_TIMEOUT = 0.3
 _OLLAMA_TTL = 30.0  # seconds between "is Ollama up" liveness probes
 _MAX_EMBED_SESSIONS_PER_SYNC = int(os.environ.get("CCC_SESSION_FTS_EMBED_BATCH_CAP", "64"))
@@ -444,8 +450,13 @@ def _ollama_available() -> bool:
     return ok
 
 
-def _embed_texts(texts: list[str], batch: int = _EMBED_BATCH) -> list[list[float]] | None:
-    """Embed texts via local Ollama. Returns None on any failure (caller degrades)."""
+def _embed_texts(texts: list[str], batch: int = _EMBED_BATCH, timeout: float = _EMBED_TIMEOUT) -> list[list[float]] | None:
+    """Embed texts via local Ollama. Returns None on any failure (caller degrades).
+
+    `timeout` defaults to the batch/document budget (_EMBED_TIMEOUT); callers
+    on a user-facing request path (see _vector_rank) pass a much shorter one
+    so a cold model-load can't block that path.
+    """
     if not texts:
         return []
     out: list[list[float]] = []
@@ -459,7 +470,7 @@ def _embed_texts(texts: list[str], batch: int = _EMBED_BATCH) -> list[list[float
             f"{base}/api/embed", data=body, headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=_EMBED_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
         except Exception:
             return None
@@ -510,7 +521,7 @@ def _refresh_vec_cache(conn: sqlite3.Connection) -> None:
 def _vector_rank(query: str, limit: int) -> list[str]:
     if not _vec_cache["sids"]:
         return []
-    vecs = _embed_texts(["search_query: " + query])
+    vecs = _embed_texts(["search_query: " + query], timeout=_QUERY_EMBED_TIMEOUT)
     if not vecs:
         return []
     qv = array("f", _normalize(vecs[0]))
@@ -572,6 +583,28 @@ def _drain_embeddings(conn: sqlite3.Connection, embed_jobs: list[tuple[str, list
             conn.execute("INSERT INTO semb (sid, kind, vec) VALUES (?, ?, ?)", (sid, kind, array("f", nv).tobytes()))
         for sid, _chunks in jobs:
             conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
+
+
+def _defer_embeddings(embed_jobs: list[tuple[str, list[tuple[str, str]]]]) -> None:
+    """Run _drain_embeddings on its own connection on a background thread.
+
+    Called for `force=False` syncs (a real request thread) so that embedding
+    -- live Ollama network I/O -- never blocks the caller. Embeddings "join
+    when ready": this thread commits them whenever it finishes, and the next
+    search picks them up via the shared on-disk `semb` table / _vec_cache.
+    """
+    def _worker() -> None:
+        try:
+            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            try:
+                _drain_embeddings(conn2, embed_jobs)
+                _refresh_vec_cache(conn2)
+            finally:
+                conn2.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True, name="session-fts-embed").start()
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -693,8 +726,18 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                     conn.execute("DELETE FROM semb_pending WHERE sid = ?", (old_sid,))
                 conn.execute("DELETE FROM file_cache WHERE path = ?", (p,))
 
-        _drain_embeddings(conn, embed_jobs)
-        _refresh_vec_cache(conn)
+        # FTS (sdoc/file_cache) is already committed above -- fast, no network.
+        # Embedding is live Ollama I/O (MEMO-FIX-13: measured ~10s cold
+        # model-load vs ~0.05s warm); a `force=False` caller is a real request
+        # thread (recall()), so its embedding work is always backgrounded
+        # instead of blocking. `force=True` (explicit force_refresh, and the
+        # warm/backlog background worker's own call) still drains inline --
+        # nothing besides that worker is waiting on it.
+        if force:
+            _drain_embeddings(conn, embed_jobs)
+            _refresh_vec_cache(conn)
+        elif embed_jobs:
+            _defer_embeddings(embed_jobs)
 
         _last_sync_ts = time.time()
     finally:
@@ -728,8 +771,19 @@ def _start_background_sync() -> None:
             conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
             try:
                 _sync_index(conn2, force=True)
+                # _sync_index() only refreshes _vec_cache when it actually
+                # touched files -- an idle restart (nothing changed since
+                # last sync) would otherwise leave _vec_cache empty forever,
+                # even though `semb` already has embeddings on disk from a
+                # prior run. Cheap local read; always safe to repeat.
+                _refresh_vec_cache(conn2)
             finally:
                 conn2.close()
+            # Best-effort: force Ollama to load EMB_MODEL now, off the
+            # request path, using the full document-embedding budget --
+            # so a real query's own short _QUERY_EMBED_TIMEOUT doesn't have
+            # to eat a cold model-load (MEMO-FIX-13).
+            _prewarm_embed_model()
         except Exception:
             pass
         finally:
@@ -737,6 +791,15 @@ def _start_background_sync() -> None:
                 _bg_sync_running = False
 
     threading.Thread(target=_worker, daemon=True, name="session-fts-warm").start()
+
+
+def _prewarm_embed_model() -> None:
+    if not _ollama_available():
+        return
+    try:
+        _embed_texts(["search_query: warm"], timeout=_EMBED_TIMEOUT)
+    except Exception:
+        pass
 
 
 def warm_start() -> None:
