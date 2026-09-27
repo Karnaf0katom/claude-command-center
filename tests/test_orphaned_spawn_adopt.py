@@ -112,3 +112,22 @@ def test_boot_reattach_skip_requires_real_routing():
     block = src[src.index("    worker_owns_engines = ("):]
     block = block[:block.index("\n    )\n")]
     assert "_control_plane_routes_engines()" in block
+
+
+def test_spawned_children_do_not_inherit_claude_session_identity(monkeypatch):
+    server = importlib.import_module("server")
+    for key in server._INHERITED_CLAUDE_SESSION_ENV:
+        monkeypatch.setenv(key, "leaked")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")  # user config survives
+    env = server._question_relay_env()
+    for key in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_CHILD_SESSION"):
+        assert key not in env
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+
+
+def test_dashboard_entry_point_clears_claude_session_identity():
+    src = (Path(__file__).resolve().parent.parent / "server.py").read_text()
+    main_block = src[src.index('\nif __name__ == "__main__":'):]
+    head = main_block[:main_block.index("--archive-refresh-worker")]
+    assert "_INHERITED_CLAUDE_SESSION_ENV" in head

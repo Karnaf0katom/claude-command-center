@@ -633,15 +633,29 @@ QUESTION_RELAY_ENV = "CCC_QUESTION_RELAY"
 PRETOOLUSE_HOOK_TIMEOUT = 1800
 
 
+# Identity of the Claude Code session that launched this process. A dashboard
+# (re)started from inside a session inherits them; passed on, every child it
+# spawns would claim that session's id and messaging socket.
+_INHERITED_CLAUDE_SESSION_ENV = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_CHILD_SESSION",
+)
+
+
 def _question_relay_env():
     """Child env that opts a spawned session into AskUserQuestion relay.
 
     Drops CCC_WORKER_PROCESS: the worker marks itself with it, and a spawned
     session that inherits it passes it on to anything it launches -- a
     dashboard restarted from inside that session then believed it was the
-    worker and stopped routing engines to the real one."""
+    worker and stopped routing engines to the real one. Also drops the
+    launching Claude session's identity (_INHERITED_CLAUDE_SESSION_ENV)."""
     env = dict(os.environ, **{QUESTION_RELAY_ENV: "1"})
     env.pop("CCC_WORKER_PROCESS", None)
+    for key in _INHERITED_CLAUDE_SESSION_ENV:
+        env.pop(key, None)
     return env
 
 
@@ -39328,6 +39342,9 @@ if __name__ == "__main__":
     # runs them in-process, and loses every child it spawned on the next
     # restart (messages held as orphaned_spawn, then kill + resume).
     os.environ.pop("CCC_WORKER_PROCESS", None)
+    # Same for the identity of a Claude session the dashboard was started from.
+    for _key in _INHERITED_CLAUDE_SESSION_ENV:
+        os.environ.pop(_key, None)
     if len(sys.argv) >= 2 and sys.argv[1] == "--archive-refresh-worker":
         if len(sys.argv) != 4:
             print(
