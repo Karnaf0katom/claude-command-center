@@ -132,6 +132,63 @@ CLAUSE_DELIMITERS = frozenset({
     "get", "got", "does", "did", "is", "are", "was", "were", "have", "has", "had",
 })
 
+COMMON_PRODUCT_AREAS = frozenset({
+    "flow", "flows", "queue", "queues", "session", "sessions", "log", "logs",
+    "server", "settings", "setting", "booking", "search", "storage",
+})
+
+NOUN_PHRASE_DELIMS = frozenset(STOPWORDS) | frozenset(GENERIC_VERBS) | {
+    "did", "does", "do", "is", "are", "was", "were", "have", "has", "had", "will", "would", "can", "could", "should",
+    "the", "a", "an", "this", "that", "these", "those",
+    "in", "on", "at", "for", "from", "to", "with", "by", "of", "under", "over", "off", "into", "onto", "during", "before", "after", "between", "through", "about",
+    "and", "or", "but", "so", "because", "while", "if", "when", "where", "as", "than",
+    "we", "you", "it", "they", "he", "she", "someone", "anyone", "their", "our", "its",
+    "get", "got", "make", "made", "add", "fix", "ship", "show", "see", "try", "want", "need", "ever", "actually", "yet", "now",
+    "hide", "prevent", "block", "stop", "allow", "start", "remove", "drop", "put", "close", "closing",
+}
+
+
+def _extract_noun_phrases(q: str) -> list[list[str]]:
+    tokens = re.findall(r"[a-zA-Z0-9]+", q.lower())
+    phrases = []
+    cur = []
+    for tok in tokens:
+        if tok in NOUN_PHRASE_DELIMS:
+            if len(cur) >= 2:
+                phrases.append([_stem(w) for w in cur])
+            cur = []
+        else:
+            cur.append(tok)
+    if len(cur) >= 2:
+        phrases.append([_stem(w) for w in cur])
+    return phrases
+
+
+def _covers_noun_phrase(nps: list[list[str]], matched_stems: set[str]) -> bool:
+    if not nps:
+        return True
+    for np in nps:
+        overlap = set(np) & matched_stems
+        if len(overlap) >= min(2, len(np)):
+            return True
+    return False
+
+
+def _has_scope_conflict(scope: str, q_stems: set[str]) -> bool:
+    if not scope:
+        return False
+    scope_tokens = re.findall(r"[a-z0-9]+", scope.lower())
+    s_stems = {_stem(w) for w in scope_tokens if w not in STOPWORDS}
+    if s_stems & q_stems:
+        return False
+    scope_product_areas = s_stems & COMMON_PRODUCT_AREAS
+    query_product_areas = q_stems & COMMON_PRODUCT_AREAS
+    if scope_product_areas and query_product_areas:
+        if not (scope_product_areas & query_product_areas):
+            return True
+    return False
+
+
 
 IRREGULAR_VERBS = {
     "came": "come", "went": "go", "gone": "go", "ran": "run",
@@ -1101,42 +1158,10 @@ def is_shipped(topic: str) -> dict:
     common_product_stems = {_stem(w) for w in COMMON_PRODUCT_WORDS}
     generic_verb_stems = {_stem(w) for w in GENERIC_VERBS}
     distinguishing_stems = stemmed_content_terms - common_product_stems - generic_verb_stems
-
-    # Adjacent substantive pairs in query (core noun phrases):
-    core_noun_phrases: list[tuple[str, str]] = []
-    raw_query_words = re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", t)
-    substantive_tokens: list[str | None] = []
-    for w in raw_query_words:
-        w_low = w.lower()
-        if w_low in STOPWORDS or w_low in GENERIC_VERBS or w_low in CLAUSE_DELIMITERS or (repo_words and w_low in repo_words):
-            substantive_tokens.append(None)
-        else:
-            substantive_tokens.append(w)
-
-    for i in range(len(substantive_tokens) - 1):
-        w1, w2 = substantive_tokens[i], substantive_tokens[i+1]
-        if w1 is not None and w2 is not None:
-            s1, s2 = _stem(w1.lower()), _stem(w2.lower())
-            if s1 in distinguishing_stems or s2 in distinguishing_stems:
-                core_noun_phrases.append((s1, s2))
-
-    # Target location/surface from query (e.g. 'in Flow', 'for Leads'):
-    loc_match = re.search(r"\b(?:in|for|on|under|at)\s+([A-Za-z0-9_-]+)", t, re.I)
-    target_loc_stem = None
-    if loc_match:
-        loc_word = loc_match.group(1).lower()
-        if loc_word not in STOPWORDS and loc_word not in GENERIC_VERBS and not (repo_words and loc_word in repo_words):
-            target_loc_stem = _stem(loc_word)
-
-    # Project prefix tokens (e.g. MEMO-FIX, OPS):
-    ticket_project_tokens = set()
-    raw_proj_tokens = re.findall(r"\b([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,10})*)\b", t)
-    for tok in raw_proj_tokens:
-        if not TICKET_STOP.match(tok) and tok not in ("CCC", "BYM", "WT", "SHA", "UTF", "RFC", "HTTP", "TLS", "GPT"):
-            if "-" in tok or tok in ("MEMO", "OPS", "CHUCK", "BECKY"):
-                ticket_project_tokens.add(tok.upper())
+    noun_phrases = _extract_noun_phrases(t)
 
     # 1. Search WatchTower tickets
+
     candidate_tickets: list[dict] = []
     open_tickets: list[dict] = []
     closed_tickets: list[dict] = []
@@ -1339,7 +1364,7 @@ def is_shipped(topic: str) -> dict:
 
         candidate_commits.append({
             "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
-            "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
+            "subject": subj, "scope": scope, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
             "matched_subj": matched_subj,
             "n_matched_subj": len(matched_subj),
             "matched_distinguishing": matched_distinguishing,
@@ -1432,47 +1457,25 @@ def is_shipped(topic: str) -> dict:
         has_phrase_subj = c.get("has_phrase_subj", False)
         c_stems = c.get("subj_stems", set())
 
-        # TRAP CHECK 1: If ticket project was specified in query (e.g. MEMO-FIX)
-        if ticket_project_tokens:
-            matches_proj = False
-            for p_tok in ticket_project_tokens:
-                p_lower = p_tok.lower()
-                p_parts = {_stem(x) for x in re.findall(r"[a-z0-9]+", p_lower)}
-                if p_parts.issubset(c_stems) or p_lower in c["subject"].lower():
-                    matches_proj = True
-                    break
-                t_ref = c.get("ticket_ref", "")
-                if t_ref and any(t_ref.upper().startswith(p) for p in ticket_project_tokens):
-                    matches_proj = True
-                    break
-            if not matches_proj:
-                continue
+        # TRAP CHECK 1: Scope conflict
+        # If commit is explicitly scoped to an unrelated product area (e.g. log, server),
+        # but query specifies a different product area (e.g. queue, flow) and does not mention commit's scope,
+        # it is a lookalike from an unrelated feature.
+        if _has_scope_conflict(c.get("scope", ""), stemmed_content_terms) and ticket_boost == 0:
+            continue
 
-        # TRAP CHECK 2: Ubiquitous product words penalty / Distinguishing stems requirement
+        # TRAP CHECK 2: Common product words penalty / Distinguishing stems requirement
+        # A match whose only substantive terms are common product words is a lookalike trap.
+        # If question has >= 2 distinguishing terms, commit must cover at least 2.
         if n_dist > 0 and n_m_dist == 0:
             continue
-        if n_dist >= 2 and n_m_dist < 2 and ticket_boost == 0:
+        if n_dist >= 2 and n_m_dist < 2 and not has_phrase_subj and ticket_boost == 0:
             continue
 
-
-        # TRAP CHECK 3: Core noun phrases coverage
-        if core_noun_phrases and ticket_boost == 0 and subj_ratio < 0.70:
-            covered_phrase_count = 0
-            for p1, p2 in core_noun_phrases:
-                if p1 in c_stems and p2 in c_stems:
-                    covered_phrase_count += 1
-            if covered_phrase_count == 0 and not has_phrase_subj:
-                continue
-
-
-        # TRAP CHECK 4: Target location/surface check
-        if target_loc_stem and ticket_boost == 0:
-            is_repo_loc = (detected_repo is not None and target_loc_stem in detected_repo.lower())
-            if not is_repo_loc:
-                if target_loc_stem not in c_stems and target_loc_stem not in c.get("matched_all", set()):
-                    continue
-
         matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
+        if matched_substantive and matched_substantive.issubset(common_product_stems) and ticket_boost == 0:
+            continue
+
 
         if n_stems <= 1 or len(matched_substantive) < 2:
             if ticket_boost > 0 and n_m_subj >= 1:
@@ -1480,7 +1483,6 @@ def is_shipped(topic: str) -> dict:
             else:
                 is_strong = False
         elif n_stems == 2:
-
             if n_m_subj >= 2:
                 is_strong = True
             elif has_phrase_subj:
@@ -1492,19 +1494,20 @@ def is_shipped(topic: str) -> dict:
                 is_strong = True
             elif n_m_subj >= 3:
                 is_strong = True
-            elif n_m_subj >= 2 and subj_ratio >= 0.65 and n_m_dist >= 2:
+            elif n_m_subj >= 2 and subj_ratio >= 0.65:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 2 and n_m_dist >= 2:
+            if has_phrase_subj and n_m_subj >= 2:
                 is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.50 and n_m_dist >= 2:
+            elif n_m_subj >= 3 and subj_ratio >= 0.50:
                 is_strong = True
-            elif subj_ratio >= 0.65 and n_m_subj >= 3 and n_m_dist >= 2:
+            elif subj_ratio >= 0.65 and n_m_subj >= 3:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
+
 
         if is_strong:
             cur_s = conn.execute(

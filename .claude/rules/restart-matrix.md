@@ -34,7 +34,7 @@ actually requires it.
 
 **If `launchctl kickstart` says "Could not find service" for the dashboard
 label**, don't assume the fix is `./run.sh --install-service` — check
-`pgrep -f "MacOS/CCC"` first. The .app shares its launchd Label with its own
+`pgrep -f "MacOS/CCC"` first. The .app shares its launchd Label with the app's
 bundle identifier (`com.github.claude-command-center`), so while the .app is
 open, `launchctl bootstrap` for that same Label always fails with a bare
 `Bootstrap failed: 5: Input/output error` (bundle-ID collision in the gui/<uid>

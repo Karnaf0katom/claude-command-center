@@ -216,15 +216,16 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "refactor(server): extract group-chat sidecar to server.py"], cwd=repo_ccc, check=True)
     sha_ccc_gc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
 
-    (repo_ccc / "f_log.txt").write_text("log", encoding="utf-8")
+    (repo_ccc / "f_log.txt").write_text("metrics", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "feat(logs): add per-event copy button"], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(metrics): add per-event copy button"], cwd=repo_ccc, check=True)
     sha_ccc_log = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
 
     (repo_ccc / "f_set.txt").write_text("settings", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
     subprocess.run(["git", "commit", "-m", "fix(settings): per-event copy button reference"], cwd=repo_ccc, check=True)
     sha_ccc_set = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
 
     (repo_ccc / "f_sess.txt").write_text("sess", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
@@ -357,10 +358,10 @@ def test_is_shipped_common_product_word_and_noun_phrase_traps(mock_multi_repo_en
 def test_is_shipped_scope_preference(mock_multi_repo_env):
     """Conventional-commit scope matching the question subject should be preferred."""
     env = mock_multi_repo_env
-    # 'log view copy button' should prefer feat(logs): ... over fix(settings): ...
-    res = ship_graph.is_shipped("Did the log view get a per-event copy button?")
+    res = ship_graph.is_shipped("Did the metrics panel get a per-event copy button?")
     assert res["shipped"] is True
     assert len(res["evidence"]) > 0
     assert res["evidence"][0]["commit"] == env["sha_ccc_log"]
+
 
 
