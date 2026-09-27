@@ -3802,3 +3802,143 @@ def test_memory_recall_warm_call_spawns_no_subprocesses(tmp_path, monkeypatch):
     )
 
 
+def test_session_fts_embeddings_warm_search_does_no_reembed(tmp_path, monkeypatch):
+    """MEMO-FIX-4: the optional local-embeddings channel must follow the same
+    (mtime, size) incremental gate as the FTS index — a warm search over
+    unchanged transcripts must not re-embed any session, and a single changed
+    transcript must re-embed only that session, not the whole corpus."""
+    from ccc_server import session_fts
+
+    db_path = tmp_path / "session_fts.sqlite"
+    projects_dir = tmp_path / "projects"
+    repo_dir = projects_dir / "repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "1")
+
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+    session_fts._ollama_state["ts"] = 0.0
+    session_fts._ollama_state["ok"] = False
+    session_fts._vec_cache["sids"] = []
+    session_fts._vec_cache["vecs"] = []
+
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
+
+    doc_embed_calls = []
+
+    def counting_embed(texts, batch=32):
+        if texts and texts[0].startswith("search_document: "):
+            doc_embed_calls.append(len(texts))
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(session_fts, "_embed_texts", counting_embed)
+
+    for i in range(20):
+        sid = f"session-{i:04d}"
+        path = repo_dir / f"{sid}.jsonl"
+        lines = [
+            {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": f"task number {i} kernel optimization"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "done"}},
+        ]
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert len(doc_embed_calls) == 1, f"cold build should embed documents in one batch, got {doc_embed_calls}"
+
+    doc_embed_calls.clear()
+    session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert doc_embed_calls == [], (
+        f"warm search re-embedded {doc_embed_calls}; incremental (mtime, size) embedding cache regressed"
+    )
+
+    doc_embed_calls.clear()
+    mod_path = repo_dir / "session-0002.jsonl"
+    lines = [
+        {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": "updated task number 2 kernel optimization"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "updated done"}},
+    ]
+    mod_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    os.utime(mod_path, None)
+
+    session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert len(doc_embed_calls) == 1, f"expected one re-embed batch for the 1 modified file, got {doc_embed_calls}"
+    assert doc_embed_calls[0] == 1, (
+        f"re-embedding 1 changed session should embed 1 chunk (its card), not the whole 20-session corpus: {doc_embed_calls}"
+    )
+
+
+def test_decision_extraction_warm_scan_does_no_reparse_or_subprocesses(tmp_path, monkeypatch):
+    """MEMO-FIX-7: the nightly decision-extraction scan must follow the same
+    (mtime, size) incremental gate as ship_graph -- a warm run over
+    unchanged transcripts re-parses nothing and spawns no subprocesses."""
+    from ccc_server import decision_extraction as dex
+
+    db_path = tmp_path / "decisions.sqlite"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_sessions_dir = projects_dir / "repo"
+    repo_sessions_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CCC_DECISIONS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    dex._reset_connection_for_tests()
+
+    session_file = repo_sessions_dir / "session-001.jsonl"
+    session_file.write_text(json.dumps({
+        "type": "user",
+        "cwd": str(repo_sessions_dir),
+        "timestamp": "2026-09-20T10:00:00Z",
+        "message": {"role": "user", "content": "We decided to ship the retry button behind a flag."},
+    }) + "\n", encoding="utf-8")
+
+    parse_calls = []
+    real_extract = dex.extract_decisions_from_file
+
+    def spy_extract(path, engine):
+        parse_calls.append(path)
+        return real_extract(path, engine=engine)
+
+    monkeypatch.setattr(dex, "extract_decisions_from_file", spy_extract)
+
+    subprocess_calls = []
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+
+    def spy_run(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_run(*args, **kwargs)
+
+    def spy_popen(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    monkeypatch.setattr(subprocess, "Popen", spy_popen)
+
+    rec1 = dex.run_once()
+    assert rec1["new_decisions"] == 1
+    assert len(parse_calls) == 1, f"Cold run should parse 1 transcript, got {len(parse_calls)}"
+
+    parse_calls.clear()
+    subprocess_calls.clear()
+
+    rec2 = dex.run_once()
+    assert rec2["scanned"] == 0
+    assert len(parse_calls) == 0, (
+        f"Warm run re-parsed {len(parse_calls)} transcripts; incremental (mtime, size) cache regressed"
+    )
+    assert len(subprocess_calls) == 0, f"Warm run spawned subprocesses: {subprocess_calls}"
+
+    dex._reset_connection_for_tests()
+
+

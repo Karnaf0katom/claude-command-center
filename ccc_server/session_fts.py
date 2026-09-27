@@ -8,17 +8,26 @@ Contract:
 Builds and incrementally updates an SQLite FTS5 index persisted on disk
 under ~/.claude/command-center/session_fts.sqlite, keyed by transcript
 (mtime, size). Never re-parses unchanged files. Stdlib only.
+
+Optionally fuses in a local-embeddings channel (Ollama's nomic-embed-text,
+RRF-fused with the FTS ranking) when a local Ollama daemon is reachable on
+localhost:11434. Embeddings are built incrementally by the same (mtime, size)
+gate as the FTS index. Any Ollama failure (not installed, not running, model
+missing) degrades silently to FTS-only -- the default for most users.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
 import sys
 import threading
 import time
+import urllib.request
+from array import array
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -70,6 +79,20 @@ _SYNC_TTL = 5.0  # seconds between directory scans
 _BG_SYNC_THRESHOLD = int(os.environ.get("CCC_SESSION_FTS_SYNC_INLINE_MAX", "50"))
 _bg_sync_state_lock = threading.Lock()
 _bg_sync_running = False
+
+# --- Local Ollama embeddings (optional P2 hybrid channel) --------------------
+# Fully optional: any Ollama failure (not installed, not running, model not
+# pulled) degrades silently back to FTS-only, which is the pre-existing
+# behavior. Nothing here ever raises out of search_sessions().
+EMB_MODEL = "nomic-embed-text"
+_EMBED_BATCH = 32
+_EMBED_TIMEOUT = float(os.environ.get("CCC_SESSION_FTS_EMBED_TIMEOUT", "20"))
+_OLLAMA_PROBE_TIMEOUT = 0.3
+_OLLAMA_TTL = 30.0  # seconds between "is Ollama up" liveness probes
+_MAX_EMBED_SESSIONS_PER_SYNC = int(os.environ.get("CCC_SESSION_FTS_EMBED_BATCH_CAP", "64"))
+
+_ollama_state = {"ts": 0.0, "ok": False}
+_vec_cache: dict = {"sids": [], "vecs": []}
 
 
 def _get_db_path() -> Path:
@@ -200,6 +223,7 @@ def _finish(sid, engine, path, cwd, title, users, assists, tools, files, ts0, ts
         "n_user": len(users),
         "scratch": is_scratch,
         "title": t,
+        "first_prompt": first,
         "user_text": user_text,
         "final_text": final,
         "assistant_text": assistant_text,
@@ -382,8 +406,172 @@ def _init_db(conn: sqlite3.Connection) -> None:
             indexed INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_file_cache_sid ON file_cache(sid);
+        CREATE TABLE IF NOT EXISTS semb (
+            sid TEXT,
+            kind TEXT,
+            vec BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_semb_sid ON semb(sid);
+        CREATE TABLE IF NOT EXISTS semb_pending (sid TEXT PRIMARY KEY);
     """)
     conn.commit()
+
+
+def _ollama_base() -> str:
+    return os.environ.get("CCC_OLLAMA_URL", "http://localhost:11434")
+
+
+def _ollama_available() -> bool:
+    """Cheap liveness probe for the local Ollama daemon, cached for _OLLAMA_TTL.
+
+    Any failure (not installed, not running, unreachable) means the embedding
+    channel is skipped for this cycle; FTS-only search is unaffected.
+    """
+    if os.environ.get("CCC_SESSION_FTS_EMBED", "1") == "0":
+        return False
+    now = time.time()
+    if now - _ollama_state["ts"] < _OLLAMA_TTL:
+        return _ollama_state["ok"]
+    ok = False
+    try:
+        req = urllib.request.Request(f"{_ollama_base()}/api/tags")
+        with urllib.request.urlopen(req, timeout=_OLLAMA_PROBE_TIMEOUT) as resp:
+            ok = resp.status == 200
+    except Exception:
+        ok = False
+    _ollama_state["ts"] = now
+    _ollama_state["ok"] = ok
+    return ok
+
+
+def _embed_texts(texts: list[str], batch: int = _EMBED_BATCH) -> list[list[float]] | None:
+    """Embed texts via local Ollama. Returns None on any failure (caller degrades)."""
+    if not texts:
+        return []
+    out: list[list[float]] = []
+    base = _ollama_base()
+    for i in range(0, len(texts), batch):
+        chunk = texts[i:i + batch]
+        body = json.dumps({
+            "model": EMB_MODEL, "input": chunk, "truncate": True, "keep_alive": "10m",
+        }).encode()
+        req = urllib.request.Request(
+            f"{base}/api/embed", data=body, headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_EMBED_TIMEOUT) as resp:
+                data = json.loads(resp.read())
+        except Exception:
+            return None
+        embeddings = data.get("embeddings")
+        if not embeddings or len(embeddings) != len(chunk):
+            return None
+        out.extend(embeddings)
+    return out
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    n = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / n for x in vec]
+
+
+def _session_chunks(r: dict) -> list[tuple[str, str]]:
+    """Embedding chunks for one session: a summary 'card' plus later user prompts,
+    so a query can match either the overall session or one specific turn."""
+    title = (r.get("title") or "").strip()
+    card = f"{title}\n{(r.get('first_prompt') or '')[:1000]}\n{(r.get('final_text') or '')[:800]}"
+    chunks = [("card", card)]
+    prompts = (r.get("user_text") or "").split("\n---\n")[1:11]
+    for p in prompts:
+        if len(p.strip()) >= 25:
+            chunks.append(("prompt", p[:700]))
+    return chunks
+
+
+def _rrf(lists: list[list[str]], k: int = 60) -> list[str]:
+    """Reciprocal Rank Fusion over ranked sid lists, best first."""
+    sc: dict[str, float] = {}
+    for lst in lists:
+        for rank, sid in enumerate(lst, 1):
+            sc[sid] = sc.get(sid, 0.0) + 1.0 / (k + rank)
+    return [sid for sid, _ in sorted(sc.items(), key=lambda kv: -kv[1])]
+
+
+def _refresh_vec_cache(conn: sqlite3.Connection) -> None:
+    sids: list[str] = []
+    vecs: list[array] = []
+    for sid, _kind, blob in conn.execute("SELECT sid, kind, vec FROM semb"):
+        sids.append(sid)
+        vecs.append(array("f", blob))
+    _vec_cache["sids"] = sids
+    _vec_cache["vecs"] = vecs
+
+
+def _vector_rank(query: str, limit: int) -> list[str]:
+    if not _vec_cache["sids"]:
+        return []
+    vecs = _embed_texts(["search_query: " + query])
+    if not vecs:
+        return []
+    qv = array("f", _normalize(vecs[0]))
+    best: dict[str, float] = {}
+    for sid, v in zip(_vec_cache["sids"], _vec_cache["vecs"]):
+        sim = sum(a * b for a, b in zip(qv, v))
+        cur = best.get(sid)
+        if cur is None or sim > cur:
+            best[sid] = sim
+    ranked = sorted(best.items(), key=lambda kv: -kv[1])
+    return [sid for sid, _ in ranked[:limit]]
+
+
+def _drain_embeddings(conn: sqlite3.Connection, embed_jobs: list[tuple[str, list[tuple[str, str]]]]) -> None:
+    """Embed newly-changed sessions plus a bounded slice of any backlog left
+    over from a prior cycle where Ollama was unavailable or over-capacity."""
+    if not _ollama_available():
+        return
+
+    if not embed_jobs:
+        pending = [r[0] for r in conn.execute("SELECT sid FROM semb_pending")]
+        if pending:
+            placeholders = ",".join("?" for _ in pending)
+            rows = conn.execute(
+                f"SELECT sid, title, prompts, report FROM sdoc WHERE sid IN ({placeholders})", pending,
+            ).fetchall()
+            for sid, title, prompts, report in rows:
+                first_prompt = (prompts or "").split("\n---\n")[0]
+                r = {"title": title, "first_prompt": first_prompt, "final_text": report, "user_text": prompts}
+                embed_jobs.append((sid, _session_chunks(r)))
+
+    if not embed_jobs:
+        return
+
+    jobs = embed_jobs[:_MAX_EMBED_SESSIONS_PER_SYNC]
+    overflow = embed_jobs[_MAX_EMBED_SESSIONS_PER_SYNC:]
+
+    with conn:
+        for sid, _chunks in overflow:
+            conn.execute("INSERT OR IGNORE INTO semb_pending (sid) VALUES (?)", (sid,))
+
+        if not jobs:
+            return
+
+        texts, index_map = [], []
+        for sid, chunks in jobs:
+            for kind, text in chunks:
+                index_map.append((sid, kind))
+                texts.append("search_document: " + text)
+
+        vecs = _embed_texts(texts)
+        if vecs is None:
+            for sid, _chunks in jobs:
+                conn.execute("INSERT OR IGNORE INTO semb_pending (sid) VALUES (?)", (sid,))
+            return
+
+        for (sid, kind), v in zip(index_map, vecs):
+            nv = _normalize(v)
+            conn.execute("INSERT INTO semb (sid, kind, vec) VALUES (?, ?, ?)", (sid, kind, array("f", nv).tobytes()))
+        for sid, _chunks in jobs:
+            conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -451,6 +639,8 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
             else:
                 parsed_results = [_parse_file(item) for item in items_to_parse]
 
+        embed_jobs: list[tuple[str, list[tuple[str, str]]]] = []
+
         with conn:
             for (eng, path, mt, sz), r in zip(todo, parsed_results):
                 old_cached = have.get(path)
@@ -458,10 +648,14 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
 
                 if old_sid:
                     conn.execute("DELETE FROM sdoc WHERE sid = ?", (old_sid,))
+                    conn.execute("DELETE FROM semb WHERE sid = ?", (old_sid,))
+                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (old_sid,))
 
                 if r and r.get("sid"):
                     sid = r["sid"]
                     conn.execute("DELETE FROM sdoc WHERE sid = ?", (sid,))
+                    conn.execute("DELETE FROM semb WHERE sid = ?", (sid,))
+                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
                     if r.get("scratch", 0) == 0 and r.get("n_user", 0) > 0:
                         conn.execute(
                             "INSERT INTO sdoc VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -479,6 +673,7 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                             "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 1)",
                             (path, sid, mt, sz),
                         )
+                        embed_jobs.append((sid, _session_chunks(r)))
                     else:
                         conn.execute(
                             "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 0)",
@@ -494,7 +689,12 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                 old_sid = have[p][0]
                 if old_sid:
                     conn.execute("DELETE FROM sdoc WHERE sid = ?", (old_sid,))
+                    conn.execute("DELETE FROM semb WHERE sid = ?", (old_sid,))
+                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (old_sid,))
                 conn.execute("DELETE FROM file_cache WHERE path = ?", (p,))
+
+        _drain_embeddings(conn, embed_jobs)
+        _refresh_vec_cache(conn)
 
         _last_sync_ts = time.time()
     finally:
@@ -600,5 +800,13 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
         except sqlite3.OperationalError:
             pass
 
-    sorted_sids = sorted(scores, key=lambda s: scores[s])
-    return [{"session_id": sid, "score": scores[sid]} for sid in sorted_sids[:limit]]
+    fts_sids = sorted(scores, key=lambda s: scores[s])
+
+    # P2 hybrid: fuse the FTS ranking with a local-embeddings channel via RRF.
+    # Skipped (silently) whenever Ollama isn't installed/running/warm, which
+    # is the default for most users -- fts_sids alone is then the result,
+    # identical to pre-embedding behavior.
+    vector_sids = _vector_rank(q, max(limit * 2, 50)) if _ollama_available() else []
+    final_sids = _rrf([fts_sids, vector_sids]) if vector_sids else fts_sids
+
+    return [{"session_id": sid, "score": scores.get(sid, 0.0)} for sid in final_sids[:limit]]
