@@ -3358,6 +3358,9 @@ def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
 
@@ -3423,6 +3426,9 @@ def test_session_fts_section_search_cost_is_independent_of_session_count(tmp_pat
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(tmp_path / "projects"))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
@@ -3485,6 +3491,9 @@ def test_session_fts_search_never_triggers_embedding_backfill_scan(tmp_path, mon
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
@@ -3593,6 +3602,9 @@ def test_ship_graph_second_call_does_no_reparse_or_subprocesses(tmp_path, monkey
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
     monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
 
@@ -3711,6 +3723,9 @@ def test_memory_recall_warm_call_spawns_no_subprocesses(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "0")
     monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(fts_db))
@@ -3778,6 +3793,9 @@ def test_session_fts_embeddings_warm_search_does_no_reembed(tmp_path, monkeypatc
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "1")
@@ -3854,6 +3872,9 @@ def test_recall_path_search_does_not_block_on_document_embedding(tmp_path, monke
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "1")
@@ -4002,11 +4023,15 @@ def test_decision_extraction_warm_scan_does_no_reparse_or_subprocesses(tmp_path,
 
 
 def test_sidebar_recall_search_never_spawns_a_subprocess(tmp_path, monkeypatch):
-    """/api/search-recall-sessions (MEMO-FIX-15) must behave identically whether
-    a third-party memory CLI is installed on PATH or not: this is an in-process
-    scan of recent transcript files (ccc_server/recent_search.py), not a
+    """/api/search-recall-sessions (MEMO-FIX-15, re-pointed at session_fts by
+    MEMO-FIX-19) must behave identically whether a third-party memory CLI is
+    installed on PATH or not: this is an in-process, indexed lookup
+    (ccc_server/recent_search.py -> ccc_server/session_fts.py), never a
     subprocess call. Guard against a regression that reintroduces a shell-out
     on this path — with or without that binary on PATH, zero forks either way."""
+    from ccc_server import session_fts
+
+    db_path = tmp_path / "session_fts.sqlite"
     projects_dir = tmp_path / "projects"
     session_dir = projects_dir / "repo"
     session_dir.mkdir(parents=True)
@@ -4018,8 +4043,19 @@ def test_sidebar_recall_search_never_spawns_a_subprocess(tmp_path, monkeypatch):
         }) + "\n",
         encoding="utf-8",
     )
-    import ccc_server.recent_search as recent_search
-    monkeypatch.setattr(recent_search, "_candidate_roots", lambda: [projects_dir])
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex-empty"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
 
     def boom(*a, **k):  # pragma: no cover - only runs on regression
         raise AssertionError(f"sidebar recall search forked a subprocess: {a!r}")
@@ -4043,6 +4079,122 @@ def test_sidebar_recall_search_never_spawns_a_subprocess(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(fake_bin))
     out_present = server.search_recent_sessions("memo fix worker", days=2, limit=5)
     assert out_present == out_absent
+
+
+def _session_fts_perf_env(tmp_path, monkeypatch, n_docs=300):
+    """MEMO-FIX-19 fixture: a warm session_fts corpus large enough that an
+    O(corpus) regression on the two sidebar-search endpoints would show up as
+    a real slowdown or a growing SQL call count, not just wrong results."""
+    from ccc_server import session_fts
+
+    projects_dir = tmp_path / "projects"
+    repo_dir = projects_dir / "repo"
+    repo_dir.mkdir(parents=True)
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex-empty"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+
+    for i in range(n_docs):
+        sid = f"perf-session-{i:05d}"
+        lines = [{
+            "type": "user", "cwd": str(repo_dir),
+            "message": {"role": "user", "content": f"task {i} the quarterly rollout deadline"},
+        }]
+        (repo_dir / f"{sid}.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8"
+        )
+    # Warm the index once so the timed/counted calls below hit steady state,
+    # not the one-time cold-start build.
+    session_fts.search_sessions("quarterly rollout", force_refresh=True)
+    return session_fts
+
+
+def test_search_history_endpoint_keystrokes_do_not_reparse_or_fork(tmp_path, monkeypatch):
+    """/api/search-history (session_fts-backed since MEMO-FIX-19) simulates
+    typing a query character-by-character: each keystroke re-runs the search,
+    but none may re-parse an already-indexed transcript or spawn a subprocess
+    -- that's the whole point of moving off a per-keystroke shell-out."""
+    session_fts = _session_fts_perf_env(tmp_path, monkeypatch)
+
+    parse_calls = []
+    real_parse = session_fts._parse_file
+    monkeypatch.setattr(session_fts, "_parse_file", lambda a: (parse_calls.append(a), real_parse(a))[1])
+
+    def boom(*a, **k):  # pragma: no cover - only runs on regression
+        raise AssertionError(f"search-history forked a subprocess: {a!r}")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(subprocess, "check_output", boom)
+
+    prefixes = ["q", "qu", "qua", "quar", "quart", "quarterly", "quarterly rollout"]
+    for prefix in prefixes:
+        out = server.search_conversation_history(prefix, limit=20)
+        assert "error" not in out, out
+
+    assert parse_calls == [], (
+        f"search-history re-parsed {len(parse_calls)} already-indexed transcripts "
+        "across a simulated keystroke sequence"
+    )
+
+
+def test_search_recall_sessions_endpoint_keystrokes_do_not_reparse_or_fork(tmp_path, monkeypatch):
+    """/api/search-recall-sessions, same guarantee as above for the sidebar's
+    other search channel (ccc_server/recent_search.py -> session_fts)."""
+    session_fts = _session_fts_perf_env(tmp_path, monkeypatch)
+
+    parse_calls = []
+    real_parse = session_fts._parse_file
+    monkeypatch.setattr(session_fts, "_parse_file", lambda a: (parse_calls.append(a), real_parse(a))[1])
+
+    def boom(*a, **k):  # pragma: no cover - only runs on regression
+        raise AssertionError(f"search-recall-sessions forked a subprocess: {a!r}")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(subprocess, "check_output", boom)
+
+    for prefix in ["q", "qu", "qua", "quarterly", "quarterly rollout"]:
+        out = server.search_recent_sessions(prefix, days=30, limit=20)
+        assert isinstance(out.get("results"), list)
+
+    assert parse_calls == [], (
+        f"search-recall-sessions re-parsed {len(parse_calls)} already-indexed transcripts "
+        "across a simulated keystroke sequence"
+    )
+
+
+def test_search_sessions_enriched_keystroke_latency_is_bounded(tmp_path, monkeypatch):
+    """MEMO-FIX-19: enrichment (cwd/engine/snippet lookups) adds SQL work on
+    top of session_fts's own BM25 query -- it must stay a handful of batched,
+    indexed queries (see _meta_for_sids / _snippet_for_sids / _plain_snippets),
+    not scale with corpus size. Measures real latency against a corpus sized
+    close to the production one (~2.8k sessions) mentioned in the MEMO-FIX-19
+    ticket, scaled down for CI runtime while still being big enough that an
+    O(corpus) regression would blow the budget."""
+    session_fts = _session_fts_perf_env(tmp_path, monkeypatch, n_docs=800)
+
+    durations = []
+    for prefix in ["q", "qu", "qua", "quarterly rollout deadline"]:
+        t0 = time.time()
+        out = session_fts.search_sessions_enriched(prefix, limit=20)
+        durations.append(time.time() - t0)
+        assert isinstance(out, list)
+
+    assert max(durations) < 0.5, (
+        f"search_sessions_enriched took {max(durations):.3f}s against an 800-session "
+        "corpus -- likely scanning per-hit instead of batching"
+    )
 
 
 def _assert_reader_not_blocked_by_open_writer(connect, db_path, init_db, table):

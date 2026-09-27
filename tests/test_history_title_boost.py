@@ -10,12 +10,17 @@ because BM25 scored only per-row snippets with no title signal.
 Also covers the synthetic-injection guard: harness-injected user rows
 (`<recommended_plugins>…`) must not shadow the real first user message.
 """
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 import _history_index.search as history_search
+from ccc_server import history_search as _ccc_history_search
+from ccc_server import session_fts
 
 
 def _build_index(db_path: Path) -> None:
@@ -110,25 +115,86 @@ class TestTitleBoost(unittest.TestCase):
         fillers = [r for r in res if r["session_id"].startswith("sess-filler")]
         self.assertTrue(fillers, "incidental content hits should follow titles")
 
-    def test_server_lexical_path_also_boosts_titles(self):
-        """The /api/search-history default (lexical) path gets the same boost —
-        it has its own BM25 SQL, separate from the vendored search."""
-        import server
-        orig_path = server._HISTORY_INDEX_PATH
-        orig_conn = server._history_conn
-        try:
-            server._HISTORY_INDEX_PATH = Path(self.con.execute(
-                "PRAGMA database_list").fetchone()[2])
-            server._history_conn = None
-            out = server.search_conversation_history("zephyr", limit=5)
-            res = out.get("results") or []
-            titled = [r for r in res if r.get("session_id") == "sess-title"]
-            self.assertTrue(titled, "titled session missing via server lexical path")
-            self.assertLess(res.index(titled[0]), 5)
-        finally:
-            server._HISTORY_INDEX_PATH = orig_path
-            server._history_conn = orig_conn
-
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture
+def _sfts_title_env(tmp_path, monkeypatch):
+    """MEMO-FIX-19: search_conversation_history no longer reads the vendored
+    claude-index db (server._HISTORY_INDEX_PATH) at all -- it delegates to
+    session_fts. Isolated env mirroring tests/test_session_fts.py's fts_env."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex-empty"))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+    return projects_dir
+
+
+def _write_titled_session(projects_dir, sid, custom_title, user_text, repo="proj"):
+    d = projects_dir / repo
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{sid}.jsonl"
+    lines = [json.dumps({"type": "custom-title", "customTitle": custom_title})]
+    lines.append(json.dumps({
+        "type": "user", "cwd": str(d),
+        "message": {"role": "user", "content": user_text},
+    }))
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_search_conversation_history_also_boosts_titles(_sfts_title_env):
+    """CCC-615, re-verified against the session_fts-backed path (MEMO-FIX-19):
+    a session whose TITLE is about "zephyr" must outrank sessions where
+    "zephyr" only appears buried, densely repeated, in assistant chatter --
+    session_fts's BM25_WEIGHTS gives the title column 15x the weight of body
+    text, so this should hold with no extra boost logic needed."""
+    projects_dir = _sfts_title_env
+    _write_titled_session(
+        projects_dir, "sess-title-0001",
+        "fix the zephyr campaign for joyce",
+        "I need help fixing the zephyr campaign for joyce",
+    )
+    for s in range(15):
+        sid = f"sess-filler-{s:04d}"
+        d = projects_dir / "proj"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{sid}.jsonl"
+        lines = [json.dumps({
+            "type": "user", "cwd": str(d),
+            "message": {"role": "user", "content": "how do I center a div in css"},
+        })]
+        for t in range(5):
+            lines.append(json.dumps({
+                "type": "assistant", "cwd": str(d),
+                "message": {"role": "assistant", "content": [{
+                    "type": "text",
+                    "text": f"zephyr mention number {t} zephyr zephyr padding content row",
+                }]},
+            }))
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    out = _ccc_history_search.search_conversation_history("zephyr", limit=5)
+    res = out.get("results") or []
+    assert res, "no results at all"
+    session_ids = [r["session_id"] for r in res]
+    assert "sess-title-0001" in session_ids, (
+        "titled session missing from the first page: "
+        f"got {session_ids}"
+    )
+    assert session_ids.index("sess-title-0001") == 0, (
+        "titled session should rank ABOVE incidental content-only hits, "
+        f"got order {session_ids}"
+    )

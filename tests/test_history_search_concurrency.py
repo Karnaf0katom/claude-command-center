@@ -7,14 +7,21 @@ A single sqlite3.Connection cannot be used concurrently from multiple threads:
 overlapping .execute() on one shared handle raises SQLITE_MISUSE, surfaced as
 `sqlite3.InterfaceError: bad parameter or other API misuse`.
 
-These tests build a real FTS5 index matching the production schema and hammer
-`search_conversation_history` / `get_history_message` from many threads at once.
-Before the fix (no `_history_query_lock`), this reliably raised InterfaceError
-inside one of the worker threads. After the fix, all calls return clean results.
+`get_history_message` (the click-through panel) still goes through that shared
+connection and is exercised here for real. `search_conversation_history` moved
+to ccc_server.session_fts under MEMO-FIX-19, which opens one sqlite3.Connection
+per thread (see session_fts._get_connection) rather than sharing a single
+handle — the original SQLITE_MISUSE class this file was written to catch no
+longer applies to the search path. It's still worth hammering concurrently
+(many threads opening/syncing the same on-disk FTS db must not raise or
+deadlock), just via a session_fts-backed corpus instead of the old
+claude-index `messages`/`messages_fts` schema.
 
 Written in stdlib `unittest` (no pytest) so it runs under CI's
 `python -m unittest discover` — CCC keeps the runtime and its CI stdlib-only.
 """
+import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -136,6 +143,48 @@ def _build_index(db_path: Path, n_docs: int = 400) -> None:
     con.close()
 
 
+def _build_session_fts_corpus(projects_dir: Path, n_docs: int = 400) -> None:
+    """Claude-Code-shaped transcripts for session_fts to index, mirroring the
+    content _build_index used to put in the old claude-index schema."""
+    repo_dir = projects_dir / "proj"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n_docs):
+        sid = f"aaaaaaaa-0000-0000-0000-{i:012d}"
+        content = f"alpha beta gamma session {i} widget refactor deadline"
+        line = json.dumps({
+            "type": "user",
+            "cwd": str(repo_dir),
+            "message": {"role": "user", "content": content},
+        })
+        (repo_dir / f"{sid}.jsonl").write_text(line + "\n", encoding="utf-8")
+
+
+def _set_session_fts_env(tmp_dir: Path) -> None:
+    os.environ["CCC_SESSION_FTS_DB"] = str(tmp_dir / "session_fts.sqlite")
+    os.environ["CCC_PROJECTS_ROOT"] = str(tmp_dir / "projects")
+    os.environ["CCC_CODEX_SESSIONS_ROOT"] = str(tmp_dir / "codex-empty")
+    os.environ["CCC_KIMI_SESSIONS_ROOT"] = str(tmp_dir / "kimi-empty")
+    os.environ["CCC_GEMINI_TMP_ROOT"] = str(tmp_dir / "gemini-empty")
+    os.environ["CCC_CURSOR_PROJECTS_ROOT"] = str(tmp_dir / "cursor-empty")
+    os.environ["CCC_SESSION_FTS_DAYS"] = "0"
+    os.environ["CCC_SESSION_FTS_ALLOW_SCRATCH"] = "1"
+    os.environ["CCC_SESSION_FTS_EMBED"] = "0"
+
+
+def _prewarm_session_fts(query: str) -> None:
+    """Run search_conversation_history once and drain any background
+    cold-start indexing before the concurrent phase starts, so the threaded
+    workload below exercises concurrent READS (the thing under test), not a
+    race against the one-time initial index build (covered separately by
+    test_session_fts.py::test_search_sessions_cold_start_offloads_to_background)."""
+    from ccc_server import session_fts
+
+    server.search_conversation_history(query, limit=1)
+    deadline = time.monotonic() + _THREAD_TIMEOUT_SECONDS
+    while session_fts.is_indexing() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def _reset_history_conn() -> None:
     """Drop any cached connection so the next open() picks up the patched path."""
     with server._history_conn_lock:
@@ -236,13 +285,16 @@ def _run_concurrent_mixed_search_and_fetch():
     _raise_worker_errors(errors)
 
 
-def _run_history_case(case, db_path):
+def _run_history_case(case, tmp_dir):
     if case == "__hang__":
         threading.Event().wait()
         return
 
-    server._HISTORY_INDEX_PATH = Path(db_path)
+    tmp_dir = Path(tmp_dir)
+    server._HISTORY_INDEX_PATH = tmp_dir / "index.db"
     _reset_history_conn()
+    _set_session_fts_env(tmp_dir)
+    _prewarm_session_fts("widget refactor")
     succeeded = False
     try:
         if case == "search":
@@ -264,7 +316,7 @@ def _run_history_case(case, db_path):
 
 def _run_isolated_history_case(
     case,
-    db_path,
+    tmp_dir,
     timeout=_PROCESS_TIMEOUT_SECONDS,
 ):
     command = [
@@ -273,7 +325,7 @@ def _run_isolated_history_case(
         "tests.test_history_search_concurrency",
         "--history-worker",
         case,
-        str(db_path),
+        str(tmp_dir),
     ]
     try:
         result = subprocess.run(
@@ -305,22 +357,28 @@ class TestHistorySearchConcurrency(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self._db = Path(self._tmp.name) / "index.db"
-        _build_index(self._db)
+        self._tmp_dir = Path(self._tmp.name)
+        _build_index(self._tmp_dir / "index.db")
+        _build_session_fts_corpus(self._tmp_dir / "projects")
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def test_concurrent_searches_do_not_raise(self):
-        """Many threads searching the shared connection must all succeed.
-
-        Pre-fix this raised sqlite3.InterfaceError ('bad parameter or other API
-        misuse') in at least one worker thread under load."""
-        _run_isolated_history_case("search", self._db)
+        """Many threads calling search_conversation_history (session_fts,
+        thread-local connections) must all succeed concurrently."""
+        _run_isolated_history_case("search", self._tmp_dir)
 
     def test_concurrent_mixed_search_and_fetch(self):
-        """Search and fetch must coexist without SQLITE_MISUSE or hanging."""
-        _run_isolated_history_case("mixed", self._db)
+        """search_conversation_history (session_fts) and get_history_message
+        (the shared claude-index connection under _history_query_lock) must
+        coexist without SQLITE_MISUSE or hanging.
+
+        Pre-fix, sharing one sqlite3.Connection across threads for the search
+        path reliably raised sqlite3.InterfaceError ('bad parameter or other
+        API misuse') under load; get_history_message still uses that shared
+        connection today, so this remains a real regression guard for it."""
+        _run_isolated_history_case("mixed", self._tmp_dir)
 
 
 if __name__ == "__main__":

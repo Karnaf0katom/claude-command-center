@@ -29,6 +29,7 @@ import time
 import urllib.request
 from array import array
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Query sanitization reuse from history_search
@@ -166,6 +167,29 @@ def _get_codex_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".codex" / "sessions"
+
+
+def _get_kimi_dir() -> Path:
+    env = os.environ.get("CCC_KIMI_SESSIONS_ROOT")
+    if env:
+        return Path(env)
+    home = os.environ.get("KIMI_CODE_HOME", "").strip()
+    base = Path(os.path.expanduser(home)) if home else Path.home() / ".kimi-code"
+    return base / "sessions"
+
+
+def _get_gemini_dir() -> Path:
+    env = os.environ.get("CCC_GEMINI_TMP_ROOT")
+    if env:
+        return Path(env)
+    return Path.home() / ".gemini" / "tmp"
+
+
+def _get_cursor_dir() -> Path:
+    env = os.environ.get("CCC_CURSOR_PROJECTS_ROOT")
+    if env:
+        return Path(env)
+    return Path.home() / ".cursor" / "projects"
 
 
 def _repo_of(cwd: str) -> str:
@@ -339,6 +363,7 @@ def _finish(sid, engine, path, cwd, title, users, assists, tools, files, ts0, ts
         "sid": sid,
         "engine": engine,
         "path": path,
+        "cwd": cwd or "",
         "size": st.st_size,
         "mtime": st.st_mtime,
         "n_user": len(users),
@@ -491,10 +516,202 @@ def parse_codex(path: str) -> dict | None:
     return r
 
 
+def parse_kimi(path: str) -> dict | None:
+    """Kimi Code's wire.jsonl: an event-sourced log at
+    <sessionDir>/agents/main/wire.jsonl. The session id and cwd are not in
+    the transcript itself -- the session dir's own name IS the sessionId
+    (verified against a real ~/.kimi-code/sessions/*/session_<uuid> layout),
+    and cwd lives in the sibling state.json's `workDir`."""
+    p = Path(path)
+    try:
+        session_dir = p.parents[2]
+    except IndexError:
+        return None
+    sid = session_dir.name
+    if not sid:
+        return None
+    cwd = ""
+    try:
+        with open(session_dir / "state.json", "rb") as sf:
+            state = json.loads(sf.read())
+        if isinstance(state, dict):
+            cwd = state.get("cwd") or ""
+    except Exception:
+        pass
+    users, assists, tools = [], [], []
+    files = set()
+    ts0 = ts1 = None
+    with open(path, "rb") as f:
+        for raw in f:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            t = d.get("type")
+            tms = d.get("time")
+            if isinstance(tms, (int, float)) and tms > 0:
+                ts = tms / 1000.0
+                ts0 = ts if ts0 is None else min(ts0, ts)
+                ts1 = ts if ts1 is None else max(ts1, ts)
+            if t == "turn.prompt":
+                blocks = d.get("input")
+                if isinstance(blocks, list):
+                    txt = "".join(
+                        str(b.get("text") or "") for b in blocks
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ).strip()
+                    if txt and _is_real_prompt(txt):
+                        users.append(txt)
+            elif t == "context.append_loop_event":
+                ev = d.get("event") or {}
+                et = ev.get("type")
+                if et == "content.part":
+                    part = ev.get("part") or {}
+                    if part.get("type") == "text":
+                        txt = part.get("text") or ""
+                        if txt:
+                            assists.append(txt)
+                elif et == "tool.call":
+                    name = ev.get("name") or ""
+                    args = ev.get("args") or {}
+                    cmd = args.get("command")
+                    if isinstance(cmd, str) and "git commit" in cmd:
+                        tools.append(cmd[:1500])
+                    fp = args.get("file_path") or args.get("path") or args.get("notebook_path")
+                    if fp and name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                        files.add(fp)
+                elif et == "tool.result":
+                    out = (ev.get("result") or {}).get("output")
+                    if isinstance(out, str) and out:
+                        tools.append(out[:4000])
+    if not users and not assists:
+        return None
+    return _finish(sid, "kimi", path, cwd, "", users, assists, tools, files, ts0, ts1)
+
+
+def parse_gemini(path: str) -> dict | None:
+    """Gemini CLI chat logs (~/.gemini/tmp/<slug>/chats/session-*.json[l]).
+    Reuses ccc_server.gemini's already-battle-tested loader/field-extraction
+    helpers rather than re-deriving the (single-doc vs line-delimited,
+    $set-patched header) format here."""
+    from ccc_server import gemini as _gem
+
+    p = Path(path)
+    data = _gem._load_gemini_chat(p)
+    if not isinstance(data, dict):
+        return None
+    sid = data.get("sessionId") or p.stem
+    if not sid:
+        return None
+    cwd = _gem._gemini_project_root_for_chat(p)
+    users, assists, tools = [], [], []
+    files = set()
+    ts0 = ts1 = None
+    for msg in data.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        ts = _ts(msg.get("timestamp"))
+        if ts:
+            ts0 = ts if ts0 is None else min(ts0, ts)
+            ts1 = ts if ts1 is None else max(ts1, ts)
+        mtype = msg.get("type")
+        text = _gem._gemini_message_text(msg)
+        if mtype == "user":
+            if text and _is_real_prompt(text):
+                users.append(text)
+        elif mtype == "gemini":
+            if text:
+                assists.append(text)
+            for call in (msg.get("toolCalls") or []):
+                if not isinstance(call, dict):
+                    continue
+                cmd = _gem._gemini_tool_command(call)
+                if isinstance(cmd, str) and "git commit" in cmd:
+                    tools.append(cmd[:1500])
+                out = _gem._gemini_tool_output(call)
+                if out:
+                    tools.append(out[:4000])
+                args = _gem._gemini_tool_args(call)
+                name = _gem._gemini_tool_name(call)
+                fp = args.get("file_path") or args.get("absolute_path") or args.get("path")
+                if fp and name.lower() in ("writefile", "edit", "replace"):
+                    files.add(fp)
+    if not users and not assists:
+        return None
+    return _finish(sid, "gemini", str(p), cwd, "", users, assists, tools, files, ts0, ts1)
+
+
+def parse_cursor(path: str) -> dict | None:
+    """Cursor's per-session transcript at
+    <projects>/<slug>/agent-transcripts/<session-id>/<session-id>.jsonl --
+    the session id is the transcript's own parent directory name, and cwd
+    is only recoverable by decoding the project-slug directory name (there
+    is no cwd field in the transcript). Reuses ccc_server.cursor's helpers
+    for both, plus its <user_query>/[REDACTED] text cleanup."""
+    from ccc_server import cursor as _cur
+
+    p = Path(path)
+    sid = p.parent.name
+    if not sid:
+        return None
+    cwd = _cur._cursor_cwd_from_transcript_path(p)
+    users, assists, tools = [], [], []
+    files = set()
+    ts0 = ts1 = None
+    with open(path, "rb") as f:
+        for raw in f:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            ts = _ts(_cur._cursor_event_timestamp(d))
+            if ts:
+                ts0 = ts if ts0 is None else min(ts0, ts)
+                ts1 = ts if ts1 is None else max(ts1, ts)
+            role = _cur._cursor_event_role(d)
+            blocks = _cur._cursor_content_blocks(d)
+            if role == "user":
+                for b in blocks:
+                    if b.get("type") == "text":
+                        txt = _cur._cursor_user_text(b.get("text") or "")
+                        if txt and _is_real_prompt(txt):
+                            users.append(txt)
+            elif role == "assistant":
+                for b in blocks:
+                    if b.get("type") == "text":
+                        txt = _cur._cursor_visible_text(b.get("text") or "")
+                        if txt:
+                            assists.append(txt)
+                    elif b.get("type") == "tool_use":
+                        cmd = _cur._cursor_tool_command(b)
+                        if isinstance(cmd, str) and "git commit" in cmd:
+                            tools.append(cmd[:1500])
+                        args = _cur._cursor_tool_args(b)
+                        name = _cur._cursor_tool_name(b)
+                        fp = args.get("file_path") or args.get("target_file") or args.get("path")
+                        if fp and name in ("StrReplace", "Write", "Edit", "MultiEdit"):
+                            files.add(fp)
+    if not users and not assists:
+        return None
+    return _finish(sid, "cursor", path, cwd, "", users, assists, tools, files, ts0, ts1)
+
+
+_PARSERS = {
+    "claude": parse_claude,
+    "codex": parse_codex,
+    "kimi": parse_kimi,
+    "gemini": parse_gemini,
+    "cursor": parse_cursor,
+}
+
+
 def _parse_file(args: tuple[str, str]) -> dict | None:
     engine, path = args
     try:
-        return parse_claude(path) if engine == "claude" else parse_codex(path)
+        parser = _PARSERS.get(engine)
+        return parser(path) if parser else None
     except Exception:
         return None
 
@@ -528,6 +745,37 @@ def _candidate_files(days: float | None = None) -> list[tuple[str, str, float, i
                 continue
             if st.st_size > 0 and st.st_mtime >= cutoff:
                 out.append(("codex", str(p), st.st_mtime, st.st_size))
+
+    kimi_dir = _get_kimi_dir()
+    if kimi_dir.exists():
+        for p in kimi_dir.glob("*/*/agents/main/wire.jsonl"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size > 0 and st.st_mtime >= cutoff:
+                out.append(("kimi", str(p), st.st_mtime, st.st_size))
+
+    gemini_dir = _get_gemini_dir()
+    if gemini_dir.exists():
+        for pattern in ("*/chats/session-*.json", "*/chats/session-*.jsonl"):
+            for p in gemini_dir.glob(pattern):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                if st.st_size > 0 and st.st_mtime >= cutoff:
+                    out.append(("gemini", str(p), st.st_mtime, st.st_size))
+
+    cursor_dir = _get_cursor_dir()
+    if cursor_dir.exists():
+        for p in cursor_dir.glob("*/agent-transcripts/*/*.jsonl"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size > 0 and st.st_mtime >= cutoff:
+                out.append(("cursor", str(p), st.st_mtime, st.st_size))
     return out
 
 
@@ -570,6 +818,15 @@ def _init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS ssec_map (sid TEXT, rid INTEGER);
         CREATE INDEX IF NOT EXISTS idx_ssec_map_sid ON ssec_map(sid);
     """)
+    # MEMO-FIX-19: file_cache gained cwd/engine so the sidebar-search
+    # endpoints (search-history, search-recall-sessions) can be served
+    # straight from this index instead of a second per-harness store --
+    # migration-safe ALTER for DBs built before these columns existed.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(file_cache)")}
+    if "cwd" not in cols:
+        conn.execute("ALTER TABLE file_cache ADD COLUMN cwd TEXT DEFAULT ''")
+    if "engine" not in cols:
+        conn.execute("ALTER TABLE file_cache ADD COLUMN engine TEXT DEFAULT ''")
     conn.commit()
 
 
@@ -995,19 +1252,22 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                         )
                         _insert_sections(conn, sid, r.get("sections") or [])
                         conn.execute(
-                            "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 1)",
-                            (path, sid, mt, sz),
+                            "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed, cwd, engine) "
+                            "VALUES (?, ?, ?, ?, 1, ?, ?)",
+                            (path, sid, mt, sz, r.get("cwd", ""), eng),
                         )
                         embed_jobs.append((sid, _session_chunks(r)))
                     else:
                         conn.execute(
-                            "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 0)",
-                            (path, sid, mt, sz),
+                            "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed, cwd, engine) "
+                            "VALUES (?, ?, ?, ?, 0, ?, ?)",
+                            (path, sid, mt, sz, r.get("cwd", ""), eng),
                         )
                 else:
                     conn.execute(
-                        "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 0)",
-                        (path, "", mt, sz),
+                        "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed, cwd, engine) "
+                        "VALUES (?, ?, ?, ?, 0, '', ?)",
+                        (path, "", mt, sz, eng),
                     )
 
             for p in deleted_paths:
@@ -1309,3 +1569,159 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
     final_sids = _rrf([fts_sids, vector_sids]) if vector_sids else fts_sids
 
     return [{"session_id": sid, "score": scores.get(sid, 0.0)} for sid in final_sids[:limit]]
+
+
+# --- Sidebar-search enrichment (MEMO-FIX-19) ----------------------------------
+# search_sessions() above returns bare {session_id, score} hits. The two
+# sidebar search endpoints (/api/search-history, /api/search-recall-sessions)
+# and the Ask tab's retrieval both need session-level cwd/engine/mtime plus a
+# highlighted snippet -- this is the one shared enrichment layer for all three,
+# replacing what used to be a separate Claude-Index read (ccc_server/
+# history_search.py) and a from-scratch per-harness byte scan
+# (ccc_server/recent_search.py). Those two modules now call in here; see their
+# thin wrapper functions for the day-window / "Nd"-string / snippet-cleanup
+# details that are specific to each caller.
+
+
+def _meta_for_sids(conn: sqlite3.Connection, sids: list[str]) -> dict[str, dict]:
+    """Batched (path, cwd, engine, mtime) lookup for already-indexed sids --
+    one bounded IN-clause query, no per-row file I/O."""
+    if not sids:
+        return {}
+    placeholders = ",".join("?" for _ in sids)
+    out: dict[str, dict] = {}
+    try:
+        cur = conn.execute(
+            f"SELECT sid, path, cwd, engine, mtime FROM file_cache "
+            f"WHERE sid IN ({placeholders}) AND indexed = 1",
+            sids,
+        )
+    except sqlite3.OperationalError:
+        return out
+    for sid, path, cwd, engine, mtime in cur.fetchall():
+        out[sid] = {"path": path or "", "cwd": cwd or "", "engine": engine or "", "mtime": mtime or 0.0}
+    return out
+
+
+def _snippet_for_sids(conn: sqlite3.Connection, sids: list[str], or_q: str) -> dict[str, str]:
+    """<mark>-highlighted snippet per sid via FTS5's own snippet() with
+    automatic column selection (col=-1: whichever of title/prompts/report/
+    body/meta has the most matches). Only covers sids that actually matched
+    `or_q` -- a pure-vector (semantic-only) hit falls back to a plain excerpt
+    via _plain_snippets below."""
+    out: dict[str, str] = {}
+    if not sids or not or_q:
+        return out
+    placeholders = ",".join("?" for _ in sids)
+    try:
+        cur = conn.execute(
+            f"SELECT sid, snippet(sdoc, -1, '<mark>', '</mark>', '…', 20) FROM sdoc "
+            f"WHERE sdoc MATCH ? AND sid IN ({placeholders})",
+            [or_q, *sids],
+        )
+        for sid, sn in cur.fetchall():
+            if sn and sid not in out:
+                out[sid] = sn
+    except sqlite3.OperationalError:
+        pass
+    return out
+
+
+def _plain_snippets(conn: sqlite3.Connection, sids: list[str]) -> dict[str, str]:
+    """Un-highlighted fallback excerpt (title + first prompts) for sids with
+    no FTS match to snippet() -- semantic-only hits still get something to
+    show instead of an empty preview."""
+    out: dict[str, str] = {}
+    if not sids:
+        return out
+    placeholders = ",".join("?" for _ in sids)
+    try:
+        cur = conn.execute(
+            f"SELECT sid, title, prompts FROM sdoc WHERE sid IN ({placeholders})", sids,
+        )
+    except sqlite3.OperationalError:
+        return out
+    for sid, title, prompts in cur.fetchall():
+        text = ((title or "") + " " + " ".join((prompts or "").split())).strip()
+        out[sid] = text[:240]
+    return out
+
+
+def search_sessions_enriched(
+    query: str,
+    limit: int = 20,
+    cwd_like: str | None = None,
+    since_ts: float | None = None,
+    source: str = "bm25",
+) -> list[dict]:
+    """Ranked session hits enriched for direct HTTP-response use.
+
+    Shape matches what the sidebar's history/recall augmentation and the Ask
+    tab's retrieval already expect (see static/app.js _mergeHistoryResults
+    and ccc_server/ask.py merge_ask_hits): uuid, session_id, type, cwd,
+    git_branch, timestamp, ts_unix, snippet, score, _source, transcript_path.
+
+    `since_ts`/`cwd_like` are a post-filter over a generously-oversized
+    candidate set (cheap: an indexed BM25/RRF query, not a corpus scan) rather
+    than a SQL-level filter, since neither is exercised by a real caller
+    today (recall-sessions and the sidebar's search-history call never send
+    `cwd`) -- see the MEMO-FIX-19 ticket notes for the tradeoff.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    hits = search_sessions(q, limit=max(limit * 5, 100))
+    if not hits:
+        return []
+
+    conn = _get_connection()
+    sids = [h["session_id"] for h in hits]
+    meta = _meta_for_sids(conn, sids)
+
+    terms = extract_history_terms(q, max_terms=25)
+    or_q = " OR ".join(f'"{t}"' for t in terms) if terms else ""
+    marked = _snippet_for_sids(conn, sids, or_q)
+    plain: dict[str, str] | None = None
+
+    cwd_filter = (cwd_like or "").strip()
+    out = []
+    for h in hits:
+        sid = h["session_id"]
+        m = meta.get(sid)
+        if not m:
+            continue
+        mtime = m.get("mtime") or 0.0
+        if since_ts is not None and mtime < since_ts:
+            continue
+        cwd = m.get("cwd") or ""
+        if cwd_filter and cwd_filter not in cwd:
+            continue
+        snippet = marked.get(sid)
+        if not snippet:
+            if plain is None:
+                plain = _plain_snippets(conn, sids)
+            snippet = plain.get(sid, "")
+        out.append({
+            "uuid": f"{source}:{sid}",
+            "session_id": sid,
+            "type": m.get("engine") or "",
+            "cwd": cwd,
+            "git_branch": "",
+            "timestamp": (
+                datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                if mtime else ""
+            ),
+            "ts_unix": mtime,
+            "snippet": snippet,
+            "score": h.get("score", 0.0),
+            "_source": source,
+            "transcript_path": m.get("path") or "",
+        })
+        if len(out) >= limit:
+            break
+    return out

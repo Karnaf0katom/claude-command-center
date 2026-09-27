@@ -28164,30 +28164,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/engines/update-status":
             self.send_json(_engine_update_status())
         elif path == "/api/search-history":
-            # Read window onto ~/.claude-index/index.db, populated by the
-            # bundled _history_index indexer. Returns BM25-ranked matches
-            # with <mark>-highlighted snippets, plus a per-result _source
-            # tag (bm25 | vec | fused) for the UI badge.
+            # MEMO-FIX-19: backed by ccc_server.session_fts (BM25 + optional
+            # local-Ollama semantic fusion), which incrementally re-syncs
+            # itself by (mtime, size) on every call -- no separate freshening
+            # step needed here. Returns BM25-ranked matches with
+            # <mark>-highlighted snippets, plus a per-result _source tag
+            # (bm25 | semantic) for the UI badge.
             #
-            # semantic=1 turns on hybrid retrieval (BM25 ∪ vec, fused via
-            # RRF). Falls back to BM25 when sqlite-vec / Ollama is missing.
+            # semantic=1 turns on hybrid retrieval (BM25 ∪ local embeddings,
+            # fused via RRF). Falls back to BM25 when Ollama is unavailable.
             qs = urllib.parse.parse_qs(parsed.query)
             q = (qs.get("q", [""])[0] or "").strip()
             if not q:
                 self.send_json({"results": []})
             else:
-                # Self-freshening index: every search kicks a throttled
-                # incremental ingest in the background (only re-reads
-                # transcripts that changed since the last pass). This query
-                # is served from the current index immediately; new content
-                # is searchable moments later without any manual action.
-                if _hi_indexer is not None:
-                    try:
-                        _hi_indexer.maybe_ingest(
-                            min_gap_sec=_HISTORY_AUTO_INGEST_GAP_SEC
-                        )
-                    except Exception:
-                        pass  # freshness is best-effort; never break search
                 cwd_like = (qs.get("cwd", [""])[0] or "").strip() or None
                 since = (qs.get("since", [""])[0] or "").strip() or None
                 limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()

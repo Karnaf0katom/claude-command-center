@@ -109,6 +109,9 @@ def mock_graph_env(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
     monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
 
@@ -336,6 +339,9 @@ def mock_trap_env(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
     monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", repos_str)
 
@@ -595,6 +601,9 @@ def mock_coverage_env(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
     monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
     monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", repos_str)
 

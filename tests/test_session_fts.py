@@ -18,12 +18,21 @@ def fts_env(tmp_path, monkeypatch):
     db_path = tmp_path / "session_fts.sqlite"
     projects_dir = tmp_path / "projects"
     codex_dir = tmp_path / "codex"
+    kimi_dir = tmp_path / "kimi"
+    gemini_dir = tmp_path / "gemini"
+    cursor_dir = tmp_path / "cursor"
     projects_dir.mkdir(parents=True)
     codex_dir.mkdir(parents=True)
+    kimi_dir.mkdir(parents=True)
+    gemini_dir.mkdir(parents=True)
+    cursor_dir.mkdir(parents=True)
 
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(kimi_dir))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(gemini_dir))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(cursor_dir))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")  # disable cutoff for tests
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     # These tests exercise FTS mechanics, not the optional embeddings channel;
@@ -50,6 +59,9 @@ def fts_env(tmp_path, monkeypatch):
         "db": db_path,
         "projects": projects_dir,
         "codex": codex_dir,
+        "kimi": kimi_dir,
+        "gemini": gemini_dir,
+        "cursor": cursor_dir,
     }
 
 

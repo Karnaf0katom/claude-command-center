@@ -8,7 +8,6 @@ in server.py are reached via `_core` at call time."""
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 import threading
@@ -16,6 +15,11 @@ import time
 import uuid
 
 from ccc_server import core as _core
+
+# Lazy-imported inside search_conversation_history: session_fts imports
+# extract_history_terms etc. from this module at its own load time, so a
+# top-level import here would be circular (whichever module loads first
+# would force-load the other mid-init).
 
 # ---------------------------------------------------------------------------
 # Conversation history search — read-only window onto the separate `claude-index`
@@ -29,29 +33,18 @@ from ccc_server import core as _core
 # sqlite-vec / Ollama still loads the rest of the server cleanly.
 try:
     from _history_index import db as _hi_db
-    from _history_index import search as _hi_search
     from _history_index.manager import indexer as _hi_indexer
     _HI_AVAILABLE = True
 except Exception:
     _HI_AVAILABLE = False
     _hi_db = None  # type: ignore
-    _hi_search = None  # type: ignore
     _hi_indexer = None  # type: ignore
 
 # _HISTORY_INDEX_PATH / _history_conn / _history_conn_lock live in server.py
 # (tests patch them via the server module); reached through _core below.
-
-# Self-freshening search: each /api/search-history request kicks a throttled
-# background incremental ingest so search content tracks live transcripts
-# without any manual re-index. The gap keeps search-as-you-type from
-# stampeding the indexer; the first search after server start always ingests.
-try:
-    _HISTORY_AUTO_INGEST_GAP_SEC = max(
-        30.0,
-        float(os.environ.get("CCC_HISTORY_AUTO_INGEST_SEC", "120")),
-    )
-except ValueError:
-    _HISTORY_AUTO_INGEST_GAP_SEC = 120.0
+# Used only by get_history_message + the /api/history/status and
+# /api/history/setup admin endpoints now -- /api/search-history moved to
+# session_fts, which self-freshens by (mtime, size) on every call.
 
 # A single sqlite3.Connection cannot be used concurrently from multiple
 # threads. check_same_thread=False only silences Python's guard — it does NOT
@@ -168,58 +161,6 @@ def _clean_history_snippet(snippet):
     return s if s else snippet
 
 
-def _rerank_history_results(results, query, conn):
-    """Stable-rerank so exact-phrase matches rank above all-words (AND)
-    matches, which rank above any-word (OR) / semantic-only matches.
-
-    A bare multi-word query is OR-rewritten for recall (see
-    _rewrite_history_query), and the semantic path adds pure-vector hits with
-    no literal word at all. Both let a result that contains only one query
-    word — or none — outrank one containing the whole phrase, which reads as
-    "random results". This re-tiers the already-fetched top-N by literal
-    presence in the message body, preserving the within-tier BM25/RRF order.
-
-    No-op for single-word queries and for queries where the user supplied
-    their own FTS operators or quotes — those already mean what was typed.
-    """
-    if not results:
-        return results
-    q = (query or "").strip()
-    if not q or _is_explicit_history_fts_query(q):
-        return results
-    tokens = [t.lower() for t in extract_history_terms(q)]
-    if len(tokens) < 2:
-        return results
-    phrase = " ".join(tokens)
-    # Snippets are a 12-token window — too short to test for ALL words. Pull
-    # the full body for the candidate uuids in one query and tier on that.
-    uuids = [r.get("uuid") for r in results if r.get("uuid")]
-    content_by_uuid = {}
-    if uuids:
-        placeholders = ",".join("?" for _ in uuids)
-        try:
-            with _history_query_lock:
-                for row in conn.execute(
-                    f"SELECT uuid, content FROM messages WHERE uuid IN ({placeholders})",
-                    uuids,
-                ):
-                    content_by_uuid[row["uuid"]] = (row["content"] or "").lower()
-        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
-            return results
-
-    def _tier(r):
-        c = content_by_uuid.get(r.get("uuid"), "")
-        if not c:
-            return 2
-        if phrase in c:
-            return 0
-        if all(t in c for t in tokens):
-            return 1
-        return 2
-
-    return sorted(results, key=_tier)
-
-
 def _history_since_threshold(since):
     """Parse '7d', '24h', '30m', '2w' into a unix-timestamp threshold.
     Returns None for empty / 'all' / unparseable input — caller treats
@@ -243,6 +184,32 @@ def _history_since_threshold(since):
     except ValueError:
         pass
     return None
+
+
+def _since_to_ts(since):
+    """Flexible `since` parser for search_conversation_history: accepts
+    either a relative-window string ('7d', '24h', ...) from the sidebar, or
+    an absolute unix timestamp (float/int, or a numeric string) from
+    ask.py's `_ask_range_window`. The latter used to crash this function
+    outright (`since.strip()` on a float) and get silently swallowed by
+    ask.py's own try/except, so a bounded Ask-tab date range always searched
+    zero history -- fixed as a side effect of unifying both callers onto one
+    retrieval path."""
+    if since is None:
+        return None
+    if isinstance(since, (int, float)):
+        return float(since) if since > 0 else None
+    s = str(since).strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        pass
+    else:
+        if v > 1_000_000:  # looks like an absolute unix timestamp already
+            return v
+    return _history_since_threshold(s)
 
 
 def _open_history_index():
@@ -298,157 +265,44 @@ def _history_drop_conn():
 
 
 def search_conversation_history(query, limit=20, cwd_like=None, since=None, semantic=False):
-    """Search the indexed conversation history.
+    """Search conversation history across every indexed harness.
 
-    semantic=False (default): BM25 over FTS5 with auto OR-rewrite. Results
-        get _source='bm25'.
-    semantic=True: hybrid retrieval via the vendored _history_index.search —
-        top-K BM25 ∪ top-K vec, fused via Reciprocal Rank Fusion. Each result
-        is tagged _source ∈ {'bm25', 'vec', 'fused'} so the UI can
-        differentiate ('history' vs 'semantic history' badge). Falls back
-        to BM25 transparently if sqlite-vec or Ollama is unavailable.
+    MEMO-FIX-19: delegates to ccc_server.session_fts (BM25 + optional local-
+    Ollama semantic fusion), the same index behind `ccc recall` and the
+    sidebar's /api/search-recall-sessions. Retired the separate claude-index
+    lexical/vendored-semantic path this used to run — that db only ever
+    covered Claude Code + Codex, while session_fts also covers Kimi Code,
+    Gemini CLI and Cursor.
 
-    Returns a dict {results: [...]} on success, or
-    {error: str, results: []} when the index is missing or a query is
-    rejected by FTS5 (malformed operator usage, etc.).
+    `since` accepts either a relative-window string ('7d', '24h', ...) or an
+    absolute unix timestamp (ask.py sends the latter).
+
+    Returns {results: [...]}; the historical {error: ...} shape is preserved
+    only for a query FTS5 itself rejects (bad operator syntax) since the
+    "index not found" case no longer applies -- session_fts builds itself.
     """
-    conn = _open_history_index()
-    if conn is None:
-        return {
-            "error": (
-                "Conversation index not found at ~/.claude-index/index.db. "
-                "Click the History toggle to build it."
-            ),
-            "results": [],
-        }
+    from ccc_server import session_fts as _sfts
+
+    q = (query or "").strip()
+    if not q:
+        return {"results": []}
     try:
         limit = max(1, min(int(limit), 100))
     except (TypeError, ValueError):
         limit = 20
 
-    # Semantic path — delegate to the vendored search, which handles RRF +
-    # _source tagging + graceful BM25 fallback when vec/Ollama is missing.
-    if semantic and _hi_search is not None:
-        try:
-            with _history_query_lock:
-                rows = _hi_search.search(
-                    conn,
-                    query,
-                    limit=limit,
-                    cwd_like=cwd_like,
-                    since=since,
-                    semantic=True,
-                )
-        except (sqlite3.OperationalError, sqlite3.ProgrammingError) as e:
-            return {"error": f"search failed: {e}", "results": []}
-        results = []
-        for row in rows:
-            d = dict(row) if not isinstance(row, dict) else row
-            # The vendored BM25 wraps highlights in «» (claude-index CLI
-            # convention); CCC's UI expects <mark>. Translate.
-            sn = d.get("snippet") or ""
-            sn = sn.replace("«", "<mark>").replace("»", "</mark>")
-            if sn:
-                sn = _clean_history_snippet(sn)
-            d["snippet"] = sn
-            results.append(d)
-        return {"results": _rerank_history_results(results, query, conn)}
-
-    # Lexical path — AND-first with OR fallback for natural language queries.
-    and_query = _rewrite_history_query(query, mode="and")
-    if not and_query:
-        return {"results": []}
-
-    threshold = _history_since_threshold(since)
-
-    def _execute_fts(fts_expr, fetch_limit):
-        where = ["messages_fts MATCH ?"]
-        params = [fts_expr]
-        if cwd_like:
-            where.append("m.cwd LIKE ?")
-            params.append(f"%{cwd_like}%")
-        if threshold is not None:
-            where.append("m.ts_unix >= ?")
-            params.append(threshold)
-        sql = f"""
-            SELECT m.uuid, m.session_id, m.type, m.cwd, m.git_branch,
-                   m.timestamp, m.ts_unix,
-                   snippet(messages_fts, 0, '<mark>', '</mark>', '…', 12) AS snippet,
-                   bm25(messages_fts) AS score
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            WHERE {' AND '.join(where)}
-            ORDER BY score
-            LIMIT ?
-        """
-        params.append(fetch_limit)
-        with _history_query_lock:
-            return conn.execute(sql, params).fetchall()
-
+    since_ts = _since_to_ts(since)
+    source = "semantic" if semantic and _sfts._ollama_available() else "bm25"
     try:
-        rows = _execute_fts(and_query, limit)
+        results = _sfts.search_sessions_enriched(
+            q, limit=limit, cwd_like=cwd_like, since_ts=since_ts, source=source,
+        )
     except sqlite3.OperationalError as e:
         return {"error": f"search failed: {e}", "results": []}
-    except sqlite3.ProgrammingError as e:
-        return {"error": f"search failed: {e}", "results": []}
 
-    results = [dict(r) for r in rows]
-
-    or_query = _rewrite_history_query(query, mode="or")
-    floor = min(limit, 5)
-    unique_sessions = {r["session_id"] for r in results if r.get("session_id")}
-    if (len(results) < floor or len(unique_sessions) < floor) and or_query != and_query and not _is_explicit_history_fts_query(query):
-        try:
-            or_rows = _execute_fts(or_query, limit)
-            seen_uuids = {r["uuid"] for r in results if r.get("uuid")}
-            for r in or_rows:
-                d = dict(r)
-                if d.get("uuid") not in seen_uuids:
-                    seen_uuids.add(d["uuid"])
-                    results.append(d)
-                    if len(results) >= limit:
-                        break
-        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
-            pass
-
-    # Title boost (CCC-615): sessions whose first NON-synthetic user message
-    # (the display-title proxy) matches are ABOUT the topic — promote them
-    # above incidental content hits, same as the vendored semantic search.
-    if _hi_search is not None:
-        try:
-            title_where, title_params = [], []
-            if cwd_like:
-                title_where.append("m.cwd LIKE ?")
-                title_params.append(f"%{cwd_like}%")
-            if threshold is not None:
-                title_where.append("m.ts_unix >= ?")
-                title_params.append(threshold)
-            with _history_query_lock:
-                title_rows = _hi_search._title_row_hits(
-                    conn, and_query, title_where, title_params)
-                if len(title_rows) < 3 and or_query != and_query and not _is_explicit_history_fts_query(query):
-                    extra = _hi_search._title_row_hits(
-                        conn, or_query, title_where, title_params)
-                    seen_ids = {r["id"] for r in title_rows}
-                    title_rows = list(title_rows) + [r for r in extra if r["id"] not in seen_ids]
-        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
-            title_rows = []
-        if title_rows:
-            title_by_uuid = {}
-            for r in title_rows:
-                d = dict(r)
-                sn = (d.get("snippet") or "").replace("«", "<mark>").replace("»", "</mark>")
-                if sn:
-                    sn = _clean_history_snippet(sn)
-                d["snippet"] = sn
-                d["_source"] = "bm25"
-                title_by_uuid[d["uuid"]] = d
-            results = [r for r in results if r.get("uuid") not in title_by_uuid]
-            results = (list(title_by_uuid.values()) + results)[:limit]
     for r in results:
         if r.get("snippet"):
             r["snippet"] = _clean_history_snippet(r["snippet"])
-        r["_source"] = "bm25"
     return {"results": results}
 
 
