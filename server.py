@@ -19964,6 +19964,11 @@ HOOK_MARKER = "command-center/hooks/"
 CCC_HOOK_SCRIPT_NAMES = (
     "pre-tool-use.py", "post-tool-use.py", "notification.py", "stop.py",
     "pre-compact.py", "post-compact.py",
+    # Codex hooks (installed into ~/.codex/hooks.json, not settings.json —
+    # see ensure_codex_hooks_installed) share this same copy step and the
+    # same HOOK_SCRIPTS_DIR location so both engines' scripts stay in sync
+    # with the repo from one place.
+    "_reorient_shared.py", "post-compact-codex.py",
 )
 # Legacy marker (pre-rename) — kept so ensure_hooks_installed can detect old
 # entries in ~/.claude/settings.json and rewrite them to the new path.
@@ -39116,6 +39121,59 @@ def ensure_hooks_installed():
             tmp_path.unlink(missing_ok=True)
 
 
+def ensure_codex_hooks_installed():
+    """Ensure the Codex PostCompact re-orientation hook (MEMO-FIX-16, parity
+    with ensure_hooks_installed's Claude Code PostCompact hook) is registered
+    in ~/.codex/hooks.json.
+
+    Idempotent and additive only: other tools already own entries in this
+    file (token-optimizer, orca, total-recall) and must be left untouched.
+    Codex's hook subsystem also gates a *new* command entry behind a one-time
+    interactive trust prompt on next `codex` launch (hook commands are
+    "Untrusted" until the user approves the hash) — this function cannot and
+    should not bypass that; it only registers the entry.
+    """
+    hooks_path = Path.home() / ".codex" / "hooks.json"
+    try:
+        if hooks_path.exists():
+            config = json.loads(hooks_path.read_text())
+        else:
+            config = {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [hooks] Could not read Codex hooks.json: {e}")
+        return
+
+    hooks = config.setdefault("hooks", {})
+    post_compact_hooks = hooks.setdefault("PostCompact", [])
+    has_post_compact = any(
+        "post-compact-codex.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
+        for entry in post_compact_hooks
+        for h in entry.get("hooks", []) or []
+    )
+    if has_post_compact:
+        return
+
+    post_compact_hooks.append({
+        "hooks": [{
+            "type": "command",
+            "command": _ccc_hook_command("post-compact-codex.py"),
+            "timeout": 5,
+        }],
+    })
+    tmp_path = hooks_path.with_suffix(".tmp")
+    try:
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(json.dumps(config, indent=2) + "\n")
+        tmp_path.replace(hooks_path)
+        print(
+            "  [hooks] Installed Codex PostCompact hook (needs one-time trust "
+            "approval on next `codex` launch)"
+        )
+    except OSError as e:
+        print(f"  [hooks] Failed to write Codex hooks.json: {e}")
+        tmp_path.unlink(missing_ok=True)
+
+
 _adopt_ccc_module("fleet")
 _adopt_ccc_module("fleet_reco")
 
@@ -39184,6 +39242,7 @@ def main():
     # cause of warm processes dying.
     _resume_ledger_append("server_start", pid=os.getpid())
     ensure_hooks_installed()
+    ensure_codex_hooks_installed()
     _schedule_claude_spawn_capability_probe()
     install_orchestration_skill()
     worker_health = _control_plane_request("health")

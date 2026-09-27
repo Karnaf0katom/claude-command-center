@@ -18998,6 +18998,42 @@ class TestQuestionRelay(unittest.TestCase):
                 self.assertTrue(command.startswith(expected_python + " "), command)
                 self.assertNotIn("python3 ", command[:8])
 
+    def test_codex_hook_installer_adds_post_compact_without_touching_other_tools(self):
+        """MEMO-FIX-16: ensure_codex_hooks_installed must be additive-only —
+        other tools (token-optimizer, orca, total-recall) already own entries
+        in ~/.codex/hooks.json and must survive untouched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            hooks_path = home / ".codex" / "hooks.json"
+            hooks_path.parent.mkdir(parents=True)
+            other_tool_entry = {
+                "hooks": [{"type": "command", "command": "/bin/bash other-tool.sh", "timeout": 10}],
+            }
+            hooks_path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [other_tool_entry],
+                    "UserPromptSubmit": [other_tool_entry],
+                },
+            }))
+
+            with mock.patch.object(self.server.Path, "home", return_value=home), \
+                 mock.patch.object(self.server, "HOOK_SCRIPTS_DIR", home / ".claude" / "command-center" / "hooks"):
+                self.server.ensure_codex_hooks_installed()
+                config_after_first_run = json.loads(hooks_path.read_text())
+                self.server.ensure_codex_hooks_installed()  # idempotent
+
+            config = json.loads(hooks_path.read_text())
+            self.assertEqual(config, config_after_first_run)  # second run is a no-op
+
+            self.assertEqual(config["hooks"]["SessionStart"], [other_tool_entry])
+            self.assertEqual(config["hooks"]["UserPromptSubmit"], [other_tool_entry])
+
+            post_compact = config["hooks"]["PostCompact"]
+            self.assertEqual(len(post_compact), 1)
+            command = post_compact[0]["hooks"][0]["command"]
+            self.assertIn("post-compact-codex.py", command)
+            self.assertIn("command-center/hooks/", command)
+
 
 class TestQuestionRelayHook(unittest.TestCase):
     """The PreToolUse hook's answer-rendering logic (hooks/pre-tool-use.py)."""

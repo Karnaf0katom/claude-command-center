@@ -18,25 +18,24 @@ must never fail the turn.
 
 import json
 import os
-import re
 import sys
 
-LIVE_STATE_DIR = os.path.expanduser("~/.claude/command-center/live-state")
-# Matches WT-48 as well as multi-segment refs like MEMO-FIX-10.
-TICKET_REF_RE = re.compile(r"\b([A-Z][A-Z0-9]{0,20}(?:-[A-Z][A-Z0-9]{0,20}){0,3}-\d{1,8})\b")
-# Bounds the I/O regardless of total transcript size: HEAD catches the
-# session's opening dispatch message (where a WatchTower ref usually first
-# appears), TAIL catches the most recent asks and the freshest wt JSON result.
-HEAD_BYTES = 320_000
-TAIL_BYTES = 400_000
-MAX_BLOCK_CHARS = 600
-# User-role turns that were injected by tooling, not typed by the user: queue
-# notifications, peer-session messages, background-task events.
-INJECTED_PREFIXES = (
-    "[watchtower]",
-    "Another Claude session sent a message",
-    "[SYSTEM NOTIFICATION",
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _reorient_shared import (  # noqa: E402
+    TICKET_REF_RE,
+    HEAD_BYTES,
+    TAIL_BYTES,
+    MAX_BLOCK_CHARS,
+    INJECTED_PREFIXES,
+    read_chunk as _read_chunk,
+    records as _records,
+    consider_ask,
+    scan_transcript,
+    truncate as _truncate,
+    build_block as _build_block,
 )
+
+LIVE_STATE_DIR = os.path.expanduser("~/.claude/command-center/live-state")
 
 
 def _clear_compacting_marker(session_id):
@@ -45,30 +44,6 @@ def _clear_compacting_marker(session_id):
         os.unlink(path)
     except FileNotFoundError:
         pass
-
-
-def _read_chunk(path, size, from_end):
-    with open(path, "rb") as f:
-        if from_end:
-            total = os.fstat(f.fileno()).st_size
-            if total > size:
-                f.seek(total - size)
-                f.readline()  # drop the partial line the seek landed inside
-            data = f.read()
-        else:
-            data = f.read(size)
-    return data.decode("utf-8", errors="replace")
-
-
-def _records(text):
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except Exception:
-            continue
 
 
 def _text_blocks(content):
@@ -116,13 +91,7 @@ def _scan_into(text, state):
 
         if not _has_tool_result(content):
             for t in _text_blocks(content):
-                t = re.sub(r"\s+", " ", t).strip()
-                if not t or t.startswith("<") or t.startswith(INJECTED_PREFIXES):
-                    continue
-                state["asks"].append(t)
-                m = TICKET_REF_RE.search(t)
-                if m:
-                    state["ticket_ref"] = m.group(1)
+                consider_ask(t, state)
 
         for result_text in _tool_result_texts(content):
             try:
@@ -132,31 +101,6 @@ def _scan_into(text, state):
             if isinstance(obj, dict) and obj.get("ref") and obj.get("title"):
                 state["ticket_ref"] = str(obj["ref"])
                 state["ticket_title"] = str(obj["title"])
-
-
-def _truncate(text, limit):
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
-
-
-def _build_block(asks, ticket_ref, ticket_title):
-    lines = ["Re-orientation after compaction:"]
-    if ticket_ref:
-        head = ticket_ref
-        if ticket_title:
-            head += f" — {_truncate(ticket_title, 60)}"
-        lines.append(f"Ticket: {head}")
-    if asks:
-        lines.append("Last asks:")
-        for a in asks:
-            lines.append(f"- {_truncate(a, 90)}")
-    lines.append("Tools: `ccc recall <query>` / `ccc shipped <topic>`.")
-    block = "\n".join(lines)
-    if len(block) > MAX_BLOCK_CHARS:
-        block = block[: MAX_BLOCK_CHARS - 1].rstrip() + "…"
-    return block
 
 
 def main():
@@ -172,19 +116,7 @@ def main():
         if not transcript_path or not os.path.isfile(transcript_path):
             return
 
-        state = {"asks": [], "ticket_ref": "", "ticket_title": ""}
-        size = os.path.getsize(transcript_path)
-        if size <= HEAD_BYTES + TAIL_BYTES:
-            # Small enough to read once — a separate head+tail read would
-            # cover the same bytes twice.
-            _scan_into(_read_chunk(transcript_path, size, from_end=False), state)
-        else:
-            # size > HEAD_BYTES + TAIL_BYTES here, so the two windows never
-            # overlap. Head first (opening dispatch message, usually where a
-            # WatchTower ref first appears), then tail (recent asks, freshest
-            # wt result) — tail matches overwrite head matches.
-            _scan_into(_read_chunk(transcript_path, HEAD_BYTES, from_end=False), state)
-            _scan_into(_read_chunk(transcript_path, TAIL_BYTES, from_end=True), state)
+        state = scan_transcript(transcript_path, _scan_into)
 
         asks = state["asks"][-3:]
         ticket_ref = state["ticket_ref"]
