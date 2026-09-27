@@ -28118,7 +28118,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # is an ingest currently running, what's the freshness of the
             # latest indexed message, do we have semantic embeddings?
             if _hi_indexer is None:
-                self.send_json({
+                st = {
                     "exists": False,
                     "indexing": False,
                     "embedding": False,
@@ -28126,11 +28126,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     "latest_message_unix": None,
                     "semantic": {"available": False},
                     "available": False,  # bundled indexer didn't import
-                })
+                }
             else:
                 st = _hi_indexer.status()
                 st["available"] = True
-                self.send_json(st)
+            # Claude Code prunes transcripts older than cleanupPeriodDays
+            # (default 30); surface it so the UI can offer to keep them.
+            from ccc_server import transcript_retention as _tr
+            ret = _tr.read_claude_retention()
+            st["transcript_retention_days"] = ret["effective_days"]
+            st["transcript_retention"] = ret
+            self.send_json(st)
         elif path == "/api/history-message":
             qs = urllib.parse.parse_qs(parsed.query)
             uuid = (qs.get("uuid", [""])[0] or "").strip()
@@ -29664,6 +29670,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(res)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
+            return
+        if path == "/api/history/retention":
+            # Consent-only: the OOBE / pill warning posts here when the user
+            # opts in to keeping Claude Code transcripts past 30 days. Only
+            # ever raises cleanupPeriodDays, never lowers it.
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            from ccc_server import transcript_retention as _tr
+            days = payload.get("days", _tr.SUGGESTED_RETENTION_DAYS) if isinstance(payload, dict) else _tr.SUGGESTED_RETENTION_DAYS
+            res = _tr.ensure_claude_retention(days)
+            self.send_json(res, 200 if res.get("ok") else 409)
             return
         if path == "/api/history/setup" or path == "/api/history/ingest":
             # First-click OOBE: kick a background ingest of all known JSONL

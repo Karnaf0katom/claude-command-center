@@ -175,7 +175,7 @@ See the [engine support matrix](#engine-support) below for what each engine does
 
 **Workers that specialize over time.** Each worker reads its queue's shared learnings file before it starts and writes back to it when it ends, so a queue handling the same kind of ticket for months keeps getting faster and more accurate, not just busier. Ships via [WatchTower](https://github.com/amirfish1/watchtower), which CCC installs on first launch as its queue engine — Python 3.9+. WatchTower is a hard dependency: if it can't be installed, CCC fails loudly at startup with a clear error rather than silently running a stale queue.
 
-**Find anything, from any session.** The problem you solved two weeks ago in some other session, found in seconds instead of solved again: full-text search across your session history, built in, zero setup, with an optional deeper semantic mode for when you can't remember the words you used. Covers Claude Code and Codex today.
+**Find anything, from any session.** The problem you solved two weeks ago in some other session, found in seconds instead of solved again: full-text search across your session history, built in, zero setup, with an optional deeper semantic mode for when you can't remember the words you used. Covers Claude Code and Codex today. Claude Code deletes conversations older than 30 days by default (`cleanupPeriodDays`); CCC offers, opt-in, to raise that so older history stays searchable.
 
 **Work from anywhere.** Two sides of one opt-in: your phone as a client to the fleet, and CCC installed on any machine you can reach, a VM or a home server, open in any browser on your trusted network. Loopback by default, never the open internet.
 

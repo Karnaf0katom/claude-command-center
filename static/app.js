@@ -61482,8 +61482,41 @@
     } else {
       $sem.style.display = 'none';
     }
+    const retWarn = _hiRetentionShort(st);
+    if (retWarn && st.exists) {
+      title += '\n\nClaude Code deletes conversations older than '
+             + st.transcript_retention_days + ' days, so older history drops out of search.';
+    }
     $label.textContent = label;
     $pill.title = title;
+  }
+
+  // Claude Code prunes transcripts past cleanupPeriodDays (default 30).
+  // True when the current setting would drop history older than a month.
+  function _hiRetentionShort(st) {
+    const d = st && st.transcript_retention_days;
+    return typeof d === 'number' && d <= 30;
+  }
+
+  async function _hiKeepTranscripts() {
+    try {
+      const r = await fetch('/api/history/retention', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: 3650 }),
+      });
+      const res = await r.json().catch(() => ({}));
+      _hiRefreshStatus();
+      return !!(r.ok && res.ok);
+    } catch (_) { return false; }
+  }
+
+  function _hiRetentionOptInHtml(st) {
+    if (!_hiRetentionShort(st)) return '';
+    return '<label class="hi-oobe-retention"><input type="checkbox" data-role="hi-keep"> '
+      + 'Keep Claude Code conversation history longer than 30 days so CCC can search it? '
+      + '<span class="hi-oobe-muted">(currently ' + st.transcript_retention_days
+      + ' days; sets cleanupPeriodDays to 3650 in ~/.claude/settings.json)</span></label>';
   }
 
   async function _hiRefreshStatus() {
@@ -61529,6 +61562,7 @@
   // a session-only flag so it doesn't reappear during this CCC session.
   function _hiMaybeShowOobe() {
     const st = window._historyIndexStatus;
+    if (st && st.exists && !st.indexing) { _hiMaybeShowRetentionWarning(); return; }
     if (!st || st.exists || st.indexing || _hiOobePromptDismissed) return;
     if (document.getElementById('hiOobePrompt')) return;
     // Anchor the prompt under convSearch's wrapper so it scrolls with the
@@ -61541,6 +61575,7 @@
     $oobe.innerHTML =
       '<div class="hi-oobe-title">&#128218; Build a history index?</div>'
       + '<div>Indexes every Claude Code &amp; Codex conversation on this Mac so search can find them. Runs locally; ~1.5 GB on disk after a few months.</div>'
+      + _hiRetentionOptInHtml(st)
       + '<div class="hi-oobe-actions">'
       +   '<button type="button" class="primary" data-role="hi-enable">Enable</button>'
       +   '<button type="button" data-role="hi-dismiss">Not now</button>'
@@ -61548,6 +61583,8 @@
     $wrap.parentElement.insertBefore($oobe, $wrap.nextSibling);
     $oobe.querySelector('[data-role="hi-enable"]').addEventListener('click', async () => {
       $oobe.querySelector('[data-role="hi-enable"]').textContent = 'Starting…';
+      // Retention is opt-in only: the box starts unchecked.
+      if ($oobe.querySelector('[data-role="hi-keep"]')?.checked) await _hiKeepTranscripts();
       const ok = await _hiTriggerSetup();
       if (ok) {
         $oobe.innerHTML = '<div class="hi-oobe-title">&#128218; Indexing started</div>'
@@ -61560,6 +61597,46 @@
     $oobe.querySelector('[data-role="hi-dismiss"]').addEventListener('click', () => {
       _hiOobePromptDismissed = true;
       $oobe.remove();
+    });
+  }
+
+  // Gentle warning once history search is on but Claude Code would still
+  // prune transcripts at 30 days. "Not now" is remembered across reloads.
+  const HI_RETENTION_DISMISS_KEY = 'ccc-history-retention-dismissed';
+  function _hiMaybeShowRetentionWarning() {
+    const st = window._historyIndexStatus;
+    if (!_hiRetentionShort(st)) return;
+    if (localStorage.getItem(HI_RETENTION_DISMISS_KEY) === '1') return;
+    if (document.getElementById('hiRetentionPrompt') || document.getElementById('hiOobePrompt')) return;
+    const $wrap = document.querySelector('.search-wrap') || $convSearch?.parentElement;
+    if (!$wrap) return;
+    const $box = document.createElement('div');
+    $box.id = 'hiRetentionPrompt';
+    $box.className = 'hi-oobe';
+    $box.innerHTML =
+      '<div class="hi-oobe-title">Keep conversation history longer?</div>'
+      + '<div>Claude Code deletes conversations older than ' + st.transcript_retention_days
+      + ' days, so search cannot find them. Keep them for 10 years instead? '
+      + '<span class="hi-oobe-muted">(sets cleanupPeriodDays to 3650 in ~/.claude/settings.json; a backup is kept)</span></div>'
+      + '<div class="hi-oobe-actions">'
+      +   '<button type="button" class="primary" data-role="hi-keep-now">Keep history</button>'
+      +   '<button type="button" data-role="hi-keep-dismiss">Not now</button>'
+      + '</div>';
+    $wrap.parentElement.insertBefore($box, $wrap.nextSibling);
+    $box.querySelector('[data-role="hi-keep-now"]').addEventListener('click', async (e) => {
+      e.target.textContent = 'Saving…';
+      const ok = await _hiKeepTranscripts();
+      if (ok) {
+        $box.innerHTML = '<div class="hi-oobe-title">History will be kept</div>'
+          + '<div>Claude Code now keeps conversations for 3650 days.</div>';
+        setTimeout(() => $box.remove(), 5000);
+      } else {
+        e.target.textContent = 'Failed - retry';
+      }
+    });
+    $box.querySelector('[data-role="hi-keep-dismiss"]').addEventListener('click', () => {
+      localStorage.setItem(HI_RETENTION_DISMISS_KEY, '1');
+      $box.remove();
     });
   }
 

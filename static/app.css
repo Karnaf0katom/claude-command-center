@@ -5871,6 +5871,11 @@
     border-color: rgba(120, 168, 255, 0.45);
   }
   .hi-oobe button:hover { filter: brightness(1.15); }
+  .hi-oobe .hi-oobe-retention {
+    display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; cursor: pointer;
+  }
+  .hi-oobe .hi-oobe-retention input { margin-top: 2px; }
+  .hi-oobe .hi-oobe-muted { color: var(--text-dim, #8b949e); }
   .conv-item .conv-title-row {
     display: flex;
     min-width: 0;
