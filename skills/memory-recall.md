@@ -42,3 +42,12 @@ argument. Neither call is destructive or slow enough to need `run_in_background`
 Out of scope for this skill: no pre-spawn hook wires this in automatically —
 you decide when to run these, this just tells you they exist and when they're
 worth reaching for.
+
+Claude Code sessions get a `PostCompact` hook (`hooks/post-compact.py`) that
+prints a short re-orientation block — ticket ref, last few asks, and this
+reminder — right after a compaction. Codex has no equivalent event
+(`~/.codex/hooks.json` only supports UserPromptSubmit, SessionStart,
+PostToolUse, SubagentStart, SubagentStop, Stop, PreToolUse,
+PermissionRequest), so a Codex session that just compacted won't get an
+automatic nudge — run `ccc recall` / `ccc shipped` yourself after a context
+reset there.
