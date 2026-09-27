@@ -15633,6 +15633,21 @@
     document.addEventListener('click', ev => {
       if (!ev.target.closest?.('.conv-archived-engine-filter')) _closeArchiveEngineFilters();
     }, true); // Close even when the clicked control stops propagation.
+    // CCC-1207: the ⋮ menu lives inside #convList's scroll box, so when the
+    // toolbar sits near the bottom of the list the menu was clipped and its
+    // options unreachable. Flip it upward when there is more room above.
+    $convList.addEventListener('toggle', ev => {
+      const d = ev.target;
+      if (!d.classList?.contains('conv-archived-overflow')) return;
+      d.classList.remove('opens-up');
+      if (!d.open) return;
+      const menu = d.querySelector('.conv-archived-overflow-menu');
+      if (!menu) return;
+      const box = $convList.getBoundingClientRect();
+      const m = menu.getBoundingClientRect();
+      const t = d.getBoundingClientRect();
+      if (m.bottom > box.bottom && (t.top - box.top) > (box.bottom - t.bottom)) d.classList.add('opens-up');
+    }, true); // toggle doesn't bubble; capture reaches re-rendered menus.
   }
 
   function readConversationSearchHistory() {
