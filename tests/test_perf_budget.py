@@ -4040,3 +4040,47 @@ def test_decision_extraction_warm_scan_does_no_reparse_or_subprocesses(tmp_path,
     dex._reset_connection_for_tests()
 
 
+def test_sidebar_recall_search_never_spawns_a_subprocess(tmp_path, monkeypatch):
+    """/api/search-recall-sessions (MEMO-FIX-15) must behave identically whether
+    Total Recall's `brain` CLI is installed or not: this is an in-process scan
+    of recent transcript files (ccc_server/recent_search.py), not a subprocess
+    call. Guard against a regression that reintroduces a `brain recall` shell-out
+    on this path — with or without `brain` on PATH, zero forks either way."""
+    projects_dir = tmp_path / "projects"
+    session_dir = projects_dir / "repo"
+    session_dir.mkdir(parents=True)
+    (session_dir / "550e8400-e29b-41d4-a716-446655440000.jsonl").write_text(
+        json.dumps({
+            "type": "user",
+            "cwd": str(session_dir),
+            "message": {"role": "user", "content": "discuss the memo fix worker rollout"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    import ccc_server.recent_search as recent_search
+    monkeypatch.setattr(recent_search, "_candidate_roots", lambda: [projects_dir])
+
+    def boom(*a, **k):  # pragma: no cover - only runs on regression
+        raise AssertionError(f"sidebar recall search forked a subprocess: {a!r}")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(subprocess, "check_output", boom)
+
+    # Total Recall "absent": no `brain`/`total-recall` binary resolvable on PATH.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    out_absent = server.search_recent_sessions("memo fix worker", days=2, limit=5)
+    assert len(out_absent["results"]) == 1
+
+    # Total Recall "present": a fake `brain` binary sits on PATH. The result and
+    # the zero-subprocess guarantee must not change either way.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_brain = fake_bin / "brain"
+    fake_brain.write_text("#!/bin/sh\necho '{\"results\": []}'\n", encoding="utf-8")
+    fake_brain.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    out_present = server.search_recent_sessions("memo fix worker", days=2, limit=5)
+    assert out_present == out_absent
+
+

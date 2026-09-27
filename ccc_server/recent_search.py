@@ -15,9 +15,9 @@ Design notes:
   cost bounded (~250MB of 2-day transcripts on a busy machine).
 - Oversized transcripts are searched head+tail instead of a full read, so a
   single 200MB session can't blow the per-query budget.
-- Result shape mirrors search_total_recall_sessions (session_id, cwd,
-  ts_unix, snippet, _source) so the sidebar augmentation consumes it
-  unchanged.
+- Result shape (session_id, cwd, ts_unix, snippet, _source) matches what the
+  now-removed Total Recall subprocess path used to return, so the sidebar
+  augmentation consumes it unchanged.
 """
 
 from __future__ import annotations

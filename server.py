@@ -5816,9 +5816,9 @@ _SKILLS_KNOWN_PACKS = {
         "label": "Total Recall",
         "spawns_subagents": False, "fleet_aware": True, "drives_browser": False,
         "ccc_synergy": "works",
-        "note": "Cross-session / cross-agent persistent memory. CCC already reads "
-                "it for sidebar search; fleet-wide `brain remember` is the shared "
-                "memory backbone for lanes.",
+        "note": "Cross-session / cross-agent persistent memory; fleet-wide "
+                "`brain remember` is the shared memory backbone for lanes. CCC's "
+                "own sidebar search no longer depends on it (in-process scan).",
     },
     "watchtower": {
         "label": "Watchtower (wt)",
