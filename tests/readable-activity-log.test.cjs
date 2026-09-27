@@ -71,3 +71,16 @@ test('CCC-1189: inject rows lead with the text, then from -> to', ()=>{
  assert.equal(rej.level,'error');
  assert.match(rej.origin,/From WatchTower → to s1 · rejected/);
 });
+test('app-server timeouts, held messages and recoveries read in plain words', ()=>{
+ const h=helpers();
+ const t=h._readableLogPresentation(event('TIMEOUT','method=initialize id=1 no reply within 10s (real); watching for late arrival'));
+ assert.equal(t.headline,'Codex app-server did not start within 10s');
+ assert.match(t.origin,/falls back to the slower CLI/);
+ const q=h._readableLogPresentation(event('Q_HELD','session=35fa97b3-67dd-43fd-8a37-01acdd16402b reason=orphaned_spawn — queued terminal input held, will keep retrying every 5s','inject'));
+ assert.equal(q.headline,'Message waiting: session is from before the last CCC restart');
+ assert.equal(q.origin,'To dd16402b · retrying every 5s');
+ assert.equal(q.level,'warning');
+ const r=h._readableLogPresentation(event('RECOVER','session=35fa97b3-67dd-43fd-8a37-01acdd16402b pid=9287 held=396s log_silent=122s reason=orphaned_spawn — retiring','inject'));
+ assert.match(r.headline,/Restarted an unresponsive session/);
+ assert.equal(r.origin,'To dd16402b · message waited 396s');
+});

@@ -61634,6 +61634,15 @@
     const session = field('session');
     return { text, from, to: session ? session.slice(-8) : '?', queued: field('queued') === 'True' };
   }
+  // Q_HELD reason codes (ccc_server/pending_inputs.py) in plain words.
+  const _Q_HELD_REASONS = {
+    orphaned_spawn: 'session is from before the last CCC restart',
+    headless_turn: 'session is mid-turn',
+    tty_busy: 'terminal session is busy',
+    tool_child_blocks_inject: 'session is running a tool',
+    bg_not_ready: 'background agent is not ready yet',
+    bg_pty_recent_failure: 'last delivery to this background agent failed',
+  };
   function _readableLogPresentation(ev) {
     const verb = String(ev.verb || '').toUpperCase();
     const category = String(ev.category || '');
@@ -61646,9 +61655,28 @@
       : ['SPAWN', 'DELIVERED', 'COMPLETE', 'COMPLETED', 'SUCCESS', 'RESOLVED'].includes(verb) ? 'success' : 'info';
     let headline = verb.replace(/[-_]/g, ' ').toLowerCase().replace(/^./, ch => ch.toUpperCase()) || 'Activity';
     let origin = '';
-    if (verb === 'TIMEOUT') {
+    const sessionTail = () => ((metadata.match(/(?:^|\s)session=([^\s]+)/) || [])[1] || '').slice(-8);
+    if (verb === 'TIMEOUT' && category === 'app-server') {
+      // The shared Codex app-server did not answer; that one call falls back
+      // to the slower `codex exec` path instead of failing.
+      const wait = (detail.match(/no reply within ([\d.]+s)/) || [])[1];
+      headline = method === 'initialize'
+        ? 'Codex app-server did not start' + (wait ? ' within ' + wait : '')
+        : 'Codex app-server did not answer ' + subject + (wait ? ' within ' + wait : '');
+      origin = 'Codex falls back to the slower CLI for this request';
+    } else if (verb === 'TIMEOUT') {
       const wait = (detail.match(/no reply within ([\d.]+s)/) || [])[1];
       headline = subject + ' timed out' + (wait ? ' after ' + wait : '');
+    } else if (verb === 'Q_HELD') {
+      const reason = (metadata.match(/(?:^|\s)reason=([^\s]+)/) || [])[1] || '';
+      headline = 'Message waiting: ' + (_Q_HELD_REASONS[reason] || (reason ? reason.replace(/_/g, ' ') : 'session not ready'));
+      origin = 'To ' + (sessionTail() || '?') + ' · retrying every 5s';
+      level = reason === 'orphaned_spawn' ? 'warning' : 'info';
+    } else if (verb === 'RECOVER') {
+      const held = (metadata.match(/(?:^|\s)held=([\d.]+s)/) || [])[1];
+      headline = 'Restarted an unresponsive session to deliver a waiting message';
+      origin = 'To ' + (sessionTail() || '?') + (held ? ' · message waited ' + held : '');
+      level = 'warning';
     } else if (verb === 'LATE') {
       const late = (detail.match(/reply arrived ([\d.]+s) after/) || [])[1];
       headline = subject + ' response arrived' + (late ? ' ' + late : '') + ' late';
