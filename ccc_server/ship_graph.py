@@ -607,8 +607,6 @@ def _init_db(conn: sqlite3.Connection) -> None:
             files TEXT,
             continuation_origin TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_session_meta_continuation_origin
-            ON session_meta(continuation_origin);
 
         -- MEMO-FIX-21: every file a session wrote or read, as a normalized
         -- absolute path (repo or not), so `ccc history <path>` is an exact
@@ -629,10 +627,16 @@ def _init_db(conn: sqlite3.Connection) -> None:
     sm_cols = {r[1] for r in conn.execute("PRAGMA table_info(session_meta)")}
     if "continuation_origin" not in sm_cols:
         conn.execute("ALTER TABLE session_meta ADD COLUMN continuation_origin TEXT DEFAULT ''")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_session_meta_continuation_origin "
-            "ON session_meta(continuation_origin)"
-        )
+    # Column is guaranteed to exist above this line (fresh DB: created in the
+    # executescript above; existing DB: just ALTERed in) -- only now is it
+    # safe to index it. Creating this index inside the executescript above
+    # would break on a pre-existing session_meta table that predates the
+    # column, since CREATE INDEX IF NOT EXISTS still requires the column to
+    # exist to parse.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_meta_continuation_origin "
+        "ON session_meta(continuation_origin)"
+    )
 
     row_v = conn.execute("SELECT val FROM meta WHERE key = 'schema_v'").fetchone()
     if not row_v or row_v[0] != "2":
