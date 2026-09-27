@@ -15990,8 +15990,10 @@ def _schedule_claude_spawn_capability_probe():
 # The UI pings /api/version/check on load; if the local __version__ is behind
 # the latest GitHub release tag, it shows a "Update available" pill. Clicking
 # the pill posts to /api/self-update, which runs
-#     git fetch origin && git reset --hard origin/main
-# in the install directory (pre-flight checked for local mods + branch=main),
+#     git fetch origin && git merge --ff-only <target>
+# (target = origin/main, or the newest vX.Y.Z tag on the release channel;
+# see _update_channel) in the install directory (pre-flight checked for
+# local mods + branch=main),
 # writes the response, and then os.execvp's the server back onto itself so
 # the new code is running.
 _VERSION_CHECK_CACHE = {"ts": 0.0, "data": None}
@@ -16482,6 +16484,7 @@ def _version_check(force=False):
         "latest": latest,
         "behind": behind,
         "changelog_url": changelog_url,
+        "update_channel": _update_channel(),
     }
     _VERSION_CHECK_CACHE["data"] = data
     _VERSION_CHECK_CACHE["ts"] = now
@@ -16644,6 +16647,77 @@ def _restart_wt_daemon():
     return {"ok": True, "steps": steps}
 
 
+# ── Update channel ─────────────────────────────────────────────────────────
+# A managed install (the real clone scripts/install.sh puts at
+# ~/.ccc/claude-command-center) tracks RELEASES: it fast-forwards to the
+# newest vX.Y.Z tag. Every other checkout (a dev clone, or a ~/.ccc install
+# that is a symlink onto one) tracks origin/main. CCC_UPDATE_CHANNEL=release|main
+# overrides the detection. Either way the local branch stays `main` and only
+# ever fast-forwards: merging an older tag is a no-op, a diverged one refuses.
+_RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def _managed_install_path():
+    return Path.home() / ".ccc" / "claude-command-center"
+
+
+def _is_managed_install(d=None):
+    """True when this code runs from the real (non-symlink) managed clone."""
+    managed = _managed_install_path()
+    try:
+        if managed.is_symlink() or not managed.is_dir():
+            return False
+        return Path(d or _install_dir()).resolve() == managed.resolve()
+    except OSError:
+        return False
+
+
+def _update_channel():
+    """'release' or 'main'. Cheap: two stats, no git."""
+    env = os.environ.get("CCC_UPDATE_CHANNEL", "").strip().lower()
+    if env in ("release", "main"):
+        return env
+    return "release" if _is_managed_install() else "main"
+
+
+def _newest_release_tag(d):
+    """Highest-SemVer `vX.Y.Z` tag in the clone (pre-release tags ignored)."""
+    rc, out, _ = _git(["tag", "--list", "v*"], d)
+    if rc != 0:
+        return None
+    best, best_key = None, None
+    for line in (out or "").splitlines():
+        tag = line.strip()
+        m = _RELEASE_TAG_RE.match(tag)
+        if not m:
+            continue
+        key = tuple(int(x) for x in m.groups())
+        if best_key is None or key > best_key:
+            best, best_key = tag, key
+    return best
+
+
+def _fetch_update_target(d, timeout=30):
+    """Fetch origin and resolve what this install should fast-forward to.
+
+    Returns {"channel", "target"} or {"channel", "error"}. One fetch per
+    call (tags included on the release channel), then a local tag list."""
+    channel = _update_channel()
+    args = ["fetch", "origin", "--quiet"]
+    if channel == "release":
+        args.insert(2, "--tags")
+    rc, _, err = _git(args, d, timeout=timeout)
+    if rc != 0:
+        return {"channel": channel,
+                "error": f"git fetch failed: {(err or '').strip() or rc}"}
+    if channel == "main":
+        return {"channel": channel, "target": "origin/main"}
+    tag = _newest_release_tag(d)
+    if not tag:
+        return {"channel": channel, "error": "no vX.Y.Z release tags found"}
+    return {"channel": channel, "target": tag}
+
+
 def _self_update():
     """Run the pre-flight + pull, then bring WatchTower up with it. Returns a
     response dict; the caller is responsible for writing it to the client
@@ -16663,20 +16737,23 @@ def _self_update():
     branch = branch.strip()
     if branch != "main":
         return {"ok": False, "error": f"on branch {branch!r}, not main"}
-    rc, _, err = _git(["fetch", "origin", "--quiet"], d, timeout=30)
-    if rc != 0:
-        return {"ok": False, "error": f"git fetch failed: {err or 'rc={}'.format(rc)}"}
+    tgt = _fetch_update_target(d, timeout=30)
+    if tgt.get("error"):
+        return {"ok": False, "error": tgt["error"], "channel": tgt["channel"]}
     # Fast-forward only, never `reset --hard`: the install dir may be a
     # symlink to a developer's working clone, where a reset would silently
-    # drop local commits that have not been pushed yet.
-    rc, _, err = _git(["merge", "--ff-only", "--quiet", "origin/main"], d)
+    # drop local commits that have not been pushed yet. On the release
+    # channel the target is a tag, so an older tag is a no-op (no downgrade).
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", tgt["target"]], d)
     if rc != 0:
-        return {"ok": False, "error": f"git merge --ff-only failed: {err or 'rc={}'.format(rc)}"}
+        return {"ok": False, "error": f"git merge --ff-only failed: {err or 'rc={}'.format(rc)}",
+                "channel": tgt["channel"], "target": tgt["target"]}
     rc, sha, _ = _git(["rev-parse", "HEAD"], d)
     # Bust the 6h cache so the post-restart UI reads fresh latest/current.
     _VERSION_CHECK_CACHE["ts"] = 0.0
     _VERSION_CHECK_CACHE["data"] = None
-    result = {"ok": True, "new_sha": (sha or "").strip()}
+    result = {"ok": True, "new_sha": (sha or "").strip(),
+              "channel": tgt["channel"], "target": tgt["target"]}
 
     # The dashboard restarts via os.execvp, which bypasses run.sh's
     # ensure_worker_current gate -- so the modal update path does its own
@@ -16729,7 +16806,8 @@ def _pull_before_restart():
 
     A restart that re-execs the same code on disk looks, to the user, like
     the restart did nothing, so the restart buttons pick up whatever has
-    landed on origin/main first. Never blocks the restart: offline, a
+    landed on this install's update target first (origin/main, or the newest
+    release tag on the release channel). Never blocks the restart: offline, a
     non-main branch, local commits, or a dirty file the merge would touch
     all just skip the pull (git refuses the fast-forward on its own).
     Opt out with CCC_RESTART_PULL=0.
@@ -16744,19 +16822,132 @@ def _pull_before_restart():
     if rc != 0 or branch != "main":
         return {"ok": True, "skipped": f"on branch {branch or '?'!r}, not main"}
     _, before, _ = _git(["rev-parse", "HEAD"], d)
-    rc, _, err = _git(["fetch", "origin", "--quiet"], d, timeout=15)
+    tgt = _fetch_update_target(d, timeout=15)
+    if tgt.get("error"):
+        return {"ok": False, "error": tgt["error"], "channel": tgt["channel"]}
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", tgt["target"]], d)
     if rc != 0:
-        return {"ok": False, "error": f"git fetch failed: {(err or '').strip() or rc}"}
-    rc, _, err = _git(["merge", "--ff-only", "--quiet", "origin/main"], d)
-    if rc != 0:
-        return {"ok": False, "error": f"fast-forward refused: {(err or '').strip() or rc}"}
+        return {"ok": False, "error": f"fast-forward refused: {(err or '').strip() or rc}",
+                "channel": tgt["channel"], "target": tgt["target"]}
     _, after, _ = _git(["rev-parse", "HEAD"], d)
     before, after = (before or "").strip(), (after or "").strip()
     if before != after:
         _VERSION_CHECK_CACHE["ts"] = 0.0
         _VERSION_CHECK_CACHE["data"] = None
     return {"ok": True, "before": before, "after": after,
-            "changed": before != after}
+            "changed": before != after,
+            "channel": tgt["channel"], "target": tgt["target"]}
+
+
+# ── Idle auto-update (release channel, managed installs only) ──────────────
+# About hourly: one fetch of tags, one local tag list, one ancestry check.
+# When a newer release exists AND CCC is idle, run exactly the pill's path
+# (_self_update, then _schedule_restart).
+_AUTO_UPDATE_INTERVAL_S = 60 * 60
+_AUTO_UPDATE_FIRST_DELAY_S = 5 * 60
+_AUTO_UPDATE_IDLE_WINDOW_S = 10 * 60
+
+
+def _auto_update_enabled():
+    # Default OFF until the fix for sessions orphaned by restarts lands; the maintainer flips this default then.
+    return os.environ.get("CCC_AUTO_UPDATE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _release_update_available(d=None):
+    """{"available": bool, "tag": str} or {"error": str}. Never raises."""
+    d = d or _install_dir()
+    tgt = _fetch_update_target(d, timeout=30)
+    if tgt.get("error"):
+        return {"available": False, "error": tgt["error"]}
+    tag = tgt["target"]
+    # rc 0 = tag already contained in HEAD (current or ahead) -> nothing to do.
+    rc, _, _ = _git(["merge-base", "--is-ancestor", tag, "HEAD"], d)
+    return {"available": rc != 0, "tag": tag}
+
+
+def _auto_update_busy_reasons(now=None):
+    """Why an unattended restart would hurt right now; [] means idle.
+
+    Reuses the same signals the restart paths already trust: turns this
+    dashboard owns, the worker's own active/queued/uncertain counts, live
+    WatchTower workers, and the user's last UI interaction."""
+    now = now or time.time()
+    reasons = []
+    try:
+        local = _dashboard_owned_active_executions()
+        if local:
+            reasons.append(f"{len(local)} dashboard-owned turn(s) running")
+    except Exception:
+        pass
+    try:
+        health = _control_plane_request("health")
+    except Exception:
+        health = {}
+    if isinstance(health, dict):
+        busy = {k: int(health.get(k) or 0) for k in ("active", "queued", "uncertain")}
+        if any(busy.values()):
+            reasons.append("worker busy (" + " ".join(f"{k}={v}" for k, v in busy.items()) + ")")
+    try:
+        live = _wt_live_workers()
+        if live:
+            reasons.append(f"{len(live)} WatchTower worker(s) running")
+    except Exception:
+        pass
+    try:
+        last = max(_load_last_interactions().values(), default=0.0)
+    except Exception:
+        last = 0.0
+    if last and now - last < _AUTO_UPDATE_IDLE_WINDOW_S:
+        reasons.append(f"user active {int(now - last)}s ago")
+    return reasons
+
+
+def _auto_update_tick():
+    """One check. Returns a small status dict (for tests and logging)."""
+    if not _auto_update_enabled():
+        return {"action": "skip", "reason": "disabled"}
+    if not _is_managed_install() or _update_channel() != "release":
+        return {"action": "skip", "reason": "not a managed release-channel install"}
+    chk = _release_update_available()
+    if chk.get("error"):
+        _log_activity("update", "check", f"failed: {chk['error']}")
+        return {"action": "error", "error": chk["error"]}
+    if not chk.get("available"):
+        _log_activity("update", "check", f"up to date with {chk.get('tag')}")
+        return {"action": "none", "tag": chk.get("tag")}
+    busy = _auto_update_busy_reasons()
+    if busy:
+        _log_activity("update", "skip", f"{chk['tag']} available, CCC busy: {'; '.join(busy)}")
+        return {"action": "busy", "tag": chk["tag"], "reasons": busy}
+    _log_activity("update", "apply", f"auto-updating to {chk['tag']} (idle)")
+    result = _self_update()
+    if not result.get("ok"):
+        _log_activity("update", "fail", f"{chk['tag']}: {result.get('error')}")
+        return {"action": "error", "tag": chk["tag"], "error": result.get("error")}
+    _log_activity("update", "restart", f"now at {chk['tag']} ({result.get('new_sha', '')[:12]})")
+    _schedule_restart()
+    return {"action": "applied", "tag": chk["tag"], "result": result}
+
+
+def _auto_update_loop():
+    time.sleep(_AUTO_UPDATE_FIRST_DELAY_S)
+    while True:
+        try:
+            if _auto_update_tick().get("action") == "applied":
+                return  # the process is about to be replaced
+        except Exception as e:
+            _log_activity("update", "fail", f"auto-update tick crashed: {e}")
+        time.sleep(_AUTO_UPDATE_INTERVAL_S)
+
+
+def _start_auto_update_thread():
+    """Start the hourly checker only where it can ever act."""
+    if os.environ.get("CCC_EPHEMERAL") or not _auto_update_enabled():
+        return False
+    if not _is_managed_install() or _update_channel() != "release":
+        return False
+    threading.Thread(target=_auto_update_loop, daemon=True, name="ccc-auto-update").start()
+    return True
 
 
 # ── In-app bug reporting ───────────────────────────────────────────────
@@ -38935,6 +39126,9 @@ def main():
     # it; that single switch is the user's guarantee that nothing leaves
     # the host. See docs/telemetry.md#anonymous-open-beacon.
     threading.Thread(target=_telemetry_open_beacon_loop, daemon=True, name="ccc-telemetry-open").start()
+    # Idle auto-update to the newest release tag (managed installs only,
+    # opt-in via CCC_AUTO_UPDATE=1 for now; see _auto_update_enabled).
+    _start_auto_update_thread()
     # Perf-event breach-pattern self-filer — checks the last 24h of
     # archive_load/conv_open beacons every CCC_PERF_TICKET_CHECK_INTERVAL_S
     # (default 900s) and self-files a WatchTower CCC bug ticket on a real

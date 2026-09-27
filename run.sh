@@ -659,6 +659,63 @@ EOF
     ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Launch-time update (release channel only)
+# ---------------------------------------------------------------------------
+# A managed install -- the real, non-symlink clone at
+# ~/.ccc/claude-command-center -- tracks releases: before anything starts,
+# fast-forward `main` to the newest vX.Y.Z tag. Mirrors server.py's
+# _update_channel (CCC_UPDATE_CHANNEL=release|main overrides). Best-effort
+# and bounded: a fetch that has not finished in ~5s is abandoned, and a dirty
+# tree, another branch, a diverged history or being offline all just skip.
+# Never downgrades (merging an older tag is a no-op). Dev clones and
+# symlinked installs are untouched here; their restarts pull origin/main.
+launch_update_to_release() {
+  case "${CCC_LAUNCH_UPDATE_DONE:-0}" in 1) return 0 ;; esac
+  command -v git >/dev/null 2>&1 || return 0
+  [ -d "$HERE/.git" ] || return 0
+  local channel="${CCC_UPDATE_CHANNEL:-}"
+  if [ "$channel" != "release" ] && [ "$channel" != "main" ]; then
+    channel="main"
+    local managed="$HOME/.ccc/claude-command-center"
+    if [ -d "$managed" ] && [ ! -L "$managed" ] \
+      && [ "$(cd "$HERE" && pwd -P)" = "$(cd "$managed" && pwd -P)" ]; then
+      channel="release"
+    fi
+  fi
+  [ "$channel" = "release" ] || return 0
+  [ "$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "main" ] || return 0
+  [ -z "$(git -C "$HERE" status --porcelain 2>/dev/null)" ] || return 0
+  GIT_TERMINAL_PROMPT=0 git -C "$HERE" fetch --tags --quiet origin >/dev/null 2>&1 &
+  local fetch_pid=$! waited=0
+  while kill -0 "$fetch_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$fetch_pid" 2>/dev/null; then
+    kill "$fetch_pid" 2>/dev/null || true
+    wait "$fetch_pid" 2>/dev/null || true
+    echo "  update   : release check timed out, starting current version"
+    return 0
+  fi
+  wait "$fetch_pid" 2>/dev/null || return 0
+  local tag
+  tag="$(git -C "$HERE" tag --list 'v*' --sort=-v:refname 2>/dev/null \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+  [ -n "$tag" ] || return 0
+  local before after
+  before="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)"
+  git -C "$HERE" merge --ff-only --quiet "$tag" >/dev/null 2>&1 || return 0
+  after="$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$after" ] && [ "$before" != "$after" ]; then
+    echo "  update   : fast-forwarded to $tag"
+    # This script itself may have changed: re-run the new copy, once.
+    export CCC_LAUNCH_UPDATE_DONE=1
+    exec bash "$HERE/run.sh" "$@"
+  fi
+}
+launch_update_to_release "$@"
+
 export PORT="${PORT:-8090}"
 # CCC_BIND_HOST is intentionally NOT defaulted here. server.py resolves
 # the bind across env, ~/.claude/command-center/network.json, and a built-in
