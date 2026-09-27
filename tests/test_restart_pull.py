@@ -34,6 +34,7 @@ def install(tmp_path, monkeypatch):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(server, "_install_dir", lambda: tmp_path)
     monkeypatch.delenv("CCC_RESTART_PULL", raising=False)
+    monkeypatch.delenv("CCC_UPDATE_CHANNEL", raising=False)
     return tmp_path
 
 
@@ -41,7 +42,8 @@ def test_fast_forwards_and_reports_the_change(install, monkeypatch):
     log = []
     monkeypatch.setattr(server, "_git", _fake_git(log))
     res = server._pull_before_restart()
-    assert res == {"ok": True, "before": "aaa", "after": "bbb", "changed": True}
+    assert res == {"ok": True, "before": "aaa", "after": "bbb", "changed": True,
+                   "channel": "main", "target": "origin/main"}
     assert ["merge", "--ff-only", "--quiet", "origin/main"] in log
     assert not any(a[0] == "reset" for a in log)
 
