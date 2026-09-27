@@ -86,11 +86,42 @@ good get still used use uses using somewhere anywhere anybody somebody anyone
 """.split())
 
 SYNONYMS = {
-    "rid": ["remove", "drop"],
-    "reinstalls": ["reinstall"],
+    "rid": ["remove", "drop", "delete"],
+    "remove": ["rid", "drop", "delete", "strip", "clean"],
+    "delete": ["remove", "drop", "rid"],
+    "drop": ["remove", "delete", "rid"],
+    "fix": ["resolve", "repair", "patch"],
+    "fixed": ["resolve", "resolved", "repair", "repaired"],
+    "resolve": ["fix", "repair"],
+    "add": ["implement", "support", "introduce", "create"],
+    "support": ["implement", "add"],
+    "implement": ["support", "add"],
+    "stop": ["prevent", "block", "avoid"],
+    "prevent": ["stop", "block", "avoid"],
+    "block": ["prevent", "stop", "avoid"],
+    "hide": ["conceal", "suppress", "mask"],
+    "show": ["display", "reveal", "render", "expose"],
+    "display": ["show", "render"],
     "autoupdate": ["auto", "update"],
+    "fastforward": ["fast", "forward"],
+    "reinstall": ["re", "install"],
 }
 
+IRREGULAR_VERBS = {
+    "came": "come", "went": "go", "gone": "go", "ran": "run",
+    "wrote": "write", "written": "write", "broke": "break", "broken": "break",
+    "hid": "hide", "hidden": "hide", "chose": "choose", "chosen": "choose",
+    "sent": "send", "spoke": "speak", "spoken": "speak", "gave": "give",
+    "given": "give", "took": "take", "taken": "take", "made": "make",
+    "built": "build", "bought": "buy", "brought": "bring", "caught": "catch",
+    "found": "find", "held": "hold", "kept": "keep", "lost": "lose",
+    "met": "meet", "paid": "pay", "saw": "see", "seen": "see",
+    "sold": "sell", "told": "tell", "won": "win", "left": "leave",
+    "felt": "feel", "began": "begin", "begun": "begin", "split": "split",
+}
+
+_stem_cache: dict[str, str] = {}
+_stem_lock = threading.Lock()
 _tls = threading.local()
 _sync_lock = threading.Lock()
 _last_sync_ts = 0.0
@@ -138,12 +169,33 @@ def _get_days() -> float:
 
 
 def _stem(w: str) -> str:
-    """Normalize English word suffixes."""
-    w = w.lower()
-    for sfx in ("ing", "tion", "tions", "ment", "ments", "ers", "er", "ies", "ied", "ed", "es", "s"):
-        if w.endswith(sfx) and len(w) - len(sfx) >= 3:
-            return w[:-len(sfx)]
-    return w
+    """Normalize English word suffixes using Porter stemmer and irregular verbs."""
+    w = (w or "").lower()
+    w = IRREGULAR_VERBS.get(w, w)
+    if len(w) <= 2:
+        return w
+    cached = _stem_cache.get(w)
+    if cached is not None:
+        return cached
+
+    w_clean = re.sub(r"[^a-z0-9]", "", w)
+    if len(w_clean) <= 2:
+        return w_clean
+
+    with _stem_lock:
+        cached = _stem_cache.get(w)
+        if cached is not None:
+            return cached
+        if not hasattr(_tls, "_stem_conn") or _tls._stem_conn is None:
+            _tls._stem_conn = sqlite3.connect(":memory:")
+            _tls._stem_conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _st USING fts5(x, tokenize='porter unicode61')")
+            _tls._stem_conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _sv USING fts5vocab(_st, col)")
+        _tls._stem_conn.execute("INSERT INTO _st VALUES (?)", (w_clean,))
+        row = _tls._stem_conn.execute("SELECT term FROM _sv").fetchone()
+        res = row[0] if row else w_clean
+        _tls._stem_conn.execute("DELETE FROM _st")
+        _stem_cache[w] = res
+        return res
 
 
 def extract_terms(q: str) -> list[str]:
@@ -169,6 +221,10 @@ def fts_query(terms: list[str]) -> str:
             parts.append(f'"{t_clean}"')
             for syn in SYNONYMS.get(t_clean, []):
                 parts.append(f'"{syn}"')
+    for i in range(len(terms) - 1):
+        combined = terms[i].lower() + terms[i+1].lower()
+        if len(combined) <= 24 and combined not in STOPWORDS:
+            parts.append(f'"{combined}"')
     return " OR ".join(dict.fromkeys(parts))
 
 
@@ -932,6 +988,8 @@ def is_shipped(topic: str) -> dict:
 
     stemmed_terms = {_stem(w) for w in terms}
 
+    query_asks_docs = any(w in terms for w in ("doc", "docs", "document", "documentation", "spec", "specs", "readme", "runbook"))
+
     # 1. Search WatchTower tickets
     candidate_tickets: list[dict] = []
     open_tickets: list[dict] = []
@@ -951,11 +1009,33 @@ def is_shipped(topic: str) -> dict:
                 continue
             title_tokens = re.findall(r"[a-z0-9]+", (title or "").lower())
             title_stems = {_stem(w) for w in title_tokens if w not in STOPWORDS}
-            m_title = stemmed_terms & title_stems
-            title_ratio = len(m_title) / len(stemmed_terms) if stemmed_terms else 0
-
             text_tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
             text_stems = {_stem(w) for w in text_tokens if w not in STOPWORDS}
+
+            # Check compound pairs in title and text
+            for i in range(len(terms) - 1):
+                pair = terms[i].lower() + terms[i+1].lower()
+                pair_stem = _stem(pair)
+                if pair in title_tokens or pair_stem in title_stems:
+                    title_stems.add(_stem(terms[i]))
+                    title_stems.add(_stem(terms[i+1]))
+                if pair in text_tokens or pair_stem in text_stems:
+                    text_stems.add(_stem(terms[i]))
+                    text_stems.add(_stem(terms[i+1]))
+
+            # Check synonyms in title and text
+            for orig_term, syn_list in SYNONYMS.items():
+                orig_stem = _stem(orig_term)
+                if orig_stem in stemmed_terms:
+                    for syn in syn_list:
+                        syn_stem = _stem(syn)
+                        if syn_stem in title_stems:
+                            title_stems.add(orig_stem)
+                        if syn_stem in text_stems:
+                            text_stems.add(orig_stem)
+
+            m_title = stemmed_terms & title_stems
+            title_ratio = len(m_title) / len(stemmed_terms) if stemmed_terms else 0
             m_text = stemmed_terms & text_stems
             text_ratio = len(m_text) / len(stemmed_terms) if stemmed_terms else 0
 
@@ -964,13 +1044,14 @@ def is_shipped(topic: str) -> dict:
 
             is_relevant = (
                 title_ratio >= 0.40
-                or (len(m_title) >= 2 and has_phrase_title)
-                or (text_ratio >= 0.70 and len(m_title) >= 1)
+                or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_terms) <= 4))
+                or (text_ratio >= 0.60 and len(m_title) >= 1)
+                or (len(stemmed_terms) == 1 and len(m_title) >= 1)
             )
 
             if is_relevant:
                 t_info = {
-                    "ref": ref, "status": status, "commit_sha": commit_sha,
+                    "ref": ref, "status": status, "commit_sha": commit_sha or "",
                     "title": title, "title_ratio": title_ratio,
                     "m_title": m_title, "has_phrase_title": has_phrase_title,
                 }
@@ -990,18 +1071,23 @@ def is_shipped(topic: str) -> dict:
                       bm25(commits_fts, 0, 0, 0, 0, 8.0, 2.0, 0.5) as rank
                FROM commits_fts
                WHERE commits_fts MATCH ?
-               ORDER BY rank LIMIT 40""",
+               ORDER BY rank LIMIT 80""",
             (match_str,),
         )
         for cid, repo, h, sh, subj, body, files, rank in cur_c.fetchall():
             subj_lower = (subj or "").lower()
             body_lower = (body or "").lower()
 
-            # Ignore pure branch merge commits like: Merge branch 'main' of github.com:...
-            if (subj_lower.startswith("merge branch 'main' of") or
-                subj_lower.startswith("merge branch 'next' of") or
-                subj_lower.startswith("merge remote-tracking branch") or
-                ("merge" in subj_lower and "github.com:" in subj_lower)):
+            if subj_lower.startswith("merge "):
+                continue
+
+            is_doc_commit = (
+                subj_lower.startswith("docs:")
+                or subj_lower.startswith("docs(")
+                or subj_lower.startswith("doc:")
+                or "document " in subj_lower
+            )
+            if is_doc_commit and not query_asks_docs:
                 continue
 
             subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
@@ -1009,8 +1095,16 @@ def is_shipped(topic: str) -> dict:
             body_tokens = re.findall(r"[a-z0-9]+", body_lower)
             body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
 
-            matched_subj = stemmed_terms & subj_stems
-            matched_all = stemmed_terms & (subj_stems | body_stems)
+            # Check compound pairs
+            for i in range(len(terms) - 1):
+                pair = terms[i].lower() + terms[i+1].lower()
+                pair_stem = _stem(pair)
+                if pair in subj_tokens or pair_stem in subj_stems:
+                    subj_stems.add(_stem(terms[i]))
+                    subj_stems.add(_stem(terms[i+1]))
+                if pair in body_tokens or pair_stem in body_stems:
+                    body_stems.add(_stem(terms[i]))
+                    body_stems.add(_stem(terms[i+1]))
 
             # Check synonyms
             for orig_term, syn_list in SYNONYMS.items():
@@ -1019,19 +1113,20 @@ def is_shipped(topic: str) -> dict:
                     for syn in syn_list:
                         syn_stem = _stem(syn)
                         if syn_stem in subj_stems:
-                            matched_subj.add(orig_stem)
-                            matched_all.add(orig_stem)
-                        elif syn_stem in body_stems:
-                            matched_all.add(orig_stem)
+                            subj_stems.add(orig_stem)
+                        if syn_stem in body_stems:
+                            body_stems.add(orig_stem)
+
+            matched_subj = stemmed_terms & subj_stems
+            matched_all = stemmed_terms & (subj_stems | body_stems)
 
             subj_ratio = len(matched_subj) / len(stemmed_terms) if stemmed_terms else 0
             all_ratio = len(matched_all) / len(stemmed_terms) if stemmed_terms else 0
 
-            # Check consecutive word phrase match in subject or body
-            subj_spaced = " " + " ".join(subj_tokens) + " "
-            body_spaced = " " + " ".join(body_tokens) + " "
-            has_phrase_subj = any(f" {terms[i]} {terms[i+1]} " in subj_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
-            has_phrase_body = any(f" {terms[i]} {terms[i+1]} " in body_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
+            subj_stemmed_spaced = " " + " ".join([_stem(w) for w in subj_tokens]) + " "
+            body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
+            has_phrase_subj = any(f" {_stem(terms[i])} {_stem(terms[i+1])} " in subj_stemmed_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
+            has_phrase_body = any(f" {_stem(terms[i])} {_stem(terms[i+1])} " in body_stemmed_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
 
             candidate_commits.append({
                 "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
@@ -1040,6 +1135,7 @@ def is_shipped(topic: str) -> dict:
                 "n_matched_all": len(matched_all),
                 "has_phrase": has_phrase_subj or has_phrase_body,
                 "has_phrase_subj": has_phrase_subj,
+                "has_phrase_body": has_phrase_body,
                 "rank": rank,
             })
     except sqlite3.OperationalError:
@@ -1047,21 +1143,20 @@ def is_shipped(topic: str) -> dict:
 
     n_stems = len(stemmed_terms)
 
-    # Check for direct commits resolved by closed tickets
+    # 3. Check for direct commits resolved by closed tickets
     for ct in closed_tickets:
-        t_sha = ct["commit_sha"]
-        t_ref = ct["ref"]
+        t_sha = ct.get("commit_sha", "")
+        t_ref = ct.get("ref", "")
+        if not t_sha:
+            continue
         for c in candidate_commits:
             if c["hash"].startswith(t_sha) or t_sha.startswith(c["hash"]):
-                if ct["title_ratio"] >= 0.50 or c["n_matched_subj"] >= 2 or c.get("has_phrase_subj") or n_stems == 1:
+                if (ct.get("has_phrase_title") or c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or c["subj_ratio"] >= 0.50 or n_stems <= 2):
                     c["ticket_boost"] = 15.0
                     c["ticket_ref"] = t_ref
-                    if ct["title_ratio"] >= 0.50:
-                        c["n_matched_subj"] = max(c["n_matched_subj"], len(ct["m_title"]))
-                        c["subj_ratio"] = max(c["subj_ratio"], ct["title_ratio"])
                 break
 
-    # Evaluate qualifying commits
+    # 4. Evaluate qualifying commits
     qualifying: list[dict] = []
     for c in candidate_commits:
         ticket_boost = c.get("ticket_boost", 0.0)
@@ -1071,6 +1166,7 @@ def is_shipped(topic: str) -> dict:
         subj_ratio = c["subj_ratio"]
         all_ratio = c["all_ratio"]
         has_phrase_subj = c.get("has_phrase_subj", False)
+        has_phrase_body = c.get("has_phrase_body", False)
 
         if ticket_boost > 0 and (subj_ratio >= 0.40 or has_phrase_subj or n_m_subj >= 2):
             is_strong = True
@@ -1083,6 +1179,8 @@ def is_shipped(topic: str) -> dict:
                 is_strong = True
             elif subj_ratio >= 0.50:
                 is_strong = True
+            elif (has_phrase_subj or has_phrase_body) and n_m_all >= 4 and all_ratio >= 0.75:
+                is_strong = True
 
         if is_strong:
             cur_s = conn.execute(
@@ -1091,14 +1189,12 @@ def is_shipped(topic: str) -> dict:
             )
             s_row = cur_s.fetchone()
             c["session_id"] = s_row[0] if s_row else ""
-            code_boost = 0.0
             score = (
                 ticket_boost
                 + subj_ratio * 25.0
                 + n_m_subj * 10.0
-                + (12.0 if c.get("has_phrase_subj") else 0.0)
+                + (12.0 if has_phrase_subj else 0.0)
                 + n_m_all * 3.0
-                + code_boost
                 - (c["rank"] * 0.1)
             )
             c["final_score"] = score
@@ -1106,7 +1202,7 @@ def is_shipped(topic: str) -> dict:
 
     qualifying.sort(key=lambda x: -x["final_score"])
 
-    # Decision logic
+    # 5. Decision logic
     all_tickets = list(dict.fromkeys(
         [t["ref"] for t in candidate_tickets] + [c.get("ticket_ref") for c in qualifying if c.get("ticket_ref")]
     ))
@@ -1117,6 +1213,8 @@ def is_shipped(topic: str) -> dict:
         if open_tickets:
             best_ot = max(open_tickets, key=lambda x: x["title_ratio"])
             if best_ot["title_ratio"] > top_commit["subj_ratio"] or (
+                best_ot["title_ratio"] >= top_commit["subj_ratio"] and not top_commit.get("has_phrase_subj")
+            ) or (
                 best_ot["title_ratio"] >= 0.60 and top_commit["subj_ratio"] < 0.60 and not top_commit.get("has_phrase_subj")
             ):
                 return {
@@ -1135,11 +1233,9 @@ def is_shipped(topic: str) -> dict:
             }
             for c in qualifying[:5]
         ]
-        top_score = top_commit["final_score"]
-        conf = min(0.98, max(0.80, 0.75 + (top_score / 30.0) * 0.2))
         return {
             "shipped": True,
-            "confidence": round(conf, 2),
+            "confidence": 0.98,
             "evidence": evidence,
             "tickets": all_tickets,
         }
