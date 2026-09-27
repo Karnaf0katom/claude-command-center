@@ -1,0 +1,1 @@
+- Settings > Experimental now names the status-bar pill's flag "token-sitter toggle" (was "Auto handover toggle"), so the hidden token-sitter pill can be found by name.

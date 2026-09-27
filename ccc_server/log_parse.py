@@ -159,8 +159,9 @@ _PREVIEW_FLAGS = {
     },
     "auto_handover_pill": {
         "default": False,
-        "label": "Auto handover toggle",
-        "desc": "Show the Auto handover ON/OFF pill in the status bar of Claude sessions.",
+        "label": "token-sitter toggle",
+        "desc": "Show the token-sitter pill (auto-snapshot/compact when a session "
+                "idles) in the status bar of sessions on synced engines.",
     },
     "bottom_bar_cost": {
         "default": False,
