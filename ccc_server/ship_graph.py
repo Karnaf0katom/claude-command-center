@@ -107,6 +107,11 @@ SYNONYMS = {
     "reinstall": ["re", "install"],
 }
 
+GENERIC_VERBS = frozenset({
+    "add", "fix", "support", "implement", "get", "make", "do", "work",
+    "create", "update", "try", "want", "need", "ship", "creat", "updat", "tri"
+})
+
 IRREGULAR_VERBS = {
     "came": "come", "went": "go", "gone": "go", "ran": "run",
     "wrote": "write", "written": "write", "broke": "break", "broken": "break",
@@ -304,17 +309,22 @@ KNOWN_REPO_ALIASES: dict[str, list[str]] = {
         r"\bccc\b",
         r"\bclaude[- ]command[- ]center\b",
         r"\bcommand[- ]center\b",
+        r"\bcommand center\b",
         r"\bclaude command center\b",
         r"\bccc-\d+\b",
     ],
     "BYM": [
         r"\bbym\b",
         r"\bbook[- ]?your[- ]?mat\b",
+        r"\bbook your mat\b",
+        r"\bbecky\b",
+        r"\bbecky[- ]pro\b",
         r"\bbym-\d+\b",
         r"\bbecky-\d+\b",
         r"\bbymops-\d+\b",
     ],
     "watchtower": [
+        r"\bwatchtower\b",
         r"\bwatch[- ]?tower\b",
         r"\bwt\b",
         r"\bwt-\d+\b",
@@ -1095,7 +1105,21 @@ def is_shipped(topic: str) -> dict:
         text_ratio = len(m_text) / len(stemmed_content_terms) if stemmed_content_terms else 0
 
         title_spaced = " " + " ".join(title_tokens) + " "
-        has_phrase_title = any(f" {content_terms[i]} {content_terms[i+1]} " in title_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
+        has_phrase_title = False
+        if len(content_terms) >= 2:
+            for i in range(len(content_terms) - 1):
+                t1, t2 = content_terms[i], content_terms[i+1]
+                s1_list = [_stem(t1)] + [_stem(s) for s in SYNONYMS.get(t1, [])]
+                s2_list = [_stem(t2)] + [_stem(s) for s in SYNONYMS.get(t2, [])]
+                for s1 in s1_list:
+                    for s2 in s2_list:
+                        if f" {s1} {s2} " in title_spaced:
+                            has_phrase_title = True
+                            break
+                    if has_phrase_title:
+                        break
+                if has_phrase_title:
+                    break
 
         is_relevant = (
             title_ratio >= 0.40
@@ -1203,12 +1227,25 @@ def is_shipped(topic: str) -> dict:
         clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in clean_subj_tokens]) + " "
         body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
 
-        has_phrase_subj = any(f" {_stem(content_terms[i])} {_stem(content_terms[i+1])} " in clean_subj_stemmed_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
-        has_phrase_body = any(f" {_stem(content_terms[i])} {_stem(content_terms[i+1])} " in body_stemmed_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
+        has_phrase_subj = False
+        has_phrase_body = False
+        if len(content_terms) >= 2:
+            for i in range(len(content_terms) - 1):
+                t1, t2 = content_terms[i], content_terms[i+1]
+                s1_list = [_stem(t1)] + [_stem(s) for s in SYNONYMS.get(t1, [])]
+                s2_list = [_stem(t2)] + [_stem(s) for s in SYNONYMS.get(t2, [])]
+                for s1 in s1_list:
+                    for s2 in s2_list:
+                        target = f" {s1} {s2} "
+                        if target in clean_subj_stemmed_spaced:
+                            has_phrase_subj = True
+                        if target in body_stemmed_spaced:
+                            has_phrase_body = True
 
         candidate_commits.append({
             "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
             "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
+            "matched_subj": matched_subj,
             "n_matched_subj": len(matched_subj),
             "n_matched_all": len(matched_all),
             "has_phrase": has_phrase_subj or has_phrase_body,
@@ -1270,7 +1307,7 @@ def is_shipped(topic: str) -> dict:
                 pass
 
         if found_c:
-            if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50 or len(stemmed_content_terms) <= 2):
+            if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
                 found_c["ticket_boost"] = 15.0
                 found_c["ticket_ref"] = t_ref
 
@@ -1284,36 +1321,36 @@ def is_shipped(topic: str) -> dict:
         n_m_subj = c["n_matched_subj"]
         n_m_all = c["n_matched_all"]
         subj_ratio = c["subj_ratio"]
-        all_ratio = c["all_ratio"]
         has_phrase_subj = c.get("has_phrase_subj", False)
-        has_phrase_body = c.get("has_phrase_body", False)
 
-        if n_stems == 1:
+        matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
+
+        if n_stems <= 1:
             is_strong = False
         elif n_stems == 2:
-            if n_m_subj >= 2:
+            if n_m_subj >= 2 and len(matched_substantive) >= 2:
                 is_strong = True
-            elif (has_phrase_subj or has_phrase_body) and n_m_subj >= 1:
+            elif has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
                 is_strong = True
-            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
+            elif ticket_boost > 0 and n_m_subj >= 2:
                 is_strong = True
         elif n_stems == 3:
-            if n_m_subj >= 2 and (has_phrase_subj or subj_ratio >= 0.65):
+            if has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
                 is_strong = True
-            elif n_m_subj >= 3:
+            elif n_m_subj >= 3 and len(matched_substantive) >= 2:
+                is_strong = True
+            elif n_m_subj >= 2 and len(matched_substantive) >= 2 and subj_ratio >= 0.65:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 3:
+            if has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
                 is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.55:
+            elif n_m_subj >= 3 and len(matched_substantive) >= 2 and subj_ratio >= 0.50:
                 is_strong = True
-            elif subj_ratio >= 0.60 and n_m_subj >= 2:
+            elif subj_ratio >= 0.65 and n_m_subj >= 3 and len(matched_substantive) >= 2:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
-                is_strong = True
-            elif (has_phrase_subj or has_phrase_body) and n_m_all >= 4 and all_ratio >= 0.75:
                 is_strong = True
 
         if is_strong:
@@ -1372,16 +1409,20 @@ def is_shipped(topic: str) -> dict:
         top_n_subj = top_commit.get("n_matched_subj", 0)
         top_subj_ratio = top_commit.get("subj_ratio", 0.0)
         top_ticket_boost = top_commit.get("ticket_boost", 0.0)
+        repo_matched = (detected_repo is not None and top_commit.get("repo") == detected_repo)
 
-        if (top_phrase and top_n_subj >= 2) or (top_n_subj >= 3 and top_subj_ratio >= 0.60) or (n_stems == 2 and top_n_subj == 2):
-            if top_subj_ratio >= 0.70 or top_phrase or top_ticket_boost > 0:
-                conf = 0.98
-            else:
-                conf = 0.92
-        elif top_ticket_boost > 0 and top_n_subj >= 2:
+        if top_ticket_boost > 0 and top_n_subj >= 2 and (top_phrase or top_subj_ratio >= 0.60):
+            conf = 0.95
+        elif repo_matched and top_phrase and top_n_subj >= 3 and top_subj_ratio >= 0.70:
+            conf = 0.95
+        elif repo_matched and n_stems == 2 and top_n_subj == 2 and top_phrase:
+            conf = 0.92
+        elif repo_matched and top_n_subj >= 4 and top_subj_ratio >= 0.80:
+            conf = 0.95
+        elif not detected_repo and top_phrase and top_n_subj >= 4 and top_subj_ratio >= 0.80:
             conf = 0.92
         else:
-            conf = 0.82
+            conf = 0.85
 
         return {
             "shipped": True,
