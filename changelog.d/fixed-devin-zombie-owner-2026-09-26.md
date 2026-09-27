@@ -1,0 +1,1 @@
+- Devin sessions no longer get stuck with messages parked as "external owner" after CCC's own `devin acp` child exits; the dead (zombie) process is now reaped instead of counted as a live owner.

@@ -912,12 +912,22 @@ def _devin_cli_lock_pid(raw_id):
 
 
 def _devin_cli_pid_alive(pid):
-    """True when ``os.kill(pid, 0)`` succeeds."""
+    """True when ``os.kill(pid, 0)`` succeeds and ``pid`` is not our zombie.
+
+    ``kill(pid, 0)`` succeeds on a zombie. When CCC's own ``devin acp`` child
+    exits unreaped, its pid stays in the session lock and the durable queue
+    parks every message as "external-owner" forever. Reap it here instead.
+    """
     try:
-        os.kill(int(pid), 0)
-        return True
+        pid = int(pid)
+        os.kill(pid, 0)
     except (OSError, ProcessLookupError, ValueError, TypeError):
         return False
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return True  # not our child; kill(0) is the best cheap signal
+    return reaped == 0
 
 
 def _devin_cli_session_live(raw_id):

@@ -325,6 +325,25 @@ class DevinQueueTests(unittest.TestCase):
             self.assertTrue(server._devin_cli_session_live("live-lock"))
             self.assertFalse(server._devin_cli_session_live("missing"))
 
+    def test_devin_cli_pid_alive_rejects_own_zombie(self):
+        """An exited, unreaped child (zombie) must not count as a live owner."""
+        server = importlib.import_module("server")
+        import subprocess
+        import time
+
+        proc = subprocess.Popen(["true"])
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(proc.pid, 0)  # still succeeds while it is a zombie
+            except OSError:
+                break
+            time.sleep(0.05)
+            if not server._devin_cli_pid_alive(proc.pid):
+                break
+        self.assertFalse(server._devin_cli_pid_alive(proc.pid))
+        proc.returncode = 0  # already reaped; keep Popen from warning
+
     def test_devin_list_attaches_spawn_pid(self):
         """Durable Devin CLI rows must carry spawn_pid so the UI placeholder swaps."""
         server = importlib.import_module("server")
