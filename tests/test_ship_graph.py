@@ -211,6 +211,36 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-m", "feat(booking): add partner controls to booking flows"], cwd=repo_bym, check=True)
     sha_bym_flow = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_bym, check=True, capture_output=True, text=True).stdout.strip()
 
+    (repo_ccc / "f_server.txt").write_text("server", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "refactor(server): extract group-chat sidecar to server.py"], cwd=repo_ccc, check=True)
+    sha_ccc_gc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo_ccc / "f_log.txt").write_text("log", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(logs): add per-event copy button"], cwd=repo_ccc, check=True)
+    sha_ccc_log = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo_ccc / "f_set.txt").write_text("settings", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "fix(settings): per-event copy button reference"], cwd=repo_ccc, check=True)
+    sha_ccc_set = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo_ccc / "f_sess.txt").write_text("sess", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "fix(sessions): fix button styling in session list"], cwd=repo_ccc, check=True)
+    sha_ccc_sess = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
+    repo_idx = tmp_path / "indexing"
+    repo_idx.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_idx, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_idx, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_idx, check=True)
+    (repo_idx / "f_idx.txt").write_text("idx", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_idx, check=True)
+    subprocess.run(["git", "commit", "-m", "fix(search): drop self-referential sessions, add exclude-session"], cwd=repo_idx, check=True)
+    sha_idx_search = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_idx, check=True, capture_output=True, text=True).stdout.strip()
+
     with sqlite3.connect(wt_db_path) as wt_conn:
         wt_conn.execute("""
             CREATE TABLE items (
@@ -224,7 +254,7 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
         """)
         wt_conn.commit()
 
-    repos_str = f"{repo_ccc}{os.pathsep}{repo_bym}"
+    repos_str = f"{repo_ccc}{os.pathsep}{repo_bym}{os.pathsep}{repo_idx}"
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
@@ -243,9 +273,15 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
     return {
         "repo_ccc": repo_ccc,
         "repo_bym": repo_bym,
+        "repo_idx": repo_idx,
         "sha_ccc_hunch": sha_ccc_hunch,
         "sha_bym_hunch": sha_bym_hunch,
         "sha_bym_flow": sha_bym_flow,
+        "sha_ccc_gc": sha_ccc_gc,
+        "sha_ccc_log": sha_ccc_log,
+        "sha_ccc_set": sha_ccc_set,
+        "sha_ccc_sess": sha_ccc_sess,
+        "sha_idx_search": sha_idx_search,
     }
 
 
@@ -288,4 +324,43 @@ def test_is_shipped_single_keyword_rejected(mock_multi_repo_env):
     assert res2["shipped"] is False
     assert res2["confidence"] < 0.90
     assert res2["evidence"] == []
+
+
+def test_is_shipped_common_product_word_and_noun_phrase_traps(mock_multi_repo_env):
+    """Trap tests: common product words alone or partial noun phrases must not trigger shipped."""
+    # 1. 'group chat in Flow':
+    # BYM commit has 'booking flows' (only 'flow' matches).
+    # CCC commit has 'extract group-chat sidecar' (matches 'group' & 'chat', but missing 'flow').
+    # Neither should qualify as shipped for 'group chat in Flow'!
+    res_flow = ship_graph.is_shipped("Did we ship group chat in Flow?")
+    assert res_flow["shipped"] is False
+    assert res_flow["evidence"] == []
+    assert res_flow["confidence"] <= 0.65
+
+    # 2. 'bulk export button for sessions':
+    # CCC has 'fix(sessions): fix button styling in session list'
+    # Matching 'button' and 'sessions' without 'bulk export' is a keyword trap!
+    res_bulk = ship_graph.is_shipped("Did we add a bulk export button for sessions?")
+    assert res_bulk["shipped"] is False
+    assert res_bulk["evidence"] == []
+    assert res_bulk["confidence"] <= 0.65
+
+    # 3. 'MEMO-FIX session search':
+    # indexing has 'fix(search): drop self-referential sessions'
+    # Matches 'fix', 'search', 'sessions' - but MEMO-FIX project is not matched!
+    res_memo = ship_graph.is_shipped("Did we ship MEMO-FIX session search?")
+    assert res_memo["shipped"] is False
+    assert res_memo["evidence"] == []
+    assert res_memo["confidence"] <= 0.65
+
+
+def test_is_shipped_scope_preference(mock_multi_repo_env):
+    """Conventional-commit scope matching the question subject should be preferred."""
+    env = mock_multi_repo_env
+    # 'log view copy button' should prefer feat(logs): ... over fix(settings): ...
+    res = ship_graph.is_shipped("Did the log view get a per-event copy button?")
+    assert res["shipped"] is True
+    assert len(res["evidence"]) > 0
+    assert res["evidence"][0]["commit"] == env["sha_ccc_log"]
+
 

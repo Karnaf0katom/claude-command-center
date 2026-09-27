@@ -112,6 +112,27 @@ GENERIC_VERBS = frozenset({
     "create", "update", "try", "want", "need", "ship", "creat", "updat", "tri"
 })
 
+COMMON_PRODUCT_WORDS = frozenset({
+    "flow", "flows", "queue", "queues", "session", "sessions", "page", "pages",
+    "button", "buttons", "view", "views", "tab", "tabs", "panel", "panels",
+    "modal", "modals", "dialog", "dialogs", "list", "lists", "menu", "menus",
+    "icon", "icons", "input", "inputs", "window", "windows", "bar", "bars",
+    "card", "cards", "screen", "screens", "header", "headers", "footer", "footers",
+    "nav", "navigation", "sidebar", "sidebars", "banner", "banners", "toast", "toasts",
+    "row", "rows", "column", "columns", "table", "tables", "item", "items",
+    "link", "links", "board", "boards", "layout", "layouts", "strip", "strips",
+    "worker", "workers", "client", "clients", "user", "users", "app", "apps",
+    "mode", "modes",
+})
+
+CLAUSE_DELIMITERS = frozenset({
+    "in", "for", "on", "at", "from", "to", "under", "during", "into", "onto",
+    "off", "with", "before", "after", "between", "over", "about",
+    "so", "because", "while", "and", "or", "if", "when", "where", "but", "yet",
+    "get", "got", "does", "did", "is", "are", "was", "were", "have", "has", "had",
+})
+
+
 IRREGULAR_VERBS = {
     "came": "come", "went": "go", "gone": "go", "ran": "run",
     "wrote": "write", "written": "write", "broke": "break", "broken": "break",
@@ -1077,6 +1098,44 @@ def is_shipped(topic: str) -> dict:
     stemmed_content_terms = {_stem(w) for w in content_terms}
     query_asks_docs = any(w in content_terms for w in ("doc", "docs", "document", "documentation", "spec", "specs", "readme", "runbook"))
 
+    common_product_stems = {_stem(w) for w in COMMON_PRODUCT_WORDS}
+    generic_verb_stems = {_stem(w) for w in GENERIC_VERBS}
+    distinguishing_stems = stemmed_content_terms - common_product_stems - generic_verb_stems
+
+    # Adjacent substantive pairs in query (core noun phrases):
+    core_noun_phrases: list[tuple[str, str]] = []
+    raw_query_words = re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", t)
+    substantive_tokens: list[str | None] = []
+    for w in raw_query_words:
+        w_low = w.lower()
+        if w_low in STOPWORDS or w_low in GENERIC_VERBS or w_low in CLAUSE_DELIMITERS or (repo_words and w_low in repo_words):
+            substantive_tokens.append(None)
+        else:
+            substantive_tokens.append(w)
+
+    for i in range(len(substantive_tokens) - 1):
+        w1, w2 = substantive_tokens[i], substantive_tokens[i+1]
+        if w1 is not None and w2 is not None:
+            s1, s2 = _stem(w1.lower()), _stem(w2.lower())
+            if s1 in distinguishing_stems or s2 in distinguishing_stems:
+                core_noun_phrases.append((s1, s2))
+
+    # Target location/surface from query (e.g. 'in Flow', 'for Leads'):
+    loc_match = re.search(r"\b(?:in|for|on|under|at)\s+([A-Za-z0-9_-]+)", t, re.I)
+    target_loc_stem = None
+    if loc_match:
+        loc_word = loc_match.group(1).lower()
+        if loc_word not in STOPWORDS and loc_word not in GENERIC_VERBS and not (repo_words and loc_word in repo_words):
+            target_loc_stem = _stem(loc_word)
+
+    # Project prefix tokens (e.g. MEMO-FIX, OPS):
+    ticket_project_tokens = set()
+    raw_proj_tokens = re.findall(r"\b([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,10})*)\b", t)
+    for tok in raw_proj_tokens:
+        if not TICKET_STOP.match(tok) and tok not in ("CCC", "BYM", "WT", "SHA", "UTF", "RFC", "HTTP", "TLS", "GPT"):
+            if "-" in tok or tok in ("MEMO", "OPS", "CHUCK", "BECKY"):
+                ticket_project_tokens.add(tok.upper())
+
     # 1. Search WatchTower tickets
     candidate_tickets: list[dict] = []
     open_tickets: list[dict] = []
@@ -1138,22 +1197,29 @@ def is_shipped(topic: str) -> dict:
                 if has_phrase_title:
                     break
 
-        is_relevant = (
-            title_ratio >= 0.40
-            or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_content_terms) <= 4))
-            or (text_ratio >= 0.60 and len(m_title) >= 1)
-        )
+        m_title_dist = m_title & distinguishing_stems
+        if len(distinguishing_stems) > 0 and len(m_title_dist) == 0:
+            is_relevant = False
+        elif len(distinguishing_stems) >= 2 and len(m_title_dist) < 2 and not has_phrase_title:
+            is_relevant = False
+        else:
+            is_relevant = (
+                title_ratio >= 0.40
+                or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_content_terms) <= 4))
+                or (text_ratio >= 0.60 and len(m_title) >= 1)
+            )
 
         if is_relevant:
             t_info = {
                 "ref": ref, "status": status, "commit_sha": commit_sha or "",
                 "title": title, "title_ratio": title_ratio,
-                "m_title": m_title, "has_phrase_title": has_phrase_title,
+                "m_title": m_title, "m_title_dist": m_title_dist, "has_phrase_title": has_phrase_title,
             }
             candidate_tickets.append(t_info)
             if status in ("open", "in_progress", "blocked", "todo"):
                 open_tickets.append(t_info)
             elif status == "closed" and commit_sha:
+
                 closed_tickets.append(t_info)
 
     try:
@@ -1206,10 +1272,23 @@ def is_shipped(topic: str) -> dict:
         if is_doc_commit and not query_asks_docs:
             return
 
-        subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
-        subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS}
+        subj_clean = subj_lower
+        scope = ""
+        m_conv = re.match(r"^([a-z]+)(?:\(([^)]+)\))?:\s*", subj_lower)
+        if m_conv:
+            subj_clean = subj_lower[m_conv.end():]
+            if m_conv.group(2):
+                scope = m_conv.group(2).strip()
+
+        subj_tokens = re.findall(r"[a-z0-9]+", subj_clean)
+        scope_tokens = re.findall(r"[a-z0-9]+", scope) if scope else []
+        scope_stems = {_stem(w) for w in scope_tokens if w not in STOPWORDS}
+        subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS} | scope_stems
         body_tokens = re.findall(r"[a-z0-9]+", body_lower)
         body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
+
+        # Scope boost: prefer commits whose scope matches the question's subject
+        scope_boost = 15.0 if (scope_stems and bool(scope_stems & stemmed_content_terms)) else 0.0
 
         # Check compound pairs
         for i in range(len(content_terms) - 1):
@@ -1235,13 +1314,12 @@ def is_shipped(topic: str) -> dict:
 
         matched_subj = stemmed_content_terms & subj_stems
         matched_all = stemmed_content_terms & (subj_stems | body_stems)
+        matched_distinguishing = matched_subj & distinguishing_stems
 
         subj_ratio = len(matched_subj) / len(stemmed_content_terms) if stemmed_content_terms else 0
         all_ratio = len(matched_all) / len(stemmed_content_terms) if stemmed_content_terms else 0
 
-        clean_subj = re.sub(r"^(?:feat|fix|chore|docs|refactor|test|ci|perf|build)(?:\([^)]*\))?:\s*", "", subj_lower)
-        clean_subj_tokens = re.findall(r"[a-z0-9]+", clean_subj)
-        clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in clean_subj_tokens]) + " "
+        clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in subj_tokens]) + " "
         body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
 
         has_phrase_subj = False
@@ -1264,6 +1342,10 @@ def is_shipped(topic: str) -> dict:
             "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
             "matched_subj": matched_subj,
             "n_matched_subj": len(matched_subj),
+            "matched_distinguishing": matched_distinguishing,
+            "n_matched_distinguishing": len(matched_distinguishing),
+            "subj_stems": subj_stems,
+            "scope_boost": scope_boost,
             "n_matched_all": len(matched_all),
             "has_phrase": has_phrase_subj or has_phrase_body,
             "has_phrase_subj": has_phrase_subj,
@@ -1326,27 +1408,79 @@ def is_shipped(topic: str) -> dict:
                 pass
 
         if found_c:
-            if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
-                found_c["ticket_boost"] = 15.0
-                found_c["ticket_ref"] = t_ref
+            t_m_dist = ct.get("m_title_dist", set())
+            c_m_dist = found_c.get("matched_distinguishing", set())
+            dist_covered = len(t_m_dist | c_m_dist)
+            if len(distinguishing_stems) == 0 or dist_covered >= min(2, len(distinguishing_stems)):
+                if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
+                    found_c["ticket_boost"] = 15.0
+                    found_c["ticket_ref"] = t_ref
 
     # 3. Evaluate qualifying commits
     qualifying: list[dict] = []
     n_stems = len(stemmed_content_terms)
+    n_dist = len(distinguishing_stems)
 
     for c in candidate_commits:
         ticket_boost = c.get("ticket_boost", 0.0)
+        scope_boost = c.get("scope_boost", 0.0)
         is_strong = False
         n_m_subj = c["n_matched_subj"]
+        n_m_dist = c["n_matched_distinguishing"]
         n_m_all = c["n_matched_all"]
         subj_ratio = c["subj_ratio"]
         has_phrase_subj = c.get("has_phrase_subj", False)
+        c_stems = c.get("subj_stems", set())
+
+        # TRAP CHECK 1: If ticket project was specified in query (e.g. MEMO-FIX)
+        if ticket_project_tokens:
+            matches_proj = False
+            for p_tok in ticket_project_tokens:
+                p_lower = p_tok.lower()
+                p_parts = {_stem(x) for x in re.findall(r"[a-z0-9]+", p_lower)}
+                if p_parts.issubset(c_stems) or p_lower in c["subject"].lower():
+                    matches_proj = True
+                    break
+                t_ref = c.get("ticket_ref", "")
+                if t_ref and any(t_ref.upper().startswith(p) for p in ticket_project_tokens):
+                    matches_proj = True
+                    break
+            if not matches_proj:
+                continue
+
+        # TRAP CHECK 2: Ubiquitous product words penalty / Distinguishing stems requirement
+        if n_dist > 0 and n_m_dist == 0:
+            continue
+        if n_dist >= 2 and n_m_dist < 2 and ticket_boost == 0:
+            continue
+
+
+        # TRAP CHECK 3: Core noun phrases coverage
+        if core_noun_phrases and ticket_boost == 0 and subj_ratio < 0.70:
+            covered_phrase_count = 0
+            for p1, p2 in core_noun_phrases:
+                if p1 in c_stems and p2 in c_stems:
+                    covered_phrase_count += 1
+            if covered_phrase_count == 0 and not has_phrase_subj:
+                continue
+
+
+        # TRAP CHECK 4: Target location/surface check
+        if target_loc_stem and ticket_boost == 0:
+            is_repo_loc = (detected_repo is not None and target_loc_stem in detected_repo.lower())
+            if not is_repo_loc:
+                if target_loc_stem not in c_stems and target_loc_stem not in c.get("matched_all", set()):
+                    continue
 
         matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
 
         if n_stems <= 1 or len(matched_substantive) < 2:
-            is_strong = False
+            if ticket_boost > 0 and n_m_subj >= 1:
+                is_strong = True
+            else:
+                is_strong = False
         elif n_stems == 2:
+
             if n_m_subj >= 2:
                 is_strong = True
             elif has_phrase_subj:
@@ -1358,16 +1492,16 @@ def is_shipped(topic: str) -> dict:
                 is_strong = True
             elif n_m_subj >= 3:
                 is_strong = True
-            elif n_m_subj >= 2 and subj_ratio >= 0.65:
+            elif n_m_subj >= 2 and subj_ratio >= 0.65 and n_m_dist >= 2:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 2:
+            if has_phrase_subj and n_m_subj >= 2 and n_m_dist >= 2:
                 is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.50:
+            elif n_m_subj >= 3 and subj_ratio >= 0.50 and n_m_dist >= 2:
                 is_strong = True
-            elif subj_ratio >= 0.65 and n_m_subj >= 3:
+            elif subj_ratio >= 0.65 and n_m_subj >= 3 and n_m_dist >= 2:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
@@ -1381,9 +1515,11 @@ def is_shipped(topic: str) -> dict:
             c["session_id"] = s_row[0] if s_row else ""
             score = (
                 ticket_boost
+                + scope_boost
                 + subj_ratio * 25.0
                 + n_m_subj * 10.0
-                + (12.0 if has_phrase_subj else 0.0)
+                + (15.0 if has_phrase_subj else 0.0)
+                + n_m_dist * 8.0
                 + n_m_all * 3.0
                 - (c["rank"] * 0.1)
             )
@@ -1414,6 +1550,21 @@ def is_shipped(topic: str) -> dict:
                     "tickets": all_tickets,
                 }
 
+        top_phrase = top_commit.get("has_phrase_subj", False)
+        top_n_subj = top_commit.get("n_matched_subj", 0)
+        top_subj_ratio = top_commit.get("subj_ratio", 0.0)
+        top_ticket_boost = top_commit.get("ticket_boost", 0.0)
+        repo_matched = (detected_repo is not None and top_commit.get("repo") == detected_repo)
+
+        # Check for weak evidence: if best evidence is weak, answer shipped=false!
+        if top_commit["final_score"] < 40.0 or (top_subj_ratio < 0.60 and not top_phrase and top_ticket_boost == 0):
+            return {
+                "shipped": False,
+                "confidence": 0.65,
+                "evidence": [],
+                "tickets": all_tickets,
+            }
+
         evidence = [
             {
                 "repo": c["repo"],
@@ -1423,12 +1574,6 @@ def is_shipped(topic: str) -> dict:
             }
             for c in qualifying[:5]
         ]
-
-        top_phrase = top_commit.get("has_phrase_subj", False)
-        top_n_subj = top_commit.get("n_matched_subj", 0)
-        top_subj_ratio = top_commit.get("subj_ratio", 0.0)
-        top_ticket_boost = top_commit.get("ticket_boost", 0.0)
-        repo_matched = (detected_repo is not None and top_commit.get("repo") == detected_repo)
 
         if top_ticket_boost > 0 and top_n_subj >= 2 and (top_phrase or top_subj_ratio >= 0.60):
             conf = 0.95
@@ -1479,3 +1624,4 @@ def is_shipped(topic: str) -> dict:
         "evidence": [],
         "tickets": all_tickets,
     }
+
