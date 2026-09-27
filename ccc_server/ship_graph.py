@@ -10,7 +10,7 @@ Exposes:
       Re-ranks/augments ccc_server/session_fts.search_sessions results using
       commit matches and ticket expansion over the graph.
 
-Persists index on disk under ~/.claude/command-center/ship_graph.sqlite.
+Persists index on disk under the CCC state directory (ship_graph.sqlite).
 Refreshes incrementally:
   - Per-repo HEAD (only runs git log when HEAD changes)
   - Per-transcript (mtime, size)
@@ -82,7 +82,7 @@ where remember recall worked working work done did do we i me my the that which 
 have has is it there any way something thing things one ones ship shipped shipping feature task
 ticket pr pull request commit commits repo repository support implemented implement
 ever actually someone onto doesn don didn need needs try trying want wants sure make makes know knows yet
-good keep coming back get still used use uses using somewhere anywhere anybody somebody anyone
+good get still used use uses using somewhere anywhere anybody somebody anyone
 """.split())
 
 SYNONYMS = {
@@ -97,11 +97,16 @@ _last_sync_ts = 0.0
 _SYNC_TTL = 5.0  # seconds between freshness checks
 
 
+def _ccc_dir() -> Path:
+    cc_name = "command-center"
+    return Path.home() / ".claude" / cc_name
+
+
 def _get_db_path() -> Path:
     env = os.environ.get("CCC_SHIP_GRAPH_DB")
     if env:
         return Path(env)
-    return Path.home() / ".claude" / "command-center" / "ship_graph.sqlite"
+    return _ccc_dir() / "ship_graph.sqlite"
 
 
 def _get_wt_db_path() -> Path:
@@ -205,7 +210,7 @@ def discover_repo_roots() -> dict[str, str]:
 
     # 1. Config files from command-center
     for fn in ["custom-repos.txt", "recent-repos.txt"]:
-        p = Path.home() / ".claude" / "command-center" / fn
+        p = _ccc_dir() / fn
         if p.exists():
             try:
                 for line in p.read_text(encoding="utf-8").splitlines():
@@ -216,7 +221,7 @@ def discover_repo_roots() -> dict[str, str]:
                 pass
 
     # 2. Registry
-    reg = Path.home() / ".claude" / "command-center" / "registry.json"
+    reg = _ccc_dir() / "registry.json"
     if reg.exists():
         try:
             for item in json.loads(reg.read_text(encoding="utf-8")):
@@ -1086,7 +1091,7 @@ def is_shipped(topic: str) -> dict:
             )
             s_row = cur_s.fetchone()
             c["session_id"] = s_row[0] if s_row else ""
-            code_boost = 5.0 if c["repo"] in ("claude-command-center", "BYM", "watchtower", "chuck-realtor-web", "stramp-platform") else 0.0
+            code_boost = 0.0
             score = (
                 ticket_boost
                 + subj_ratio * 25.0
