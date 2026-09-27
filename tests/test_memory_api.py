@@ -101,7 +101,8 @@ def mock_memory_env(tmp_path, monkeypatch):
     # force a fresh copy so it isn't skipped as still-warm from a prior test.
     ship_graph._base_search_sessions = None
 
-    return {"repo_dir": repo_dir, "commit_sha": commit_sha}
+    return {"repo_dir": repo_dir, "commit_sha": commit_sha, "projects_dir": projects_dir,
+            "codex_dir": codex_dir, "tmp_path": tmp_path}
 
 
 def test_recall_enriches_hits_with_title_repo_date_snippet(mock_memory_env):
@@ -173,6 +174,109 @@ def test_file_history_untracked_path_returns_empty_history(mock_memory_env):
 
 def test_file_history_empty_path_returns_empty_history(mock_memory_env):
     assert memory_api.file_history("") == {"path": "", "repo": "", "history": []}
+
+
+def _write_session(path, lines):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+
+def test_file_history_finds_sessions_for_non_repo_paths(mock_memory_env):
+    """MEMO-FIX-21: any absolute path, in a repo or not, maps to the sessions
+    that wrote or read it -- including Codex cwd-relative patch paths."""
+    scratch = mock_memory_env["tmp_path"] / "dev" / "scratch" / "study"
+    report = scratch / "report.html"
+    notes = scratch / "notes.md"
+    _write_session(mock_memory_env["projects_dir"] / "scratch" / "writer-1.jsonl", [
+        {"type": "user", "cwd": str(scratch), "timestamp": "2026-09-26T10:00:00Z",
+         "message": {"role": "user", "content": "write the cost report"}},
+        {"type": "assistant", "cwd": str(scratch), "timestamp": "2026-09-26T10:01:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "name": "Write", "input": {"file_path": str(report), "content": "x"}},
+             {"type": "tool_use", "name": "Read", "input": {"file_path": str(notes)}},
+         ]}},
+    ])
+    _write_session(mock_memory_env["projects_dir"] / "scratch" / "reader-2.jsonl", [
+        {"type": "user", "cwd": str(scratch), "timestamp": "2026-09-27T10:00:00Z",
+         "message": {"role": "user", "content": "review the report"}},
+        {"type": "assistant", "cwd": str(scratch), "timestamp": "2026-09-27T10:01:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "name": "Read", "input": {"file_path": str(report)}},
+         ]}},
+    ])
+    codex_sid = "019f0000-0000-7000-8000-000000000021"
+    _write_session(mock_memory_env["codex_dir"] / "2026" / "09" / "27" / f"rollout-x-{codex_sid}.jsonl", [
+        {"type": "session_meta", "timestamp": "2026-09-27T11:00:00Z",
+         "payload": {"id": codex_sid, "cwd": str(scratch)}},
+        {"type": "response_item", "timestamp": "2026-09-27T11:01:00Z",
+         "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                     "input": "*** Begin Patch\n*** Update File: notes.md\n@@\n-a\n+b\n*** End Patch"}},
+    ])
+    ship_graph._last_sync_ts = 0.0
+
+    res = memory_api.file_history(str(report))
+    assert res["repo"] == ""
+    ops = {e["session_id"]: e["op"] for e in res["history"] if e["kind"] == "session"}
+    assert ops == {"writer-1": "wrote", "reader-2": "read"}
+
+    res = memory_api.file_history(str(notes))
+    ops = {e["session_id"]: e["op"] for e in res["history"] if e["kind"] == "session"}
+    assert ops == {"writer-1": "read", codex_sid: "wrote"}
+
+
+def test_session_reparse_replaces_its_edges_and_files(mock_memory_env):
+    _write_session(mock_memory_env["projects_dir"] / "widget-repo" / "ticketed-1.jsonl", [
+        {"type": "user", "cwd": str(mock_memory_env["repo_dir"]), "timestamp": "2026-09-22T10:00:00Z",
+         "message": {"role": "user", "content": "work on WIDGET-42"}},
+        {"type": "assistant", "timestamp": "2026-09-22T10:01:00Z", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/abs/notes.md"}},
+        ]}},
+    ])
+    conn = ship_graph._get_connection()
+    ship_graph._sync_all(conn, force=True)
+
+    def counts():
+        return (
+            conn.execute("SELECT COUNT(*) FROM edges WHERE src = 'ticketed-1'").fetchone()[0],
+            conn.execute("SELECT COUNT(*) FROM session_files WHERE sid = 'ticketed-1'").fetchone()[0],
+        )
+
+    before = counts()
+    assert before == (1, 1)
+    conn.execute("UPDATE transcripts SET mtime = -1")
+    conn.commit()
+    ship_graph._sync_all(conn, force=True)
+    assert counts() == before
+
+
+def test_session_files_migration_is_background_only(mock_memory_env, monkeypatch):
+    conn = ship_graph._get_connection()
+    ship_graph._sync_all(conn, force=True)
+    conn.execute("DELETE FROM meta WHERE key = 'session_files_v'")
+    conn.commit()
+    started = []
+    monkeypatch.setattr(ship_graph, "_start_background_sync", lambda: started.append(1))
+    monkeypatch.setattr(ship_graph, "_sync_transcripts", lambda *a: pytest.fail("parsed inline"))
+    ship_graph._last_sync_ts = 0.0
+    ship_graph._sync_all(conn, force=False)
+    assert started
+
+
+def test_recall_points_at_best_matching_section(mock_memory_env):
+    filler = "routine refactor progress with nothing notable " * 30
+    lines = []
+    for i in range(1, 121):
+        lines.append({"type": "user", "cwd": str(mock_memory_env["repo_dir"]),
+                      "timestamp": "2026-09-21T10:00:00Z",
+                      "message": {"role": "user", "content": f"step {i}"}})
+        extra = " the wombat ledger came up" if i == 70 else ""
+        lines.append({"type": "assistant", "timestamp": "2026-09-21T10:00:01Z",
+                      "message": {"role": "assistant", "content": filler + extra}})
+    _write_session(mock_memory_env["projects_dir"] / "widget-repo" / "long-1.jsonl", lines)
+    res = memory_api.recall("wombat ledger")
+    hit = next(r for r in res["results"] if r["session_id"] == "long-1")
+    assert hit["match"]["turn"] <= 70 <= hit["match"]["turn_end"]
+    assert "[wombat]" in hit["match"]["snippet"].lower()
 
 
 def test_decisions_filters_to_decision_shaped_snippets(mock_memory_env):

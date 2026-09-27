@@ -30,6 +30,7 @@ from session_meta.files (already synced), a single LIKE-filtered query.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import time
@@ -91,17 +92,24 @@ def recall(query: str, limit: int = 20) -> dict:
     sids = [h["session_id"] for h in hits if h.get("session_id")]
     session_meta = _session_meta_rows(_sg._get_connection(), sids) if sids else {}
     sdoc = _sdoc_rows(sids) if sids else {}
+    # Long sessions are also indexed as sections (session_fts.ssec): point at
+    # the best-matching one -- its turn range and a hit-centred snippet --
+    # since the session-level snippet is just the opening prompt.
+    sections = _sfts.section_matches(query, sids) if sids else {}
     results = []
     for sid in sids:
         sm = session_meta.get(sid, {})
         sd = sdoc.get(sid, {})
-        results.append({
+        row = {
             "session_id": sid,
             "title": sd.get("title", ""),
             "repo": sm.get("repo", ""),
             "date": sm.get("date", ""),
             "snippet": sd.get("snippet", ""),
-        })
+        }
+        if sid in sections:
+            row["match"] = sections[sid]
+        results.append(row)
     indexing = _sfts.is_indexing() or _sg.is_indexing()
     return {"query": query, "results": results, "indexing": indexing}
 
@@ -221,11 +229,30 @@ def _sessions_touching_file(conn: sqlite3.Connection, repo_root: str, rel_path: 
     return out[:limit]
 
 
+def _sessions_with_file_op(conn: sqlite3.Connection, abs_path: str, limit: int) -> list[dict]:
+    """Sessions that wrote or read exactly `abs_path` (ship_graph's
+    session_files, indexed by path: one lookup, repo or not)."""
+    if not abs_path:
+        return []
+    try:
+        rows = conn.execute(
+            """SELECT sf.sid, sf.op, sm.start_ts, sm.end_ts
+               FROM session_files sf LEFT JOIN session_meta sm ON sm.sid = sf.sid
+               WHERE sf.path = ?""",
+            (abs_path,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = [{"sid": sid, "op": op, "ts": start_ts or end_ts or 0.0} for sid, op, start_ts, end_ts in rows]
+    out.sort(key=lambda h: h["ts"], reverse=True)
+    return out[:limit]
+
+
 def file_history(path: str, repo: str = "", limit: int = 20) -> dict:
     """GET /api/memory/file-history — sessions and commits that touched
     `path`, newest first, each with a one-line why (commit subject / session
     title)."""
-    p = (path or "").strip()
+    p = os.path.expanduser((path or "").strip())
     if not p:
         return {"path": "", "repo": "", "history": []}
 
@@ -234,7 +261,21 @@ def file_history(path: str, repo: str = "", limit: int = 20) -> dict:
 
     conn = _sg._get_connection()
     _sg._sync_all(conn, force=False)
-    sess_hits = _sessions_touching_file(conn, repo_root, rel_path, limit) if rel_path else []
+    if os.path.isabs(p):
+        abs_path = os.path.normpath(p)
+    elif repo_root and rel_path:
+        abs_path = os.path.normpath(os.path.join(repo_root, rel_path))
+    else:
+        abs_path = ""
+    sess_hits = _sessions_with_file_op(conn, abs_path, limit)
+    # session_meta.files (writes only, basename-LIKE) still covers anything
+    # session_files hasn't re-indexed yet, and repo-relative suffix matches.
+    seen = {h["sid"] for h in sess_hits}
+    if rel_path:
+        for h in _sessions_touching_file(conn, repo_root, rel_path, limit):
+            if h["sid"] not in seen:
+                seen.add(h["sid"])
+                sess_hits.append({**h, "op": "wrote"})
     sids = [h["sid"] for h in sess_hits]
     sdoc = _sdoc_rows(sids) if sids else {}
     for h in sess_hits:
@@ -242,6 +283,7 @@ def file_history(path: str, repo: str = "", limit: int = 20) -> dict:
         entries.append({
             "kind": "session",
             "session_id": h["sid"],
+            "op": h.get("op", "wrote"),
             "ts": h["ts"],
             "date": time.strftime("%Y-%m-%d", time.localtime(h["ts"])) if h["ts"] else "",
             "why": sd.get("title") or "(untitled session)",

@@ -481,6 +481,9 @@ def cmd_recall(args):
         print(f"{r.get('session_id') or '?':<38} {meta}")
         if r.get("snippet"):
             print(f"  {r['snippet']}")
+        m = r.get("match")
+        if m and m.get("snippet"):
+            print(f"  @turn {m.get('turn')}: {m['snippet']}")
     if payload.get("indexing"):
         print("(indexing: true — still warming up, results may be incomplete)")
     return 0
@@ -536,6 +539,7 @@ def cmd_history(args):
     text = " ".join(args.path).strip()
     if not text and not sys.stdin.isatty():
         text = sys.stdin.read().strip()
+    text = os.path.expanduser(text)
     if not text:
         print("ccc history: missing path (pass it as an argument or pipe it on stdin)",
               file=sys.stderr)
@@ -562,7 +566,8 @@ def cmd_history(args):
         if e.get("kind") == "commit":
             print(f"{date:<12} commit  {e.get('hash') or '?':<10} {why}")
         else:
-            print(f"{date:<12} session {e.get('session_id') or '?':<38} {why}")
+            op = e.get("op") or "wrote"
+            print(f"{date:<12} {op:<7} {e.get('session_id') or '?':<38} {why}")
     return 0
 
 
@@ -1176,7 +1181,8 @@ def main(argv=None):
         "history",
         help="commits and sessions that touched a file, newest first",
         description="GET /api/memory/file-history: `git log --follow` for the "
-                    "path plus any indexed sessions that edited it, merged "
+                    "path plus any indexed sessions that wrote or read it "
+                    "(any absolute path, in a repo or not), merged "
                     "newest-first with a one-line why for each.",
     )
     p.add_argument("path", nargs="*", help="the file path (or pipe it on stdin)")

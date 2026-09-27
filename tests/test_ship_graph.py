@@ -101,6 +101,11 @@ def mock_graph_env(tmp_path, monkeypatch):
     session_file.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
 
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    # search_sessions() re-ranks session_fts results: keep that index in
+    # tmp_path too, or it syncs (and migrates) the real on-disk one.
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    monkeypatch.setattr(ship_graph, "_base_search_sessions", None)
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
@@ -323,6 +328,11 @@ def mock_trap_env(tmp_path, monkeypatch):
         str(repo_alpha), str(repo_beta), str(mirror_dir / "beta-site"),
     ])
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    # search_sessions() re-ranks session_fts results: keep that index in
+    # tmp_path too, or it syncs (and migrates) the real on-disk one.
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    monkeypatch.setattr(ship_graph, "_base_search_sessions", None)
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
@@ -577,6 +587,11 @@ def mock_coverage_env(tmp_path, monkeypatch):
 
     repos_str = os.pathsep.join([str(repo_gamma), str(repo_delta)])
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    # search_sessions() re-ranks session_fts results: keep that index in
+    # tmp_path too, or it syncs (and migrates) the real on-disk one.
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    monkeypatch.setattr(ship_graph, "_base_search_sessions", None)
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))

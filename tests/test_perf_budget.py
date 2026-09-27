@@ -3413,6 +3413,62 @@ def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
     )
 
 
+def test_session_fts_section_search_cost_is_independent_of_session_count(tmp_path, monkeypatch):
+    """MEMO-FIX-21: long sessions add ssec section rows. A warm search must
+    re-parse nothing and run a constant number of section queries (one, via
+    the FTS index) however many long sessions exist; section_matches() for
+    a page of results is one batched query, never one per sid."""
+    from ccc_server import session_fts
+
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+    session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+
+    filler = "routine refactor progress with nothing notable " * 30
+    repo_dir = tmp_path / "projects" / "repo"
+    repo_dir.mkdir(parents=True)
+    sids = []
+    for n in range(12):
+        sid = f"long-{n:03d}"
+        sids.append(sid)
+        lines = []
+        for i in range(1, 121):
+            lines.append({"type": "user", "cwd": "/repo", "message": {"role": "user", "content": f"step {i}"}})
+            extra = " the wombat ledger" if i == 60 else ""
+            lines.append({"type": "assistant", "message": {"role": "assistant", "content": filler + extra}})
+        (repo_dir / f"{sid}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    session_fts.search_sessions("wombat ledger", force_refresh=True)
+    conn = session_fts._get_connection()
+    assert conn.execute("SELECT COUNT(DISTINCT sid) FROM ssec_map").fetchone()[0] == 12
+
+    parse_calls = []
+    monkeypatch.setattr(session_fts, "_parse_file", lambda a: parse_calls.append(a))
+    stmts = []
+    conn.set_trace_callback(stmts.append)
+    try:
+        res = session_fts.search_sessions("wombat ledger", limit=20, force_refresh=True)
+        sec_queries = [q for q in stmts if "FROM ssec" in q]
+        stmts.clear()
+        matches = session_fts.section_matches("wombat ledger", sids)
+        match_queries = [q for q in stmts if "FROM ssec" in q]
+    finally:
+        conn.set_trace_callback(None)
+
+    assert parse_calls == []
+    assert len(res) == 12
+    assert len(sec_queries) == 1, sec_queries
+    assert len(matches) == 12
+    assert len(match_queries) == 1, match_queries
+
+
 def test_session_fts_search_never_triggers_embedding_backfill_scan(tmp_path, monkeypatch):
     """_backfill_missing_embeddings() scans sdoc for sids missing a semb row --
     an O(corpus) query. It must only ever run from the background loop started

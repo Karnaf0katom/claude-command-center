@@ -64,6 +64,27 @@ CODEX_SID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 MAX_USER = 30000
 MAX_ASSIST = 30000
 
+# MEMO-FIX-21: sdoc keeps one capped row per session (middle dropped), so a
+# long session's mid-transcript mentions are invisible to it. Sessions whose
+# text got capped -- or that carry task/plan text (TaskCreate, TodoWrite,
+# Codex update_plan), which sdoc never stored -- are *also* indexed as
+# sections in `ssec`: ~SECTION_TURNS user turns each (or a compaction
+# boundary, or SECTION_CHARS), keyed to the parent sid. search_sessions()
+# collapses section hits per session. Tool output stays out of sections.
+SECTION_TURNS = 50
+SECTION_CHARS = 60000
+# Bump when the section shape changes: _sync_index() then re-parses every
+# already-indexed transcript above _SECTION_MIGRATE_MIN_SIZE, in the
+# background (never inline on a request thread).
+SECTION_SCHEMA_VERSION = 1
+_SECTION_MIGRATE_MIN_SIZE = 100_000
+_TASK_TOOLS = ("TaskCreate", "TaskUpdate", "TodoWrite")
+# bm25 weights for ssec(sid, sec, turn0, turn1, body, tasks). Task/plan text
+# is the session's own statement of what it is working on -- stickier than
+# any one message (Claude Code re-injects it every few turns) -- so it
+# weighs like sdoc's prompts/meta rather than like body text.
+SSEC_WEIGHTS_STR = "0, 0, 0, 0, 1.0, 6.0"
+
 # BM25 column weights for sdoc(sid, title, prompts, report, body, meta, summary)
 # sid is UNINDEXED (col 0 = 0 weight)
 BM25_WEIGHTS = (0, 15.0, 2.0, 1.0, 1.0, 4.0, 0.0)
@@ -210,14 +231,83 @@ def _is_scratch(path: str, cwd: str) -> int:
     return 1 if (SCRATCH_RE.search(path) or SCRATCH_RE.search(cwd or "")) else 0
 
 
-def _finish(sid, engine, path, cwd, title, users, assists, tools, files, ts0, ts1):
+def _task_text(name: str, inp) -> str:
+    """Searchable text of one task/plan tool call (TaskCreate/TaskUpdate,
+    TodoWrite, Codex update_plan) -- subjects, descriptions, plan steps."""
+    if not isinstance(inp, dict):
+        return ""
+    out = []
+    for k in ("subject", "description", "activeForm", "explanation"):
+        v = inp.get(k)
+        if isinstance(v, str):
+            out.append(v)
+    for item in (inp.get("todos") or []) + (inp.get("plan") or []):
+        if isinstance(item, dict):
+            v = item.get("content") or item.get("step")
+            if isinstance(v, str):
+                out.append(v)
+    return "\n".join(out)
+
+
+def _build_sections(stream: list[tuple[str, int, str]]) -> list[dict]:
+    """Split an ordered (kind, turn, text) stream into sections.
+
+    kind: "u" user prompt, "a" assistant text, "t" task/plan text, "b"
+    compaction boundary. `turn` is the 1-based user-prompt index the item
+    belongs to. A section closes at a compaction boundary, after
+    SECTION_TURNS user prompts, or past SECTION_CHARS of text.
+    """
+    sections: list[dict] = []
+    cur: dict | None = None
+    seen_tasks: set[str] = set()
+
+    def close():
+        nonlocal cur
+        if cur and (cur["parts"] or cur["tasks"]):
+            sections.append({
+                "sec": len(sections),
+                "turn0": cur["turn0"],
+                "turn1": cur["turn1"],
+                "body": "\n---\n".join(cur["parts"]),
+                "tasks": "\n---\n".join(cur["tasks"]),
+            })
+        cur = None
+
+    for kind, turn, text in stream:
+        if kind == "b":
+            close()
+            continue
+        if kind == "t":
+            if text in seen_tasks:
+                continue
+            seen_tasks.add(text)
+        if cur and kind == "u" and (cur["users"] >= SECTION_TURNS or cur["chars"] >= SECTION_CHARS):
+            close()
+        if cur is None:
+            cur = {"turn0": turn, "turn1": turn, "parts": [], "tasks": [], "chars": 0, "users": 0}
+        piece = text[:4000] if kind != "a" else text[:3000]
+        (cur["tasks"] if kind == "t" else cur["parts"]).append(piece)
+        cur["chars"] += len(piece)
+        cur["turn1"] = turn
+        if kind == "u":
+            cur["users"] += 1
+    close()
+    return sections
+
+
+def _finish(sid, engine, path, cwd, title, users, assists, tools, files, ts0, ts1, stream=None):
     first = users[0] if users else ""
-    user_text = "\n---\n".join(u[:4000] for u in users)[:MAX_USER]
+    joined_user = "\n---\n".join(u[:4000] for u in users)
+    user_text = joined_user[:MAX_USER]
     joined = "\n---\n".join(a[:3000] for a in assists)
     assistant_text = (
         joined if len(joined) <= MAX_ASSIST
         else joined[: MAX_ASSIST // 3] + "\n…\n" + joined[-2 * MAX_ASSIST // 3:]
     )
+    stream = stream or []
+    capped = len(joined_user) > MAX_USER or len(joined) > MAX_ASSIST
+    has_tasks = any(k == "t" for k, _, _ in stream)
+    sections = _build_sections(stream) if (capped or has_tasks) else []
     final = "\n---\n".join(assists[-3:])[:12000]
     blob = "\n".join(tools)
     commits = {}
@@ -260,6 +350,7 @@ def _finish(sid, engine, path, cwd, title, users, assists, tools, files, ts0, ts
         "assistant_text": assistant_text,
         "meta": meta,
         "summary": "",
+        "sections": sections,
     }
 
 
@@ -268,6 +359,7 @@ def parse_claude(path: str) -> dict | None:
     cwd = ""
     title_custom = title_ai = ""
     users, assists, tools = [], [], []
+    stream: list[tuple[str, int, str]] = []
     files = set()
     ts0 = ts1 = None
     with open(path, "rb") as f:
@@ -277,6 +369,9 @@ def parse_claude(path: str) -> dict | None:
             except Exception:
                 continue
             t = d.get("type")
+            if t == "system" and d.get("subtype") == "compact_boundary":
+                stream.append(("b", len(users), ""))
+                continue
             if t == "custom-title":
                 title_custom = d.get("customTitle") or title_custom
                 continue
@@ -300,6 +395,7 @@ def parse_claude(path: str) -> dict | None:
                 txt = _text_of(content)
                 if txt and _is_real_prompt(txt):
                     users.append(txt)
+                    stream.append(("u", len(users), txt))
                 tb = _tool_blob(content)
                 if tb:
                     tools.append(tb[:4000])
@@ -307,17 +403,22 @@ def parse_claude(path: str) -> dict | None:
                 txt = _text_of(content)
                 if txt:
                     assists.append(txt)
+                    stream.append(("a", len(users), txt))
                 if isinstance(content, list):
                     for c in content:
                         if isinstance(c, dict) and c.get("type") == "tool_use":
                             inp = c.get("input") or {}
+                            if c.get("name") in _TASK_TOOLS:
+                                tt = _task_text(c.get("name"), inp)
+                                if tt:
+                                    stream.append(("t", len(users), tt))
                             fp = inp.get("file_path") or inp.get("notebook_path")
                             if fp and c.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                                 files.add(fp)
                             cmd = inp.get("command")
                             if isinstance(cmd, str) and "git commit" in cmd:
                                 tools.append(cmd[:1500])
-    return _finish(sid, "claude", path, cwd, title_custom or title_ai, users, assists, tools, files, ts0, ts1)
+    return _finish(sid, "claude", path, cwd, title_custom or title_ai, users, assists, tools, files, ts0, ts1, stream)
 
 
 def parse_codex(path: str) -> dict | None:
@@ -327,6 +428,7 @@ def parse_codex(path: str) -> dict | None:
         sid = m.group(1)
     cwd = ""
     users, assists, tools, finals = [], [], [], []
+    stream: list[tuple[str, int, str]] = []
     files = set()
     ts0 = ts1 = None
     with open(path, "rb") as f:
@@ -347,14 +449,19 @@ def parse_codex(path: str) -> dict | None:
                 continue
             if t == "turn_context" and not cwd:
                 cwd = p.get("cwd") or cwd
+            if t == "compacted":
+                stream.append(("b", len(users), ""))
+                continue
             pt = p.get("type")
             if t == "response_item" and pt == "message":
                 txt = _text_of(p.get("content"))
                 role = p.get("role")
                 if role == "user" and _is_real_prompt(txt):
                     users.append(txt)
+                    stream.append(("u", len(users), txt))
                 elif role == "assistant" and txt:
                     assists.append(txt)
+                    stream.append(("a", len(users), txt))
             elif t == "response_item" and pt in ("function_call_output", "custom_tool_call_output"):
                 out = p.get("output")
                 tb = out if isinstance(out, str) else _text_of(out)
@@ -364,6 +471,13 @@ def parse_codex(path: str) -> dict | None:
                 arg = p.get("arguments") or p.get("input") or ""
                 if isinstance(arg, str) and "git commit" in arg:
                     tools.append(arg[:1500])
+                if p.get("name") == "update_plan" and isinstance(arg, str):
+                    try:
+                        tt = _task_text("update_plan", json.loads(arg))
+                    except ValueError:
+                        tt = ""
+                    if tt:
+                        stream.append(("t", len(users), tt))
                 for fm in re.finditer(r"\*\*\* (?:Update|Add) File: ([^\n\\]+)", arg if isinstance(arg, str) else ""):
                     files.add(fm.group(1).strip())
             elif t == "event_msg" and pt == "task_complete":
@@ -371,7 +485,7 @@ def parse_codex(path: str) -> dict | None:
                     finals.append(p["last_agent_message"])
     if not sid:
         return None
-    r = _finish(sid, "codex", path, cwd, "", users, assists, tools, files, ts0, ts1)
+    r = _finish(sid, "codex", path, cwd, "", users, assists, tools, files, ts0, ts1, stream)
     if r and finals:
         r["final_text"] = "\n---\n".join(finals[-3:])[:12000]
     return r
@@ -444,8 +558,59 @@ def _init_db(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_semb_sid ON semb(sid);
         CREATE TABLE IF NOT EXISTS semb_pending (sid TEXT PRIMARY KEY);
+        CREATE VIRTUAL TABLE IF NOT EXISTS ssec USING fts5(
+            sid UNINDEXED,
+            sec UNINDEXED,
+            turn0 UNINDEXED,
+            turn1 UNINDEXED,
+            body,
+            tasks,
+            tokenize='porter unicode61'
+        );
+        CREATE TABLE IF NOT EXISTS ssec_map (sid TEXT, rid INTEGER);
+        CREATE INDEX IF NOT EXISTS idx_ssec_map_sid ON ssec_map(sid);
     """)
     conn.commit()
+
+
+def _delete_session_rows(conn: sqlite3.Connection, sid: str) -> None:
+    conn.execute("DELETE FROM sdoc WHERE sid = ?", (sid,))
+    conn.execute("DELETE FROM semb WHERE sid = ?", (sid,))
+    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
+    # ssec rows are deleted by rowid via ssec_map: `WHERE sid = ?` on an
+    # UNINDEXED FTS column is a full scan, and ssec is the big table.
+    conn.execute("DELETE FROM ssec WHERE rowid IN (SELECT rid FROM ssec_map WHERE sid = ?)", (sid,))
+    conn.execute("DELETE FROM ssec_map WHERE sid = ?", (sid,))
+
+
+def _insert_sections(conn: sqlite3.Connection, sid: str, sections: list[dict]) -> None:
+    for s in sections:
+        cur = conn.execute(
+            "INSERT INTO ssec (sid, sec, turn0, turn1, body, tasks) VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, s["sec"], s["turn0"], s["turn1"], s["body"], s["tasks"]),
+        )
+        conn.execute("INSERT INTO ssec_map (sid, rid) VALUES (?, ?)", (sid, cur.lastrowid))
+
+
+def _section_migration_pending(conn: sqlite3.Connection) -> int:
+    """Number of already-indexed transcripts that predate the current section
+    schema and must be re-parsed (0 once migrated, or on a fresh DB)."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= SECTION_SCHEMA_VERSION:
+        return 0
+    n = conn.execute(
+        "SELECT COUNT(*) FROM file_cache WHERE size > ? AND mtime >= 0", (_SECTION_MIGRATE_MIN_SIZE,),
+    ).fetchone()[0]
+    if n == 0:
+        conn.execute(f"PRAGMA user_version = {SECTION_SCHEMA_VERSION}")
+    return n
+
+
+def _migrate_sections(conn: sqlite3.Connection) -> None:
+    """Invalidate the (mtime, size) gate for transcripts big enough to need
+    sections, so the sync that follows re-parses them. Background-only."""
+    with conn:
+        conn.execute("UPDATE file_cache SET mtime = -1 WHERE size > ?", (_SECTION_MIGRATE_MIN_SIZE,))
+    conn.execute(f"PRAGMA user_version = {SECTION_SCHEMA_VERSION}")
 
 
 def _ollama_base() -> str:
@@ -757,6 +922,17 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
             _start_background_sync()
             return
 
+        # MEMO-FIX-21: one-time section rebuild of already-indexed long
+        # transcripts. Only ever done by a force=True (background) sync; a
+        # request thread hands it off and answers from the existing index.
+        if _section_migration_pending(conn):
+            if not force:
+                _start_background_sync()
+                return
+            _migrate_sections(conn)
+            cur = conn.execute("SELECT path, sid, mtime, size, indexed FROM file_cache")
+            have = {r[0]: (r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
+
         files = _candidate_files()
         current_paths = {p for _, p, _, _ in files}
 
@@ -798,15 +974,12 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                 old_sid = old_cached[0] if old_cached else None
 
                 if old_sid:
-                    conn.execute("DELETE FROM sdoc WHERE sid = ?", (old_sid,))
-                    conn.execute("DELETE FROM semb WHERE sid = ?", (old_sid,))
-                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (old_sid,))
+                    _delete_session_rows(conn, old_sid)
 
                 if r and r.get("sid"):
                     sid = r["sid"]
-                    conn.execute("DELETE FROM sdoc WHERE sid = ?", (sid,))
-                    conn.execute("DELETE FROM semb WHERE sid = ?", (sid,))
-                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
+                    if sid != old_sid:
+                        _delete_session_rows(conn, sid)
                     if r.get("scratch", 0) == 0 and r.get("n_user", 0) > 0:
                         conn.execute(
                             "INSERT INTO sdoc VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -820,6 +993,7 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                                 r["summary"],
                             ),
                         )
+                        _insert_sections(conn, sid, r.get("sections") or [])
                         conn.execute(
                             "INSERT OR REPLACE INTO file_cache (path, sid, mtime, size, indexed) VALUES (?, ?, ?, ?, 1)",
                             (path, sid, mt, sz),
@@ -839,9 +1013,7 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
             for p in deleted_paths:
                 old_sid = have[p][0]
                 if old_sid:
-                    conn.execute("DELETE FROM sdoc WHERE sid = ?", (old_sid,))
-                    conn.execute("DELETE FROM semb WHERE sid = ?", (old_sid,))
-                    conn.execute("DELETE FROM semb_pending WHERE sid = ?", (old_sid,))
+                    _delete_session_rows(conn, old_sid)
                 conn.execute("DELETE FROM file_cache WHERE path = ?", (p,))
 
         # FTS (sdoc/file_cache) is already committed above -- fast, no network.
@@ -928,6 +1100,80 @@ def warm_start() -> None:
     _run_embedding_backfill()
 
 
+def _section_scores(conn: sqlite3.Connection, match: str, n: int) -> dict[str, float]:
+    """Best (lowest) bm25 per session over its ssec sections for `match`.
+    The ORDER BY/LIMIT bounds work by hit count, never by corpus size."""
+    best: dict[str, float] = {}
+    try:
+        cur = conn.execute(
+            f"SELECT sid, bm25(ssec, {SSEC_WEIGHTS_STR}) FROM ssec WHERE ssec MATCH ? "
+            f"ORDER BY bm25(ssec, {SSEC_WEIGHTS_STR}) LIMIT ?",
+            (match, n),
+        )
+    except sqlite3.OperationalError:
+        return best
+    for sid, score in cur.fetchall():
+        if sid not in best or score < best[sid]:
+            best[sid] = score
+    return best
+
+
+def _fuse_sections(scores: dict[str, float], sec: dict[str, float]) -> None:
+    """A session's score is the better of its sdoc score and its best
+    section's. Measured on the ccc-memory bench (main/judged/held-out) this
+    is retrieval-neutral; scaling section scores up (x2, x3) or RRF-fusing
+    the two lists all cost MRR (x3: held-out MRR 0.57 -> 0.35), so sections
+    surface sessions sdoc can't see without reordering the ones it can."""
+    for sid, score in sec.items():
+        scores[sid] = min(scores.get(sid, 0.0), score)
+
+
+def _match_expr(q: str) -> str:
+    if _is_explicit_history_fts_query(q):
+        return q
+    terms = extract_history_terms(q, max_terms=25)
+    return " OR ".join(f'"{t}"' for t in terms)
+
+
+def section_matches(query: str, sids: list[str]) -> dict[str, dict]:
+    """For each sid, the best-matching section for `query`: section index,
+    turn range and an FTS snippet. One batched query over `sids`' sections
+    (via ssec_map rowids, so it never scans other sessions' rows). Sessions
+    with no section hit are absent. Reads only already-synced index state."""
+    q = (query or "").strip()
+    if not q or not sids:
+        return {}
+    match = _match_expr(q)
+    if not match:
+        return {}
+    conn = _get_connection()
+    placeholders = ",".join("?" for _ in sids)
+    try:
+        cur = conn.execute(
+            f"""SELECT sid, sec, turn0, turn1, bm25(ssec, {SSEC_WEIGHTS_STR}),
+                       snippet(ssec, -1, '[', ']', '…', 24)
+                FROM ssec WHERE ssec MATCH ?
+                  AND rowid IN (SELECT rid FROM ssec_map WHERE sid IN ({placeholders}))""",
+            [match, *sids],
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[str, dict] = {}
+    best: dict[str, float] = {}
+    for sid, sec, turn0, turn1, score, snip in rows:
+        if sid in best and score >= best[sid]:
+            continue
+        best[sid] = score
+        out[sid] = {
+            "section": sec,
+            "turn": turn0,
+            "turn_end": turn1,
+            "snippet": " ".join((snip or "").split())[:300],
+        }
+    return out
+
+
 def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) -> list[dict]:
     """Search indexed sessions with BM25.
 
@@ -946,9 +1192,13 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
                 f"SELECT sid, bm25(sdoc, {BM25_WEIGHTS_STR}) FROM sdoc WHERE sdoc MATCH ? ORDER BY bm25(sdoc, {BM25_WEIGHTS_STR}) LIMIT ?",
                 (q, limit),
             )
-            return [{"session_id": r[0], "score": r[1]} for r in cur.fetchall()]
+            explicit = {r[0]: r[1] for r in cur.fetchall()}
         except sqlite3.OperationalError:
             return []
+        for sid, score in _section_scores(conn, q, max(limit * 4, 100)).items():
+            explicit[sid] = min(explicit.get(sid, 0.0), score)
+        ranked = sorted(explicit, key=lambda s: explicit[s])[:limit]
+        return [{"session_id": sid, "score": explicit[sid]} for sid in ranked]
 
     terms = extract_history_terms(q, max_terms=25)
     if not terms:
@@ -981,6 +1231,15 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
                     scores[sid] = score
         except sqlite3.OperationalError:
             pass
+
+    # MEMO-FIX-21: long sessions' dropped middles (and task/plan text) live
+    # in ssec sections. Collapse to the best section per session and let it
+    # compete with that session's sdoc score -- a section can only lift a
+    # session, never push a whole-session match down.
+    # Multi-term queries only take sections that match every term: a section
+    # is a slice of one session, and OR-matching common words there is both
+    # noisy and the slow half of the query.
+    _fuse_sections(scores, _section_scores(conn, and_q, max(limit * 4, 100)))
 
     fts_sids = sorted(scores, key=lambda s: scores[s])
 

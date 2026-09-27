@@ -387,3 +387,111 @@ def test_run_embedding_backfill_backs_off_while_ollama_down(fts_env, monkeypatch
     assert not session_fts._backfill_running
     assert conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM semb WHERE sid = ?", ("sid-stuck",)).fetchone()[0] > 0
+
+
+# --- MEMO-FIX-21: long sessions indexed as sections --------------------------
+
+def _long_session_turns(n_turns: int, needle_turn: int, needle: str) -> list[dict]:
+    """A session long enough that sdoc's capped assistant_text drops its
+    middle, with `needle` said only once, by the assistant, at `needle_turn`."""
+    filler = "routine refactor progress report with nothing notable " * 30
+    turns = []
+    for i in range(1, n_turns + 1):
+        turns.append({"type": "user", "cwd": "/Users/test/long-repo",
+                      "message": {"role": "user", "content": f"step {i}: keep going"}})
+        text = filler + (f" also we discussed {needle} here" if i == needle_turn else "")
+        turns.append({"type": "assistant", "message": {"role": "assistant", "content": text}})
+    return turns
+
+
+def test_mid_session_mention_is_searchable(fts_env):
+    sid = "aaaaaaaa-0000-0000-0000-000000000021"
+    path = fts_env["projects"] / "long-repo" / f"{sid}.jsonl"
+    _write_claude_jsonl(path, sid, _long_session_turns(120, 60, "zanzibar spreadsheets"))
+
+    parsed = session_fts.parse_claude(str(path))
+    assert "zanzibar" not in parsed["assistant_text"], "fixture must exercise the dropped middle"
+    assert parsed["sections"], "a capped session must be indexed as sections"
+
+    res = session_fts.search_sessions("zanzibar spreadsheets")
+    assert [r["session_id"] for r in res] == [sid]
+
+    m = session_fts.section_matches("zanzibar spreadsheets", [sid])[sid]
+    assert m["turn"] <= 60 <= m["turn_end"]
+    assert "[zanzibar]" in m["snippet"].lower()
+
+
+def test_sections_split_on_turn_count_and_compaction():
+    stream = [("u", i, f"prompt {i}") for i in range(1, 121)]
+    secs = session_fts._build_sections(stream)
+    assert [s["turn0"] for s in secs] == [1, 51, 101]
+    assert secs[-1]["turn1"] == 120
+
+    stream = [("u", 1, "before"), ("b", 1, ""), ("u", 2, "after")]
+    secs = session_fts._build_sections(stream)
+    assert [s["body"] for s in secs] == ["before", "after"]
+
+
+def test_task_text_is_searchable_even_in_short_sessions(fts_env):
+    sid = "bbbbbbbb-0000-0000-0000-000000000021"
+    path = fts_env["projects"] / "repo-t" / f"{sid}.jsonl"
+    _write_claude_jsonl(path, sid, [
+        {"type": "user", "cwd": "/Users/test/repo-t", "message": {"role": "user", "content": "plan the posts"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "TaskCreate", "input": {
+                "subject": "SMB post", "description": "corner shop writing a marmalade campaign"}},
+        ]}},
+    ])
+    res = session_fts.search_sessions("marmalade campaign")
+    assert [r["session_id"] for r in res] == [sid]
+
+
+def test_reindex_replaces_sections_without_duplicates(fts_env):
+    sid = "cccccccc-0000-0000-0000-000000000021"
+    path = fts_env["projects"] / "long-repo" / f"{sid}.jsonl"
+    _write_claude_jsonl(path, sid, _long_session_turns(120, 60, "quokka"))
+    session_fts.search_sessions("quokka", force_refresh=True)
+    conn = session_fts._get_connection()
+    n1 = conn.execute("SELECT COUNT(*) FROM ssec_map WHERE sid = ?", (sid,)).fetchone()[0]
+
+    _write_claude_jsonl(path, sid, _long_session_turns(121, 60, "quokka"))
+    session_fts.search_sessions("quokka", force_refresh=True)
+    n2 = conn.execute("SELECT COUNT(*) FROM ssec_map WHERE sid = ?", (sid,)).fetchone()[0]
+    rows = conn.execute("SELECT COUNT(*) FROM ssec").fetchone()[0]
+    assert n1 == n2 == rows
+
+    path.unlink()
+    session_fts.search_sessions("quokka", force_refresh=True)
+    assert conn.execute("SELECT COUNT(*) FROM ssec").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ssec_map").fetchone()[0] == 0
+
+
+def test_section_migration_runs_in_background_never_inline(fts_env, monkeypatch):
+    """A DB indexed before sections existed (user_version 0, big transcripts
+    already in file_cache) gets re-parsed by the background sync; a request
+    thread must not parse anything inline."""
+    sid = "dddddddd-0000-0000-0000-000000000021"
+    path = fts_env["projects"] / "long-repo" / f"{sid}.jsonl"
+    _write_claude_jsonl(path, sid, _long_session_turns(120, 60, "okapi"))
+    monkeypatch.setattr(session_fts, "_SECTION_MIGRATE_MIN_SIZE", 1000)
+    session_fts.search_sessions("okapi", force_refresh=True)
+    conn = session_fts._get_connection()
+    # Simulate the pre-section DB state.
+    conn.execute("DELETE FROM ssec")
+    conn.execute("DELETE FROM ssec_map")
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+
+    started = []
+    real_parse = session_fts._parse_file
+    monkeypatch.setattr(session_fts, "_start_background_sync", lambda: started.append(1))
+    parse_calls = []
+    monkeypatch.setattr(session_fts, "_parse_file", lambda a: parse_calls.append(a))
+    session_fts._last_sync_ts = 0.0
+    session_fts.search_sessions("okapi")
+    assert started and not parse_calls
+
+    monkeypatch.setattr(session_fts, "_parse_file", real_parse)
+    session_fts._sync_index(conn, force=True)  # what the background worker runs
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == session_fts.SECTION_SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM ssec_map WHERE sid = ?", (sid,)).fetchone()[0] > 0

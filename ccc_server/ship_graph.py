@@ -601,6 +601,17 @@ def _init_db(conn: sqlite3.Connection) -> None:
             commits TEXT,
             files TEXT
         );
+
+        -- MEMO-FIX-21: every file a session wrote or read, as a normalized
+        -- absolute path (repo or not), so `ccc history <path>` is an exact
+        -- indexed lookup instead of a LIKE over session_meta.files JSON.
+        CREATE TABLE IF NOT EXISTS session_files (
+            path TEXT,
+            sid TEXT,
+            op TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_files_path ON session_files(path);
+        CREATE INDEX IF NOT EXISTS idx_session_files_sid ON session_files(sid);
     """)
 
     cols = {r[1] for r in conn.execute("PRAGMA table_info(commits)")}
@@ -861,6 +872,7 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
     tools = []
     alltext = []
     files = set()
+    reads = set()
     ts0 = ts1 = None
 
     if engine == "claude":
@@ -898,6 +910,8 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
                                     fp = inp.get("file_path") or inp.get("notebook_path")
                                     if fp and c.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                                         files.add(fp)
+                                    elif fp and c.get("name") == "Read":
+                                        reads.add(fp)
                                     cmd = inp.get("command")
                                     if isinstance(cmd, str) and "git commit" in cmd:
                                         tools.append(cmd[:1000])
@@ -965,7 +979,37 @@ def _parse_transcript(args: tuple[str, str]) -> dict | None:
         "commits": commits,
         "tickets": tickets,
         "files": sorted(files)[:200],
+        "file_ops": _file_ops(cwd, files, reads),
     }
+
+
+_MAX_FILE_OPS = 2000
+
+
+def _abs_path(cwd: str, fp: str) -> str:
+    """Normalized absolute form of a transcript file path. Codex apply_patch
+    paths are often cwd-relative; Claude's tool paths are already absolute."""
+    fp = os.path.expanduser(str(fp).strip())
+    if not os.path.isabs(fp):
+        if not cwd:
+            return ""
+        fp = os.path.join(cwd, fp)
+    return os.path.normpath(fp)
+
+
+def _file_ops(cwd: str, wrote: set, read: set) -> list[tuple[str, str]]:
+    """(abs_path, op) pairs, op 'wrote' or 'read'; a path both written and
+    read is recorded once as 'wrote'. Bounded per session."""
+    out: dict[str, str] = {}
+    for fp in wrote:
+        ap = _abs_path(cwd, fp)
+        if ap:
+            out[ap] = "wrote"
+    for fp in read:
+        ap = _abs_path(cwd, fp)
+        if ap and ap not in out:
+            out[ap] = "read"
+    return sorted(out.items())[:_MAX_FILE_OPS]
 
 
 def _candidate_transcript_files(days: float) -> list[tuple[str, str, float, int]]:
@@ -1022,6 +1066,8 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
     session_rows = []
     edge_rows = []
     trans_rows = []
+    file_rows = []
+    reparsed_sids = []
 
     for (eng, path, mt, sz), r in zip(todo, parsed):
         if not r or not r.get("sid"):
@@ -1039,6 +1085,8 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
             json.dumps(r["files"]),
         ))
         trans_rows.append((path, sid, mt, sz, 1))
+        reparsed_sids.append(sid)
+        file_rows.extend((fp, sid, op) for fp, op in r.get("file_ops") or [])
 
         # Commit edges
         for h in r["commits"]:
@@ -1061,9 +1109,39 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
             edge_rows.append((sid, f"ticket:{t}", "ref", 1.0))
 
     with conn:
+        # A re-parsed session replaces its own rows. Session edges (made/
+        # window/ref) are keyed src=sid; without this delete every re-parse
+        # of a still-growing transcript appended duplicate edges.
+        for sid in reparsed_sids:
+            conn.execute("DELETE FROM edges WHERE src = ? AND kind IN ('made', 'window', 'ref')", (sid,))
+            conn.execute("DELETE FROM session_files WHERE sid = ?", (sid,))
         conn.executemany("INSERT OR REPLACE INTO transcripts VALUES (?,?,?,?,?)", trans_rows)
         conn.executemany("INSERT OR REPLACE INTO session_meta VALUES (?,?,?,?,?,?,?,?)", session_rows)
         conn.executemany("INSERT INTO edges VALUES (?,?,?,?)", edge_rows)
+        conn.executemany("INSERT INTO session_files VALUES (?,?,?)", file_rows)
+
+
+SESSION_FILES_SCHEMA = "1"
+
+
+def _session_files_migration_pending(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("SELECT val FROM meta WHERE key = 'session_files_v'").fetchone()
+    if row and row[0] == SESSION_FILES_SCHEMA:
+        return False
+    if not conn.execute("SELECT 1 FROM transcripts LIMIT 1").fetchone():
+        # Fresh DB: every transcript will be parsed with file_ops anyway.
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('session_files_v', ?)", (SESSION_FILES_SCHEMA,))
+        return False
+    return True
+
+
+def _migrate_session_files(conn: sqlite3.Connection) -> None:
+    """Invalidate the transcripts (mtime, size) gate so the sync that follows
+    re-parses every session and fills session_files."""
+    with conn:
+        conn.execute("UPDATE transcripts SET mtime = -1")
+        conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('session_files_v', ?)", (SESSION_FILES_SCHEMA,))
 
 
 def _count_pending_transcripts(conn: sqlite3.Connection, days: float) -> int:
@@ -1093,6 +1171,14 @@ def _sync_all(conn: sqlite3.Connection, force: bool = False) -> None:
 
         _init_db(conn)
         days = _get_days()
+
+        # MEMO-FIX-21: one-time re-parse so session_files covers transcripts
+        # indexed before it existed. Background-only, like any cold catch-up.
+        if _session_files_migration_pending(conn):
+            if not force:
+                _start_background_sync()
+                return
+            _migrate_session_files(conn)
 
         if not force:
             # MEMO-FIX-14: `_count_pending_transcripts()` calls
