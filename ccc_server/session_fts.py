@@ -108,6 +108,18 @@ def _get_db_path() -> Path:
     return Path.home() / ".claude" / "command-center" / "session_fts.sqlite"
 
 
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """Open a connection with WAL journaling so a long writer (the cold-start
+    catch-up sync) never blocks a concurrent reader (MEMO-FIX-14: the default
+    rollback-journal mode serializes readers behind writers for the whole
+    write transaction, which is exactly the tens-of-seconds-long first recall
+    seen after a real restart)."""
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
 def _get_projects_dir() -> Path:
     env = os.environ.get("CCC_PROJECTS_ROOT")
     if env:
@@ -595,7 +607,7 @@ def _defer_embeddings(embed_jobs: list[tuple[str, list[tuple[str, str]]]]) -> No
     """
     def _worker() -> None:
         try:
-            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            conn2 = _connect(_get_db_path())
             try:
                 _drain_embeddings(conn2, embed_jobs)
                 _refresh_vec_cache(conn2)
@@ -611,7 +623,7 @@ def _get_connection() -> sqlite3.Connection:
     if not hasattr(_tls, "conn") or _tls.conn is None:
         db_path = _get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        _tls.conn = sqlite3.connect(str(db_path), timeout=30.0)
+        _tls.conn = _connect(db_path)
     return _tls.conn
 
 
@@ -638,6 +650,24 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
 
         cur = conn.execute("SELECT path, sid, mtime, size, indexed FROM file_cache")
         have = {r[0]: (r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
+
+        # MEMO-FIX-14: `_candidate_files()` below walks and stat()s every
+        # transcript on disk, whether or not anything actually changed --
+        # cheap when `have` (the already-indexed corpus) is small, but on a
+        # real restart with thousands of prior sessions it's an O(corpus)
+        # filesystem scan against a cold OS metadata cache, measured at
+        # 20-45s wall clock for a single `recall()` even though the eventual
+        # diff (`todo`) turns out small. `len(todo) > _BG_SYNC_THRESHOLD`
+        # below can't catch this case -- it only sees the diff *after*
+        # paying for the scan. Use the existing corpus size as a cheap
+        # (indexed COUNT, no filesystem I/O) proxy instead: a process's
+        # first sync (`_last_sync_ts == 0.0`) against an already-large corpus
+        # is exactly the cold-restart shape, so hand it to the background
+        # sync before ever touching the filesystem. A small/fresh corpus
+        # (tests, a new install) still gets the fast inline path below.
+        if not force and _last_sync_ts == 0.0 and len(have) > _BG_SYNC_THRESHOLD:
+            _start_background_sync()
+            return
 
         files = _candidate_files()
         current_paths = {p for _, p, _, _ in files}
@@ -768,7 +798,7 @@ def _start_background_sync() -> None:
     def _worker() -> None:
         global _bg_sync_running
         try:
-            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            conn2 = _connect(_get_db_path())
             try:
                 _sync_index(conn2, force=True)
                 # _sync_index() only refreshes _vec_cache when it actually

@@ -214,6 +214,18 @@ def _get_db_path() -> Path:
     return _ccc_dir() / "ship_graph.sqlite"
 
 
+def _connect(db_path: Path) -> sqlite3.Connection:
+    """Open a connection with WAL journaling so a long writer (the cold-start
+    catch-up sync) never blocks a concurrent reader (MEMO-FIX-14: the default
+    rollback-journal mode serializes readers behind writers for the whole
+    write transaction, which is exactly the tens-of-seconds-long first recall
+    seen after a real restart)."""
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
 def _get_wt_db_path() -> Path:
     env = os.environ.get("WATCHTOWER_DB")
     if env:
@@ -606,7 +618,7 @@ def _get_connection() -> sqlite3.Connection:
     if not hasattr(_tls, "conn") or _tls.conn is None:
         db_path = _get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        _tls.conn = sqlite3.connect(str(db_path), timeout=30.0)
+        _tls.conn = _connect(db_path)
     return _tls.conn
 
 
@@ -1083,6 +1095,25 @@ def _sync_all(conn: sqlite3.Connection, force: bool = False) -> None:
         days = _get_days()
 
         if not force:
+            # MEMO-FIX-14: `_count_pending_transcripts()` calls
+            # `_candidate_transcript_files()`, which walks and stat()s every
+            # transcript on disk regardless of how many actually changed --
+            # cheap against a small corpus, but on a real restart with
+            # thousands of prior sessions it's an O(corpus) scan against a
+            # cold OS metadata cache, measured at 20-45s wall clock for a
+            # single `recall()` even when the eventual pending count is
+            # small. `_last_sync_ts == 0.0` (this process's first sync) plus
+            # an already-large `transcripts` table (a fast indexed COUNT, no
+            # filesystem I/O) is the cold-restart shape: hand it to the
+            # background sync before ever touching the filesystem. A
+            # small/fresh corpus (tests, a new install) still gets the fast
+            # inline path below.
+            if _last_sync_ts == 0.0:
+                existing = conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
+                if existing > _BG_SYNC_THRESHOLD:
+                    _start_background_sync()
+                    return
+
             pending = _count_pending_transcripts(conn, days)
             if pending > _BG_SYNC_THRESHOLD:
                 # Cold start (or a big catch-up): re-parsing this many
@@ -1119,7 +1150,7 @@ def _start_background_sync() -> None:
     def _worker() -> None:
         global _bg_sync_running
         try:
-            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            conn2 = _connect(_get_db_path())
             try:
                 _sync_all(conn2, force=True)
             finally:
