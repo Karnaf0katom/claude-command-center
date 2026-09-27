@@ -84,3 +84,10 @@ test('app-server timeouts, held messages and recoveries read in plain words', ()
  assert.match(r.headline,/Restarted an unresponsive session/);
  assert.equal(r.origin,'To dd16402b · message waited 396s');
 });
+test('an app-server that dies at startup reads as a crash with its stderr',()=>{
+ const h=helpers();
+ const p=h._readableLogPresentation(event('EXITED','method=initialize id=7 app-server exited after 0.04s with no reply (exit=1) stderr=Error: spawn failed errno -88'));
+ assert.equal(p.headline,'Codex app-server crashed at startup');
+ assert.equal(p.level,'error');
+ assert.match(p.origin,/errno -88/);
+});

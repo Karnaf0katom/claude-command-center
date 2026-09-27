@@ -1042,6 +1042,9 @@ class _CodexAppServerTransport:
         self.started_at = time.time()
         self._send_lock = threading.Lock()
         self.consecutive_liveness_misses = 0
+        # Set by the reader thread when it exits (child EOF / socket closed),
+        # so a waiter fails at once instead of sitting out its full timeout.
+        self.reader_exited = False
 
     def alive(self):
         if self.kind == "stdio":
@@ -2968,12 +2971,27 @@ def _codex_app_server_reader(transport):
         _core._app_server_trace("reader-exit", reason=exit_reason,
                           child_pid=getattr(transport.proc, "pid", None))
         with _core._CODEX_APP_SERVER_LOCK:
+            transport.reader_exited = True
             if _core._CODEX_APP_SERVER_TRANSPORT is transport:
                 _core._CODEX_APP_SERVER_TRANSPORT = None
                 _core._CODEX_APP_SERVER_PROC = None
                 _core._CODEX_APP_SERVER_INITIALIZED = False
                 _core._CODEX_APP_SERVER_INITIALIZING = False
             _core._CODEX_APP_SERVER_LOCK.notify_all()
+
+
+def _codex_app_server_stderr_tail(max_lines=3, max_chars=300):
+    """Last few non-empty lines of the stdio app-server's captured stderr."""
+    path = _core.ACTIVITY_LOG_FILE.with_name("codex-app-server-stderr.log")
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 4096))
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return " | ".join(lines[-max_lines:])[-max_chars:]
 
 
 def _codex_app_server_request_to_transport(
@@ -2994,6 +3012,7 @@ def _codex_app_server_request_to_transport(
     req_id = None
     send_error = None
     timed_out = None
+    exited = False
     sent_at = None
     try:
         with _core._CODEX_APP_SERVER_LOCK:
@@ -3024,15 +3043,21 @@ def _codex_app_server_request_to_transport(
                             elapsed=round(time.time() - sent_at, 3),
                         )
                         return response
+                    if getattr(transport, "reader_exited", False) is True:
+                        # The child is gone (e.g. crashed at startup); no
+                        # reply can arrive, so don't sit out the timeout.
+                        exited = True
+                        break
                     remaining = max(0.05, deadline - time.time())
                     _core._CODEX_APP_SERVER_LOCK.wait(min(0.5, remaining))
-                # Register before releasing the lock so a reply racing in right
-                # now is still caught by the reader's LATE check below.
-                if len(_CODEX_APP_SERVER_ORPHANED_WAITERS) < 256:
-                    _CODEX_APP_SERVER_ORPHANED_WAITERS[req_id] = (
-                        method, time.time(), timeout, count_as_inflight,
-                    )
-                timed_out = (method, req_id, timeout, count_as_inflight)
+                if not exited:
+                    # Register before releasing the lock so a reply racing in
+                    # right now is still caught by the reader's LATE check.
+                    if len(_CODEX_APP_SERVER_ORPHANED_WAITERS) < 256:
+                        _CODEX_APP_SERVER_ORPHANED_WAITERS[req_id] = (
+                            method, time.time(), timeout, count_as_inflight,
+                        )
+                    timed_out = (method, req_id, timeout, count_as_inflight)
         if send_error is not None:
             # The liveness probe failing HERE (not at the wait deadline) is
             # the current prime suspect in the liveness-miss investigation:
@@ -3044,6 +3069,26 @@ def _codex_app_server_request_to_transport(
                 f"method={method} id={req_id} send failed: {send_error!r}",
             )
             return {"ok": False, "error": str(send_error), "fallback": "exec"}
+        if exited:
+            proc = transport.proc
+            exit_code = proc.poll() if proc is not None else None
+            stderr_tail = _codex_app_server_stderr_tail() if transport.kind == "stdio" else ""
+            _core._app_server_trace(
+                "wait-exited", id=req_id, method=method,
+                elapsed=round(time.time() - sent_at, 3), exit_code=exit_code,
+            )
+            _core._log_activity(
+                "app-server", "EXITED",
+                f"method={method} id={req_id} app-server exited after "
+                f"{round(time.time() - transport.started_at, 2)}s with no reply "
+                f"(exit={exit_code})" + (f" stderr={stderr_tail}" if stderr_tail else ""),
+            )
+            return {
+                "ok": False,
+                "error": f"Codex app-server exited before replying: {method}",
+                "fallback": "exec",
+                "exited": True,
+            }
         if timed_out is not None:
             _core._app_server_trace(
                 "wait-timeout", id=req_id, method=method,

@@ -61664,6 +61664,15 @@
         ? 'Codex app-server did not start' + (wait ? ' within ' + wait : '')
         : 'Codex app-server did not answer ' + subject + (wait ? ' within ' + wait : '');
       origin = 'Codex falls back to the slower CLI for this request';
+    } else if (verb === 'EXITED' && category === 'app-server') {
+      // The Codex app-server child died before answering (e.g. a broken
+      // codex install); the stderr tail usually names the real cause.
+      const stderr = (detail.match(/(?:^|\s)stderr=(.*)$/) || [])[1] || '';
+      headline = method === 'initialize'
+        ? 'Codex app-server crashed at startup'
+        : 'Codex app-server exited during ' + subject;
+      origin = stderr ? 'stderr: ' + stderr : 'Codex falls back to the slower CLI for this request';
+      level = 'error';
     } else if (verb === 'TIMEOUT') {
       const wait = (detail.match(/no reply within ([\d.]+s)/) || [])[1];
       headline = subject + ' timed out' + (wait ? ' after ' + wait : '');
