@@ -30,6 +30,9 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    # Isolate the three MEMO-FIX-19 harnesses too -- without these, a bare
+    # search_sessions() call falls back to the real ~/.kimi-code, ~/.gemini,
+    # ~/.cursor on this machine and leaks real session data into the test.
     monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(kimi_dir))
     monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(gemini_dir))
     monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(cursor_dir))
