@@ -4100,8 +4100,11 @@
     border-top: 1px solid var(--border);
     /* Container query host — children query against the strip's own
        inline-size so the progressive-drop rules below fire based on
-       actual rendered width (split panes, narrow windows). */
-      container-name: conv-ctx;
+       actual rendered width (split panes, narrow windows). Without
+       container-type the @container conv-ctx rules never match and the
+       model pill gets pushed off the right edge on mobile (CCC-1200). */
+    container-type: inline-size;
+    container-name: conv-ctx;
   }
   .conv-input-context > * {
     flex-shrink: 0;

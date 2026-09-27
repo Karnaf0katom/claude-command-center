@@ -1,0 +1,1 @@
+- The model name in the composer status strip is visible again on phones and narrow panes; lower-priority pills (token totals, cost, context) drop out first as intended.
