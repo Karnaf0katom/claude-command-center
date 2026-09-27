@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 
 from ccc_server import core as _core
+from ccc_server import memory_api as _memory_api
 
 _ASK_HIT_CAP = 12
 _ASK_HISTORY_TURNS = 4
@@ -77,6 +78,20 @@ _ASK_TRIGGER_HINT_RE = re.compile(
     r"workflow|pre-?flight|preflight|runs? when|what runs|when does|"
     r"when is|how often)\b", re.IGNORECASE)
 _ASK_AUTOMATION_LIMIT = 6
+# "did we already ship X" / "which session built X" — gates a ship_graph
+# lookup (is_shipped + recall) so ordinary session questions don't pay for
+# the extra query. The real answer for these often isn't in the recent/
+# history hit scan at all (it may be months old), so this is its own
+# retrieval layer, same shape as the file/automation hint gates above.
+_ASK_SHIPPED_HINT_RE = re.compile(
+    r"\b(did we (already )?(build|ship|do|add|implement|fix)|"
+    r"have we (already )?(built|shipped|done|implemented|added|fixed)|"
+    r"is (this|that|it) (already )?shipped|"
+    r"was .*(already )?(shipped|built already|already built|already done|"
+    r"already implemented)|"
+    r"which session (did|built|shipped|fixed|added|implemented)|"
+    r"what session (did|built|shipped|fixed|added|implemented))\b",
+    re.IGNORECASE)
 _ASK_AUTOMATION_SNIPPET_MAX = 900
 _LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 # The question's own framing words ("what TRIGGERS X", "is it a CRON job")
@@ -150,6 +165,13 @@ def looks_like_trigger_question(question):
     launchd job, a CI workflow) — gates search_local_automation_hits so
     ordinary questions don't pay for the extra file reads."""
     return bool(_ASK_TRIGGER_HINT_RE.search(question or ""))
+
+
+def looks_like_shipped_question(question):
+    """True for "did we already ship X" / "which session built X" questions
+    — gates the is_shipped + recall lookup (ccc_server.memory_api) so
+    ordinary questions don't pay for the extra ship_graph query."""
+    return bool(_ASK_SHIPPED_HINT_RE.search(question or ""))
 
 
 def _automation_snippet(text, is_plist):
@@ -326,7 +348,8 @@ def enrich_ask_hits(hits, titles=None, live_ids=None):
     return hits
 
 
-def build_ask_prompt(question, history, hits, fs_hits=None, automation_hits=None):
+def build_ask_prompt(question, history, hits, fs_hits=None, automation_hits=None,
+                      shipped_context=None):
     q = str(question or "").strip()[:_ASK_QUESTION_MAX]
     lines = [
         "You are the Ask assistant inside Claude Command Center (CCC), a "
@@ -372,6 +395,15 @@ def build_ask_prompt(question, history, hits, fs_hits=None, automation_hits=None
             "cron'). If that list is empty or nothing fits, say plainly "
             "that no matching automation config was found on disk — do not "
             "guess or hedge from vague past mentions.")
+    if shipped_context is not None:
+        lines.append(
+            "If the user asks whether something was ALREADY SHIPPED/BUILT, "
+            "or which session built/shipped/fixed something, answer from "
+            "the Shipped verdict below plus any session hits tagged "
+            "'source: memory_recall' — cite those the same way as any other "
+            "hit, [[session:ID]]. If the verdict says not shipped and no "
+            "memory_recall hits are listed, say plainly that CCC found no "
+            "evidence of it being built yet — do not guess.")
     lines.append("")
     folded = [t for t in (history or []) if isinstance(t, dict)][-_ASK_HISTORY_TURNS:]
     for turn in folded:
@@ -394,6 +426,8 @@ def build_ask_prompt(question, history, hits, fs_hits=None, automation_hits=None
             except (TypeError, ValueError, OSError):
                 ts = ""
         meta = " | ".join(x for x in (h.get("title"), h.get("repo"), h.get("status"), ts) if x)
+        if h.get("source") == "memory_recall":
+            meta = f"{meta} | source: memory_recall" if meta else "source: memory_recall"
         lines.append(f"{n}. [[session:{h['id']}]] {meta}")
         if h.get("snippet"):
             lines.append(f"   snippet: {h['snippet']}")
@@ -408,6 +442,16 @@ def build_ask_prompt(question, history, hits, fs_hits=None, automation_hits=None
                 lines.append(f"  content: {h['snippet']}")
         else:
             lines.append("(none found)")
+    if shipped_context is not None:
+        lines += ["", "Shipped verdict:"]
+        if shipped_context.get("shipped"):
+            conf = shipped_context.get("confidence")
+            conf_str = f" (confidence {conf:.2f})" if isinstance(conf, (int, float)) else ""
+            lines.append(f"- shipped: true{conf_str}")
+            for ev in shipped_context.get("evidence") or []:
+                lines.append(f"  - {ev.get('repo') or '?'} {ev.get('commit') or ''}: {ev.get('subject') or ''}")
+        else:
+            lines.append("- shipped: false (no commit evidence found)")
     lines += ["", f"Question: {q}"]
     return "\n".join(lines)
 
@@ -690,6 +734,48 @@ def handle_assistant_ask(payload, runner=None):
         except Exception:
             automation_hits = []
 
+    # "did we already ship X" / "which session built X" — a separate
+    # retrieval layer over ship_graph (ccc_server.memory_api), since the
+    # real answer is often outside the recent/history hit scan entirely.
+    # Matching memory_recall session ids get merged into `hits` (deduped)
+    # so the model can cite them as [[session:ID]] like any other hit.
+    shipped_context = None
+    if looks_like_shipped_question(question):
+        topic = query or question
+        try:
+            shipped_context = _memory_api.shipped(topic)
+        except Exception:
+            shipped_context = {"shipped": False, "confidence": 0.0, "evidence": [], "tickets": []}
+        try:
+            recall_hits = (_memory_api.recall(topic, limit=5) or {}).get("results") or []
+        except Exception:
+            recall_hits = []
+        existing_ids = {h["id"] for h in hits}
+        for r in recall_hits:
+            sid = str(r.get("session_id") or "").strip()
+            if not sid or sid in existing_ids:
+                continue
+            existing_ids.add(sid)
+            hits.append({
+                "id": sid,
+                "cwd": "",
+                "ts_unix": None,
+                "snippet": html.unescape(str(r.get("snippet") or ""))[:_ASK_SNIPPET_MAX],
+                "source": "memory_recall",
+                "title": str(r.get("title") or ""),
+                "repo": str(r.get("repo") or ""),
+                "status": "idle",
+            })
+
+    # A shipped-question whose ship_graph lookup actually found evidence (a
+    # commit, or a memory_recall session hit) counts as its dedicated search
+    # succeeding, same as automation_hits — it should answer from that
+    # context below, not escalate to the tool-access model.
+    has_shipped_evidence = bool(
+        shipped_context is not None and (
+            shipped_context.get("evidence") or
+            any(h.get("source") == "memory_recall" for h in hits)))
+
     # Escalate to the bounded tool-access model when either: this was a
     # trigger question and its dedicated content search found nothing, or
     # (the general case) every deterministic search layer that DID run for
@@ -697,7 +783,8 @@ def handle_assistant_ask(payload, runner=None):
     # second arm is what lets a question category with no hint-regex of its
     # own (e.g. session provenance) still get a real answer instead of a
     # punt, without needing a new regex+search-layer per category.
-    if not automation_hits and (is_trigger_question or (hit_count == 0 and not fs_hits)):
+    if (not automation_hits and not has_shipped_evidence and
+            (is_trigger_question or (hit_count == 0 and not fs_hits))):
         try:
             answer = _core.run_ask_tool_engine(
                 build_ask_tool_prompt(question, history, repo_roots),
@@ -709,7 +796,8 @@ def handle_assistant_ask(payload, runner=None):
     if answer is None:
         try:
             answer = run_ask_engine(
-                engine, build_ask_prompt(question, history, hits, fs_hits, automation_hits),
+                engine, build_ask_prompt(question, history, hits, fs_hits, automation_hits,
+                                          shipped_context),
                 runner=runner)
         except subprocess.TimeoutExpired:
             return {"ok": False, "code": "ask_timeout",

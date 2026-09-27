@@ -130,3 +130,59 @@ def test_shipped_unknown_topic_not_shipped(mock_memory_env):
 def test_shipped_empty_topic_matches_is_shipped_contract(mock_memory_env):
     res = memory_api.shipped("")
     assert res == {"shipped": False, "confidence": 0.0, "evidence": [], "tickets": [], "topic": ""}
+
+
+def test_file_history_returns_commit_and_session_newest_first(mock_memory_env):
+    res = memory_api.file_history(str(mock_memory_env["repo_dir"] / "app.py"))
+    assert res["path"] == str(mock_memory_env["repo_dir"] / "app.py")
+    assert res["repo"] == "widget-repo"
+    kinds = {e["kind"] for e in res["history"]}
+    assert "commit" in kinds
+    commit_entries = [e for e in res["history"] if e["kind"] == "commit"]
+    assert commit_entries[0]["why"] == "feat(widgets): add confetti animation"
+    assert commit_entries[0]["hash"]
+    # Every entry carries a one-line "why" and is newest-first by date.
+    dates = [e["date"] for e in res["history"] if e.get("date")]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_file_history_repo_relative_path_resolves_against_known_repos(mock_memory_env):
+    res = memory_api.file_history("app.py", repo="widget-repo")
+    assert res["repo"] == "widget-repo"
+    assert any(e["kind"] == "commit" for e in res["history"])
+
+
+def test_file_history_untracked_path_returns_empty_history(mock_memory_env):
+    res = memory_api.file_history(str(mock_memory_env["repo_dir"] / "nope.py"))
+    assert res["history"] == []
+
+
+def test_file_history_empty_path_returns_empty_history(mock_memory_env):
+    assert memory_api.file_history("") == {"path": "", "repo": "", "history": []}
+
+
+def test_decisions_filters_to_decision_shaped_snippets(mock_memory_env):
+    res = memory_api.decisions("confetti animation")
+    assert res["topic"] == "confetti animation"
+    # The seeded transcript's snippet ("add a confetti animation on save")
+    # carries no decision language, so nothing should pass the filter.
+    assert res["results"] == []
+
+
+def test_decisions_empty_topic_returns_empty_results(mock_memory_env):
+    assert memory_api.decisions("") == {"topic": "", "results": []}
+
+
+def test_decisions_matches_decision_language_in_snippet(mock_memory_env, monkeypatch):
+    monkeypatch.setattr(
+        memory_api, "_sdoc_rows",
+        lambda sids: {sid: {"title": "Pick a queue engine",
+                             "snippet": "we decided to go with sqlite instead of postgres"}
+                      for sid in sids})
+    monkeypatch.setattr(memory_api._sg, "search_sessions",
+                        lambda q, limit=20: [{"session_id": "session-abc"}])
+    res = memory_api.decisions("queue engine")
+    assert res["topic"] == "queue engine"
+    assert len(res["results"]) == 1
+    assert res["results"][0]["session_id"] == "session-abc"
+    assert "instead of" in res["results"][0]["snippet"]

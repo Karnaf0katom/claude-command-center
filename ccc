@@ -25,6 +25,8 @@ command, without opening the dashboard:
 
     ccc recall "that bug with the flaky test"   # sessions that touched it
     ccc shipped "dark mode"                     # did we already build this?
+    ccc history src/app.py                      # commits + sessions that touched a file
+    ccc decisions "which queue engine"          # sessions that recorded a decision
 
 <session> is a session id, a unique id prefix, or a (unique, case-
 insensitive) fragment of the session's display name from `ccc sessions`.
@@ -54,7 +56,7 @@ from datetime import datetime, timezone
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
-               "rebind-report-to", "recall", "shipped")
+               "rebind-report-to", "recall", "shipped", "history", "decisions")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -514,6 +516,85 @@ def cmd_shipped(args):
     tickets = payload.get("tickets") or []
     if tickets:
         print(f"  tickets: {', '.join(tickets)}")
+    return 0
+
+
+def cmd_history(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.path).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc history: missing path (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    params = {"path": text, "limit": args.limit}
+    if args.repo:
+        params["repo"] = args.repo
+    qs = urllib.parse.urlencode(params)
+    try:
+        payload = _get_json(base, f"/api/memory/file-history?{qs}", timeout=15)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    entries = payload.get("history") or []
+    if not entries:
+        print(f"(no history found for {text!r})")
+        return 0
+    for e in entries:
+        date = e.get("date") or "?"
+        why = e.get("why") or ""
+        if e.get("kind") == "commit":
+            print(f"{date:<12} commit  {e.get('hash') or '?':<10} {why}")
+        else:
+            print(f"{date:<12} session {e.get('session_id') or '?':<38} {why}")
+    return 0
+
+
+def cmd_decisions(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.topic).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc decisions: missing topic (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    qs = urllib.parse.urlencode({"topic": text, "limit": args.limit})
+    try:
+        payload = _get_json(base, f"/api/memory/decisions?{qs}", timeout=15)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    results = payload.get("results") or []
+    if not results:
+        print(f"(no decisions found for {text!r})")
+        return 0
+    for r in results:
+        meta = " | ".join(x for x in (r.get("title"), r.get("repo"), r.get("date")) if x)
+        print(f"{r.get('session_id') or '?':<38} {meta}")
+        if r.get("snippet"):
+            print(f"  {r['snippet']}")
     return 0
 
 
@@ -1085,6 +1166,34 @@ def main(argv=None):
     p.add_argument("topic", nargs="*", help="the feature/topic (or pipe it on stdin)")
     p.add_argument("--json", action="store_true", help="raw shipped result JSON")
     p.set_defaults(func=cmd_shipped)
+
+    p = sub.add_parser(
+        "history",
+        help="commits and sessions that touched a file, newest first",
+        description="GET /api/memory/file-history: `git log --follow` for the "
+                    "path plus any indexed sessions that edited it, merged "
+                    "newest-first with a one-line why for each.",
+    )
+    p.add_argument("path", nargs="*", help="the file path (or pipe it on stdin)")
+    p.add_argument("--repo", help="repo name or path, when the path alone is ambiguous")
+    p.add_argument("--limit", type=int, default=20, metavar="N",
+                   help="max entries to return (default 20, server caps at 50)")
+    p.add_argument("--json", action="store_true", help="raw file-history result JSON")
+    p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser(
+        "decisions",
+        help="find sessions that recorded a decision on a topic",
+        description="GET /api/memory/decisions: search_sessions() hits whose "
+                    "snippet reads as a decision (\"went with\", \"instead "
+                    "of\", ...) for the topic. Heuristic stand-in pending a "
+                    "dedicated decision store.",
+    )
+    p.add_argument("topic", nargs="*", help="the topic (or pipe it on stdin)")
+    p.add_argument("--limit", type=int, default=10, metavar="N",
+                   help="max sessions to return (default 10, server caps at 50)")
+    p.add_argument("--json", action="store_true", help="raw decisions result JSON")
+    p.set_defaults(func=cmd_decisions)
 
     p = sub.add_parser(
         "models",

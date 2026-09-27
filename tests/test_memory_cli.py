@@ -103,3 +103,100 @@ def test_cmd_shipped_missing_topic_errors(monkeypatch, capsys):
     rc = ccc_cli.cmd_shipped(_args(topic=[]))
     assert rc == 2
     assert "missing topic" in capsys.readouterr().err
+
+
+def test_cmd_history_prints_commits_and_sessions_newest_first(monkeypatch, capsys):
+    payload = {
+        "path": "app.py",
+        "repo": "widget-repo",
+        "history": [
+            {"kind": "commit", "hash": "abc1234", "date": "2026-09-20",
+             "why": "feat(widgets): add confetti animation"},
+            {"kind": "session", "session_id": "session-abc", "date": "2026-09-19",
+             "why": "Add confetti"},
+        ],
+    }
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_history(_args(path=["app.py"], limit=20, repo=None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "abc1234" in out
+    assert "feat(widgets): add confetti animation" in out
+    assert "session-abc" in out
+
+
+def test_cmd_history_json_flag_prints_raw_payload(monkeypatch, capsys):
+    payload = {"path": "app.py", "repo": "widget-repo", "history": []}
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_history(_args(path=["app.py"], limit=20, repo=None, json=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(out) == payload
+
+
+def test_cmd_history_no_results_says_so(monkeypatch, capsys):
+    payload = {"path": "app.py", "repo": "", "history": []}
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_history(_args(path=["app.py"], limit=20, repo=None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no history found" in out
+
+
+def test_cmd_history_missing_path_errors(monkeypatch, capsys):
+    monkeypatch.setattr(ccc_cli.sys.stdin, "isatty", lambda: True)
+    rc = ccc_cli.cmd_history(_args(path=[], limit=20, repo=None))
+    assert rc == 2
+    assert "missing path" in capsys.readouterr().err
+
+
+def test_cmd_history_repo_flag_added_to_query_string(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        ccc_cli, "_get_json",
+        lambda base, path, timeout=10: calls.append(path) or {"history": []})
+    ccc_cli.cmd_history(_args(path=["app.py"], limit=20, repo="widget-repo"))
+    assert "repo=widget-repo" in calls[-1]
+
+
+def test_cmd_decisions_prints_sessions_and_snippets(monkeypatch, capsys):
+    payload = {
+        "topic": "queue engine",
+        "results": [
+            {"session_id": "session-abc", "title": "Pick a queue engine",
+             "repo": "widget-repo", "date": "2026-09-20",
+             "snippet": "we decided to go with sqlite instead of postgres"},
+        ],
+    }
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_decisions(_args(topic=["queue", "engine"], limit=10))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "session-abc" in out
+    assert "widget-repo" in out
+    assert "instead of postgres" in out
+
+
+def test_cmd_decisions_json_flag_prints_raw_payload(monkeypatch, capsys):
+    payload = {"topic": "queue engine", "results": []}
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_decisions(_args(topic=["queue", "engine"], limit=10, json=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(out) == payload
+
+
+def test_cmd_decisions_no_results_says_so(monkeypatch, capsys):
+    payload = {"topic": "x", "results": []}
+    monkeypatch.setattr(ccc_cli, "_get_json", lambda base, path, timeout=10: payload)
+    rc = ccc_cli.cmd_decisions(_args(topic=["x"], limit=10))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no decisions found" in out
+
+
+def test_cmd_decisions_missing_topic_errors(monkeypatch, capsys):
+    monkeypatch.setattr(ccc_cli.sys.stdin, "isatty", lambda: True)
+    rc = ccc_cli.cmd_decisions(_args(topic=[], limit=10))
+    assert rc == 2
+    assert "missing topic" in capsys.readouterr().err

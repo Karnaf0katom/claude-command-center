@@ -25099,6 +25099,9 @@ _adopt_ccc_module("terminal")
 # call record_event / summarize as bare names via this adoption.
 _adopt_ccc_module("perf_events")
 _adopt_ccc_module("decision_inbox")
+# Nightly decision extraction (user rulings from transcripts) + a
+# report-only MEMORY.md staleness audit -- see ccc_server/decision_extraction.py.
+_adopt_ccc_module("decision_extraction")
 _adopt_ccc_module("spawn_ledger")
 
 # Pipeline Canvas — read-only fleet topology (/api/canvas/state) plus the
@@ -28172,6 +28175,56 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "missing topic"}, 400)
             else:
                 self.send_json(_memory_shipped(topic))
+        elif path == "/api/memory/file-history":
+            # ccc_server/ship_graph's commits/session_meta tables, joined for
+            # one path — see ccc_server/memory_api.py. Powers `ccc history`.
+            from ccc_server.memory_api import file_history as _memory_file_history
+            qs = urllib.parse.parse_qs(parsed.query)
+            file_path = (qs.get("path", [""])[0] or "").strip()
+            if not file_path:
+                self.send_json({"error": "missing path"}, 400)
+            else:
+                repo_q = (qs.get("repo", [""])[0] or "").strip()
+                limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
+                try:
+                    limit = max(1, min(int(limit_raw), 50))
+                except ValueError:
+                    limit = 20
+                self.send_json(_memory_file_history(file_path, repo=repo_q, limit=limit))
+        elif path == "/api/memory/decisions":
+            # Heuristic decision-shaped filter over ship_graph.search_sessions()
+            # — see ccc_server/memory_api.py. Powers `ccc decisions`. Stand-in
+            # backend for MEMO-FIX-7's dedicated decision store.
+            from ccc_server.memory_api import decisions as _memory_decisions
+            qs = urllib.parse.parse_qs(parsed.query)
+            topic = (qs.get("topic", [""])[0] or "").strip()
+            if not topic:
+                self.send_json({"error": "missing topic"}, 400)
+            else:
+                limit_raw = (qs.get("limit", ["10"])[0] or "10").strip()
+                try:
+                    limit = max(1, min(int(limit_raw), 50))
+                except ValueError:
+                    limit = 10
+                self.send_json(_memory_decisions(topic, limit=limit))
+        elif path == "/api/memory/decisions/extracted":
+            # ccc_server/decision_extraction.py -- explicit user rulings
+            # found by the nightly scan (distinct from the topic-search
+            # stand-in above at /api/memory/decisions; this is MEMO-FIX-7's
+            # dedicated decision store, the plain function contract a
+            # decisions UI (MEMO-FIX-5, not yet landed) can call).
+            qs = urllib.parse.parse_qs(parsed.query)
+            repo = (qs.get("repo", [""])[0] or "").strip() or None
+            limit_raw = (qs.get("limit", ["50"])[0] or "50").strip()
+            try:
+                limit = max(1, min(int(limit_raw), 200))
+            except ValueError:
+                limit = 50
+            self.send_json(decisions_api_payload(repo=repo, limit=limit))
+        elif path == "/api/memory/decisions/audit":
+            # Report-only: MEMORY.md entries a newer extracted decision may
+            # have made stale. Never edits any memory file.
+            self.send_json(audit_api_payload())
         elif path == "/api/version/check":
             # Is the local install behind the latest GitHub release? Used by
             # the in-app "Update available" pill. Cached 6h in memory so we
@@ -39346,6 +39399,12 @@ def main():
     # flag is re-read every interval.
     if not os.environ.get("CCC_EPHEMERAL") and not os.environ.get("CCC_DECISION_INBOX_DISABLED"):
         threading.Thread(target=decision_inbox_loop, daemon=True, name="ccc-decision-inbox").start()
+    # Nightly decision extraction: incremental (mtime, size) gated scan for
+    # explicit user rulings (ccc_server/decision_extraction.py). Off for
+    # ephemeral test/CI processes and via CCC_DECISION_EXTRACTION_DISABLED=1;
+    # the config file's `enabled` flag is re-read every wake.
+    if not os.environ.get("CCC_EPHEMERAL") and not os.environ.get("CCC_DECISION_EXTRACTION_DISABLED"):
+        threading.Thread(target=decision_extraction_loop, daemon=True, name="ccc-decision-extraction").start()
     # Recover in-progress group-chat coordinations and start background watcher.
     _start_coordination_watcher()
     _start_resume_queue_watcher()

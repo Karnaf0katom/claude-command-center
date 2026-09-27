@@ -89,6 +89,20 @@ class TriggerQuestionHintTest(unittest.TestCase):
         self.assertFalse(server.looks_like_trigger_question("what did I work on yesterday"))
 
 
+class LooksLikeShippedQuestionTest(unittest.TestCase):
+    def test_did_we_ship_triggers(self):
+        self.assertTrue(server.looks_like_shipped_question("did we already ship dark mode?"))
+
+    def test_which_session_triggers(self):
+        self.assertTrue(server.looks_like_shipped_question("which session built the csv export?"))
+
+    def test_was_it_shipped_triggers(self):
+        self.assertTrue(server.looks_like_shipped_question("was the export feature already shipped?"))
+
+    def test_ordinary_session_question_does_not_trigger(self):
+        self.assertFalse(server.looks_like_shipped_question("what did I work on yesterday"))
+
+
 class SearchLocalAutomationHitsTest(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -254,6 +268,35 @@ class PromptTest(unittest.TestCase):
         p = server.build_ask_prompt("q", [], [], fs_hits=[])
         self.assertIn("File matches", p)
         self.assertIn("(none found)", p)
+
+    def test_shipped_context_none_omits_section(self):
+        p = server.build_ask_prompt("q", [], [], shipped_context=None)
+        self.assertNotIn("Shipped verdict", p)
+
+    def test_shipped_context_true_lists_evidence(self):
+        p = server.build_ask_prompt("q", [], [], shipped_context={
+            "shipped": True, "confidence": 0.9,
+            "evidence": [{"repo": "widget-repo", "commit": "abc1234",
+                          "subject": "feat(widgets): add confetti animation"}],
+        })
+        self.assertIn("Shipped verdict", p)
+        self.assertIn("shipped: true", p)
+        self.assertIn("abc1234", p)
+        self.assertIn("feat(widgets): add confetti animation", p)
+
+    def test_shipped_context_false_says_no_evidence(self):
+        p = server.build_ask_prompt("q", [], [], shipped_context={
+            "shipped": False, "confidence": 0.0, "evidence": [],
+        })
+        self.assertIn("Shipped verdict", p)
+        self.assertIn("shipped: false", p)
+
+    def test_memory_recall_hit_tagged_as_source_in_prompt(self):
+        hits = [{"id": "aaa-1", "cwd": "", "ts_unix": None, "snippet": "went with sqlite",
+                 "source": "memory_recall", "title": "Pick a DB", "repo": "x", "status": "idle"}]
+        p = server.build_ask_prompt("did we already ship this", [], hits,
+                                     shipped_context={"shipped": True, "evidence": []})
+        self.assertIn("source: memory_recall", p)
 
 
 class CitationsTest(unittest.TestCase):
@@ -578,6 +621,68 @@ class HandleAskTest(unittest.TestCase):
         self.assertFalse(body["tools_used"])
         self.assertEqual(body["engine"], "claude")
         self.assertNotIn("--allowedTools", calls[0])
+
+    def test_shipped_question_wires_verdict_and_recall_hit_into_prompt(self):
+        prompts = []
+
+        def runner(argv, **kw):
+            prompts.append(argv[-1])
+            return _FakeProc(stdout="Yes, [[session:mem-1]] shipped it.")
+
+        with mock.patch.object(
+                server._memory_api, "shipped",
+                lambda topic: {"shipped": True, "confidence": 0.9,
+                                "evidence": [{"repo": "widget-repo", "commit": "abc1234",
+                                              "subject": "feat: add dark mode"}],
+                                "tickets": [], "topic": topic}), \
+             mock.patch.object(
+                server._memory_api, "recall",
+                lambda topic, limit=5: {"query": topic, "results": [
+                    {"session_id": "mem-1", "title": "Add dark mode", "repo": "widget-repo",
+                     "date": "2026-09-10", "snippet": "went with a CSS variable toggle"}]}):
+            body, status = server.handle_assistant_ask(
+                {"question": "did we already ship dark mode?"}, runner=runner)
+        self.assertEqual(status, 200)
+        self.assertFalse(body["tools_used"])
+        self.assertIn("Shipped verdict", prompts[-1])
+        self.assertIn("abc1234", prompts[-1])
+        self.assertIn("[[session:mem-1]]", prompts[-1])
+        self.assertIn("source: memory_recall", prompts[-1])
+        self.assertIn("[[session:mem-1]]", body["answer"])
+        self.assertIn("mem-1", [s["id"] for s in body["sources"]])
+
+    def test_shipped_question_no_evidence_still_escalates_to_tool_access(self):
+        calls = []
+
+        def runner(argv, **kw):
+            calls.append(argv)
+            return _FakeProc(stdout="No evidence CCC could find of that being built.")
+
+        # Empty the ordinary session-hit scan too, so hit_count == 0 and the
+        # existing "every deterministic layer came back empty" arm is what's
+        # under test — a shipped_context with no evidence must not block it.
+        with mock.patch.object(server, "search_recent_sessions",
+                                lambda q, days=2, limit=20, cwd_like=None: {"results": []}), \
+             mock.patch.object(server, "search_conversation_history",
+                                lambda q, limit=20, cwd_like=None, since=None, semantic=False:
+                                {"results": []}), \
+             mock.patch.object(server._memory_api, "shipped",
+                                lambda topic: {"shipped": False, "confidence": 0.0,
+                                                "evidence": [], "tickets": [], "topic": topic}), \
+             mock.patch.object(server._memory_api, "recall",
+                                lambda topic, limit=5: {"query": topic, "results": []}):
+            body, status = server.handle_assistant_ask(
+                {"question": "did we already ship a teleporter?"}, runner=runner)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["tools_used"])  # no evidence -> falls through like automation_hits=[]
+
+    def test_ordinary_question_skips_shipped_lookup(self):
+        called = []
+        runner = lambda argv, **kw: _FakeProc(stdout="ok")
+        with mock.patch.object(server._memory_api, "shipped",
+                                lambda topic: called.append(topic) or {"shipped": False}):
+            server.handle_assistant_ask({"question": "bym ads"}, runner=runner)
+        self.assertFalse(called)
 
     def test_tool_escalation_failure_falls_back_to_normal_engine(self):
         def runner(argv, **kw):
