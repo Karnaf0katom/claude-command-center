@@ -1297,23 +1297,19 @@ def is_shipped(topic: str) -> dict:
         if is_doc_commit and not query_asks_docs:
             return
 
-        subj_clean = subj_lower
         scope = ""
         m_conv = re.match(r"^([a-z]+)(?:\(([^)]+)\))?:\s*", subj_lower)
-        if m_conv:
-            subj_clean = subj_lower[m_conv.end():]
-            if m_conv.group(2):
-                scope = m_conv.group(2).strip()
+        if m_conv and m_conv.group(2):
+            scope = m_conv.group(2).strip()
 
-        subj_tokens = re.findall(r"[a-z0-9]+", subj_clean)
         scope_tokens = re.findall(r"[a-z0-9]+", scope) if scope else []
         scope_stems = {_stem(w) for w in scope_tokens if w not in STOPWORDS}
-        subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS} | scope_stems
+        scope_boost = 3.0 if (scope_stems and bool(scope_stems & stemmed_content_terms)) else 0.0
+
+        subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
+        subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS}
         body_tokens = re.findall(r"[a-z0-9]+", body_lower)
         body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
-
-        # Scope boost: prefer commits whose scope matches the question's subject
-        scope_boost = 15.0 if (scope_stems and bool(scope_stems & stemmed_content_terms)) else 0.0
 
         # Check compound pairs
         for i in range(len(content_terms) - 1):
@@ -1344,7 +1340,9 @@ def is_shipped(topic: str) -> dict:
         subj_ratio = len(matched_subj) / len(stemmed_content_terms) if stemmed_content_terms else 0
         all_ratio = len(matched_all) / len(stemmed_content_terms) if stemmed_content_terms else 0
 
-        clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in subj_tokens]) + " "
+        clean_subj = re.sub(r"^(?:feat|fix|chore|docs|refactor|test|ci|perf|build)(?:\([^)]*\))?:\s*", "", subj_lower)
+        clean_subj_tokens = re.findall(r"[a-z0-9]+", clean_subj)
+        clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in clean_subj_tokens]) + " "
         body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
 
         has_phrase_subj = False
@@ -1433,13 +1431,9 @@ def is_shipped(topic: str) -> dict:
                 pass
 
         if found_c:
-            t_m_dist = ct.get("m_title_dist", set())
-            c_m_dist = found_c.get("matched_distinguishing", set())
-            dist_covered = len(t_m_dist | c_m_dist)
-            if len(distinguishing_stems) == 0 or dist_covered >= min(2, len(distinguishing_stems)):
-                if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
-                    found_c["ticket_boost"] = 15.0
-                    found_c["ticket_ref"] = t_ref
+            if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
+                found_c["ticket_boost"] = 15.0
+                found_c["ticket_ref"] = t_ref
 
     # 3. Evaluate qualifying commits
     qualifying: list[dict] = []
@@ -1499,15 +1493,14 @@ def is_shipped(topic: str) -> dict:
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 2:
+            if has_phrase_subj and (n_m_subj >= 3 or subj_ratio >= 0.45 or (n_m_subj >= 2 and n_m_dist >= 2)):
                 is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.50:
+            elif n_m_subj >= 3 and subj_ratio >= 0.35 and n_m_dist >= 2:
                 is_strong = True
             elif subj_ratio >= 0.65 and n_m_subj >= 3:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
-
 
         if is_strong:
             cur_s = conn.execute(
@@ -1521,8 +1514,7 @@ def is_shipped(topic: str) -> dict:
                 + scope_boost
                 + subj_ratio * 25.0
                 + n_m_subj * 10.0
-                + (15.0 if has_phrase_subj else 0.0)
-                + n_m_dist * 8.0
+                + (12.0 if has_phrase_subj else 0.0)
                 + n_m_all * 3.0
                 - (c["rank"] * 0.1)
             )
