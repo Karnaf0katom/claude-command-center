@@ -16856,8 +16856,9 @@ _AUTO_UPDATE_IDLE_WINDOW_S = 10 * 60
 
 
 def _auto_update_enabled():
-    # Default OFF until the fix for sessions orphaned by restarts lands; the maintainer flips this default then.
-    return os.environ.get("CCC_AUTO_UPDATE", "0").strip().lower() in ("1", "true", "yes", "on")
+    # Default ON for managed release-channel installs (restarts re-adopt live
+    # sessions since 43d047a1). Opt out with CCC_AUTO_UPDATE=0.
+    return os.environ.get("CCC_AUTO_UPDATE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _release_update_available(d=None):
@@ -16926,9 +16927,16 @@ def _auto_update_tick():
     if busy:
         _log_activity("update", "skip", f"{chk['tag']} available, CCC busy: {'; '.join(busy)}")
         return {"action": "busy", "tag": chk["tag"], "reasons": busy}
+    # Same handoff the Restart button runs: adopt/drain so live sessions
+    # survive. The "dashboard-restart" drain is released on the next boot.
+    ok, precheck_err, _, _ = _safe_worker_restart_precheck(reason_prefix="dashboard-restart")
+    if not ok:
+        _log_activity("update", "skip", f"{chk['tag']} available, restart precheck refused: {precheck_err}")
+        return {"action": "busy", "tag": chk["tag"], "reasons": ["restart precheck refused"]}
     _log_activity("update", "apply", f"auto-updating to {chk['tag']} (idle)")
     result = _self_update()
     if not result.get("ok"):
+        _control_plane_request("drain.set", {"enabled": False, "reason": "auto-update aborted"})
         _log_activity("update", "fail", f"{chk['tag']}: {result.get('error')}")
         return {"action": "error", "tag": chk["tag"], "error": result.get("error")}
     _log_activity("update", "restart", f"now at {chk['tag']} ({result.get('new_sha', '')[:12]})")

@@ -153,6 +153,8 @@ def auto(managed, monkeypatch):
                         lambda *a, **k: {"ok": True, "active": 0, "queued": 0, "uncertain": 0})
     monkeypatch.setattr(server, "_wt_live_workers", lambda: [])
     monkeypatch.setattr(server, "_load_last_interactions", lambda: {})
+    monkeypatch.setattr(server, "_safe_worker_restart_precheck",
+                        lambda **k: (True, None, {}, {}))
     calls = {"self_update": 0, "restart": 0}
 
     def _su():
@@ -164,7 +166,12 @@ def auto(managed, monkeypatch):
     return {"events": events, "calls": calls}
 
 
-def test_auto_update_is_off_by_default(managed, monkeypatch):
+def test_auto_update_is_on_by_default():
+    assert server._auto_update_enabled() is True
+
+
+def test_auto_update_opt_out(managed, monkeypatch):
+    monkeypatch.setenv("CCC_AUTO_UPDATE", "0")
     log = []
     monkeypatch.setattr(server, "_git", _fake_git(log))
     assert server._auto_update_tick() == {"action": "skip", "reason": "disabled"}
@@ -224,3 +231,12 @@ def test_failed_self_update_does_not_restart(auto, monkeypatch):
     res = server._auto_update_tick()
     assert res["action"] == "error"
     assert auto["calls"]["restart"] == 0
+
+
+def test_refused_restart_precheck_skips_the_update(auto, monkeypatch):
+    monkeypatch.setattr(server, "_git", _fake_git([]))
+    monkeypatch.setattr(server, "_safe_worker_restart_precheck",
+                        lambda **k: (False, {"error": "handoff failed"}, None, None))
+    res = server._auto_update_tick()
+    assert res["action"] == "busy"
+    assert auto["calls"] == {"self_update": 0, "restart": 0}
