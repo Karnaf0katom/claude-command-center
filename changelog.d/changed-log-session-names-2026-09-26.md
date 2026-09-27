@@ -1,0 +1,1 @@
+Activity log: rows that mention a session now show its name (the sidebar title, shortened) instead of a bare id, and model-switch restart requests read in plain words ("CCC asked to restart a session to apply a model switch", "Restart request dismissed; …").

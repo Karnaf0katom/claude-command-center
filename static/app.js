@@ -61657,7 +61657,9 @@
       : ['SPAWN', 'DELIVERED', 'COMPLETE', 'COMPLETED', 'SUCCESS', 'RESOLVED'].includes(verb) ? 'success' : 'info';
     let headline = verb.replace(/[-_]/g, ' ').toLowerCase().replace(/^./, ch => ch.toUpperCase()) || 'Activity';
     let origin = '';
-    const sessionTail = () => ((metadata.match(/(?:^|\s)session=([^\s]+)/) || [])[1] || '').slice(-8);
+    const sid = (metadata.match(/(?:^|\s)(?:session|sid)=([^\s]+)/) || [])[1] || '';
+    // Session name when the dashboard knows it, else the short id.
+    const sessionTail = () => (sid && typeof _logSessionName === 'function' && _logSessionName(sid)) || sid.slice(-8);
     if (verb === 'TIMEOUT' && category === 'app-server') {
       // The shared Codex app-server did not answer; that one call falls back
       // to the slower `codex exec` path instead of failing.
@@ -61699,6 +61701,13 @@
         : 'Experimental check thinks the worker may be on older code';
       origin = oldStale ? 'CCC restarts it once no work is running' : 'The check CCC acts on says it is current; nothing restarted';
       level = oldStale ? 'warning' : 'info';
+    } else if (category === 'interrupt-ask' && ['ASK', 'DISMISS', 'APPROVE'].includes(verb)) {
+      const source = ((metadata.match(/(?:^|\s)source=([^\s]+)/) || [])[1] || '').replace(/[-_]/g, ' ');
+      const why = source ? ' to apply a ' + source : '';
+      headline = verb === 'ASK' ? 'CCC asked to restart a session' + why
+        : verb === 'APPROVE' ? 'Restart approved' + why
+        : 'Restart request dismissed; the ' + (source || 'change') + ' applies when the session next resumes';
+      origin = sessionTail();
     } else if (verb === 'LATE') {
       const late = (detail.match(/reply arrived ([\d.]+s) after/) || [])[1];
       headline = subject + ' response arrived' + (late ? ' ' + late : '') + ' late';
@@ -61709,7 +61718,7 @@
       const inj = _readableInjectParts(metadata, detail);
       headline = (verb === 'INJECT_REJECT' ? '✕ ' : '→ ')
         + (inj.text ? '“' + inj.text + '”' : '(empty message)');
-      origin = 'From ' + inj.from + ' → to ' + inj.to
+      origin = 'From ' + inj.from + ' → to ' + (sessionTail() || inj.to)
         + (verb === 'INJECT_REJECT' ? ' · rejected' : inj.queued ? ' · queued' : '');
     }
     else if (verb === 'SPAWN') headline = 'Agent started';
@@ -61743,6 +61752,7 @@
     else if (verb === 'SHARED_STATE_BLOCK') headline = 'Shared state already owned; private connection skipped';
     else if (verb === 'SHARED_ST') headline = 'Shared-state event — older log name was truncated';
     else if (detail) headline += ': ' + detail.replace(/^error=/, '');
+    if (!origin && sid) origin = sessionTail() + ' · ' + (category || 'Activity') + ' · ' + verb;
     // Only known repeated RPC diagnostics share a key despite differing ids
     // or durations. Unknown failures group only when their exact text matches.
     const key = JSON.stringify([category, verb, method && ['TIMEOUT', 'LATE'].includes(verb) ? method : detail]);
@@ -61823,6 +61833,25 @@
   let _railLogShowHeartbeats = false;
   let _railLogShowInjects = true;
   let _railLogOnlyAttention = false;
+
+  // Activity-log rows name the session (sidebar title, shortened) instead
+  // of showing a bare id. Index rebuilt only when conversationsData changes.
+  let _logSessionIndex = { src: null, map: new Map() };
+  function _logSessionName(sid) {
+    if (_logSessionIndex.src !== conversationsData) {
+      const map = new Map();
+      (conversationsData || []).forEach(c => {
+        if (c.session_id) map.set(c.session_id, c);
+        if (c.id) map.set(c.id, c);
+      });
+      _logSessionIndex = { src: conversationsData, map };
+    }
+    const c = _logSessionIndex.map.get(sid);
+    if (!c) return '';
+    const title = String(rowRawTitle(c).rawTitle || '').trim();
+    if (!title || title === '(untitled)') return '';
+    return title.length > 32 ? title.slice(0, 31).trimEnd() + '…' : title;
+  }
 
   // Per-event copy button in the readable activity log (rail + modal).
   document.addEventListener('click', async (e) => {

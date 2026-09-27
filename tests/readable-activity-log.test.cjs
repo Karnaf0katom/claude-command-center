@@ -108,3 +108,14 @@ test('every expanded occurrence has a copy button carrying the raw event', ()=>{
  assert.ok(html.includes('class="activity-log-copy"'));
  assert.ok(html.includes('data-copy-text="2026-09-05 19:00:00 UTC  app-server  TIMEOUT  method=initialize id=1 no reply within 10s"'));
 });
+test('rows name the session instead of a bare id, and interrupt asks read plainly', ()=>{
+ const h=helpers();
+ h._logSessionName=sid=>sid==='32faca19-397a-4328-a30d-613c972a1e33'?'this devin session is stuck.':'';
+ const d=h._readableLogPresentation(event('DISMISS','sid=32faca19-397a-4328-a30d-613c972a1e33 source=model-switch','interrupt-ask'));
+ assert.equal(d.headline,'Restart request dismissed; the model switch applies when the session next resumes');
+ assert.equal(d.origin,'this devin session is stuck.');
+ const a=h._readableLogPresentation(event('ASK','sid=32faca19-397a-4328-a30d-613c972a1e33 source=model-switch — reason','interrupt-ask'));
+ assert.equal(a.headline,'CCC asked to restart a session to apply a model switch');
+ const g=h._readableLogPresentation(event('RETIRE','sid=ffff0000-0000-0000-0000-00001234abcd reason=x','retire'));
+ assert.equal(g.origin,'1234abcd · retire · RETIRE');
+});
