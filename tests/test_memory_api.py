@@ -72,6 +72,14 @@ def mock_memory_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(fts_db))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")  # disable cutoff for tests
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")  # tmp_path looks scratch-y
+    # These tests exercise the FTS/graph enrichment path, not the optional
+    # embeddings channel; keep them hermetic regardless of whether the dev
+    # box happens to have a local Ollama daemon running (see
+    # test_session_fts.py's fts_env fixture for the same guard). Without
+    # this, _vec_cache -- a process-wide global -- can carry a previous
+    # test's session vector into this test's (unrelated) query and produce
+    # a false-positive RRF-fused hit with score 0.0.
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
 
     for mod in (ship_graph, session_fts):
         if hasattr(mod._tls, "conn") and mod._tls.conn:
@@ -82,6 +90,12 @@ def mock_memory_env(tmp_path, monkeypatch):
             mod._tls.conn = None
     ship_graph._last_sync_ts = 0.0
     session_fts._last_sync_ts = 0.0
+    ship_graph._bg_sync_running = False
+    session_fts._bg_sync_running = False
+    session_fts._ollama_state["ts"] = 0.0
+    session_fts._ollama_state["ok"] = False
+    session_fts._vec_cache["sids"] = []
+    session_fts._vec_cache["vecs"] = []
     # ship_graph.search_sessions() re-ranks a separate dynamically-loaded copy
     # of session_fts with its own TTL clock (see _get_base_search_sessions);
     # force a fresh copy so it isn't skipped as still-warm from a prior test.
@@ -106,7 +120,7 @@ def test_recall_enriches_hits_with_title_repo_date_snippet(mock_memory_env):
 
 
 def test_recall_empty_query_returns_no_results(mock_memory_env):
-    assert memory_api.recall("", limit=10) == {"query": "", "results": []}
+    assert memory_api.recall("", limit=10) == {"query": "", "results": [], "indexing": False}
 
 
 def test_recall_unmatched_query_returns_empty_results(mock_memory_env):

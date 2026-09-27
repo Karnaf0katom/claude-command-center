@@ -39348,6 +39348,17 @@ def main():
     # and hold the Python GIL long enough to make the whole app feel stuck.
     if _env_truthy("CCC_WARM_CACHE_ON_STARTUP"):
         threading.Thread(target=_warm_cache, daemon=True).start()
+    # `ccc recall` / /api/memory/recall memory index: unconditional, unlike
+    # the opt-in cache warmup above. On a cold process the first search over
+    # ~/.claude/projects would otherwise re-parse the whole transcript corpus
+    # inline on the request thread (60s+ on a real corpus, MEMO-FIX-12);
+    # warming here means that parse is already done, or well underway, by the
+    # time any real request arrives. Cheap/no-op once already warm.
+    if not os.environ.get("CCC_EPHEMERAL"):
+        from ccc_server import session_fts as _session_fts_warm
+        from ccc_server import ship_graph as _ship_graph_warm
+        threading.Thread(target=_session_fts_warm.warm_start, daemon=True, name="ccc-session-fts-warm").start()
+        threading.Thread(target=_ship_graph_warm.warm_start, daemon=True, name="ccc-ship-graph-warm").start()
     # Idle-session reaper: sweeps every 30 min, SIGTERMs `claude` processes
     # whose JSONL has been quiet for >24h. Catches abandoned-but-not-archived
     # sessions and forgotten cron agents that the archive-time kill misses.

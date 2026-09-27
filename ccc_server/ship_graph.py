@@ -195,6 +195,12 @@ _sync_lock = threading.Lock()
 _last_sync_ts = 0.0
 _SYNC_TTL = 5.0  # seconds between freshness checks
 
+# A cold-start (or any catch-up this large) re-parses too many transcripts to
+# do inline on a request thread -- see _start_background_sync().
+_BG_SYNC_THRESHOLD = int(os.environ.get("CCC_SHIP_GRAPH_SYNC_INLINE_MAX", "50"))
+_bg_sync_state_lock = threading.Lock()
+_bg_sync_running = False
+
 
 def _ccc_dir() -> Path:
     cc_name = "command-center"
@@ -1048,23 +1054,89 @@ def _sync_transcripts(conn: sqlite3.Connection, days: float) -> None:
         conn.executemany("INSERT INTO edges VALUES (?,?,?,?)", edge_rows)
 
 
+def _count_pending_transcripts(conn: sqlite3.Connection, days: float) -> int:
+    """Cheap (stat-only, no parsing) count of transcripts _sync_transcripts
+    would need to (re)parse -- used to decide inline vs. background sync."""
+    cur = conn.execute("SELECT path, mtime, size FROM transcripts")
+    have = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    candidates = _candidate_transcript_files(days)
+    return sum(1 for _eng, p, mt, sz in candidates if have.get(p) != (mt, sz))
+
+
 def _sync_all(conn: sqlite3.Connection, force: bool = False) -> None:
     global _last_sync_ts
     now = time.time()
     if not force and (now - _last_sync_ts < _SYNC_TTL):
         return
 
-    with _sync_lock:
+    # Non-blocking acquire for regular (non-forced) callers -- see the
+    # matching comment in session_fts._sync_index. force=True (explicit
+    # force_refresh, and the background worker's own call) still blocks.
+    got = _sync_lock.acquire(blocking=force)
+    if not got:
+        return
+    try:
         if not force and (time.time() - _last_sync_ts < _SYNC_TTL):
             return
 
         _init_db(conn)
         days = _get_days()
+
+        if not force:
+            pending = _count_pending_transcripts(conn, days)
+            if pending > _BG_SYNC_THRESHOLD:
+                # Cold start (or a big catch-up): re-parsing this many
+                # transcripts (plus session_fts's own re-parse of the same
+                # files) can take a minute or more. Don't block the request;
+                # warm in the background and answer with what's indexed so far.
+                _last_sync_ts = time.time()
+                _start_background_sync()
+                return
+
         roots = discover_repo_roots()
         _sync_git_repos(conn, roots, days)
         _sync_watchtower(conn)
         _sync_transcripts(conn, days)
         _last_sync_ts = time.time()
+    finally:
+        _sync_lock.release()
+
+
+def is_indexing() -> bool:
+    """True while a background cold-start/catch-up sync is in flight."""
+    return _bg_sync_running
+
+
+def _start_background_sync() -> None:
+    """Kick a full (blocking, force=True) sync on a background thread against
+    its own connection. Idempotent while already running."""
+    global _bg_sync_running
+    with _bg_sync_state_lock:
+        if _bg_sync_running:
+            return
+        _bg_sync_running = True
+
+    def _worker() -> None:
+        global _bg_sync_running
+        try:
+            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30.0)
+            try:
+                _sync_all(conn2, force=True)
+            finally:
+                conn2.close()
+        except Exception:
+            pass
+        finally:
+            with _bg_sync_state_lock:
+                _bg_sync_running = False
+
+    threading.Thread(target=_worker, daemon=True, name="ship-graph-warm").start()
+
+
+def warm_start() -> None:
+    """Call once at process/server start to begin warming the graph in the
+    background before the first real request arrives."""
+    _start_background_sync()
 
 
 def rrf(lists: list[list[str]], k: int = 60, weights: list[float] | None = None) -> list[str]:

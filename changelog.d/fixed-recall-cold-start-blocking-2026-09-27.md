@@ -1,0 +1,1 @@
+Fixed `ccc recall` / `/api/memory/recall` blocking for up to a minute on a cold index (full transcript corpus re-parsed inline on the request thread); a cold or large catch-up now warms in a background thread and the call returns immediately with an `indexing: true` flag instead.

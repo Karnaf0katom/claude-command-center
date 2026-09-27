@@ -115,6 +115,7 @@ def mock_graph_env(tmp_path, monkeypatch):
             pass
         ship_graph._tls.conn = None
     ship_graph._last_sync_ts = 0.0
+    ship_graph._bg_sync_running = False
 
     return {
         "repo_dir": repo_dir,
@@ -175,6 +176,47 @@ def test_search_sessions_contract(mock_graph_env):
 
     empty_res = ship_graph.search_sessions("", limit=10)
     assert empty_res == []
+
+
+def test_search_sessions_cold_start_offloads_to_background(mock_graph_env, monkeypatch):
+    """MEMO-FIX-12: a big transcript catch-up (cold start) must not block
+    search_sessions() for the whole re-parse -- it hands off to a background
+    thread and the call returns immediately with is_indexing() True."""
+    # _BG_SYNC_THRESHOLD is read from its env var once at import time, so a
+    # monkeypatched env var wouldn't take effect here -- set the module
+    # attribute directly instead.
+    monkeypatch.setattr(ship_graph, "_BG_SYNC_THRESHOLD", 2)
+
+    projects_dir = Path(os.environ["CCC_PROJECTS_ROOT"])
+    repo_dir = projects_dir / "another-repo"
+    for i in range(5):
+        sid = f"bulk-session-{i}"
+        lines = [{
+            "type": "user",
+            "cwd": "/tmp/another-repo",
+            "timestamp": "2026-09-21T10:00:00Z",
+            "message": {"role": "user", "content": "bulk transcript for cold-start test"},
+        }]
+        (repo_dir / f"{sid}.jsonl").parent.mkdir(parents=True, exist_ok=True)
+        (repo_dir / f"{sid}.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8"
+        )
+
+    assert ship_graph.is_indexing() is False
+    t0 = time.time()
+    res = ship_graph.search_sessions("biometric webauthn login", limit=10)
+    elapsed = time.time() - t0
+    assert elapsed < 2.0, f"cold-start search_sessions() blocked for {elapsed:.2f}s instead of offloading"
+    assert isinstance(res, list)
+    assert ship_graph.is_indexing() is True
+
+    deadline = time.time() + 15.0
+    while ship_graph.is_indexing() and time.time() < deadline:
+        time.sleep(0.05)
+    assert ship_graph.is_indexing() is False
+
+    res2 = ship_graph.search_sessions("biometric webauthn login", limit=10)
+    assert any(r["session_id"] == "session-001" for r in res2)
 
 
 @pytest.fixture

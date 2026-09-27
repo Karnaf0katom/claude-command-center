@@ -79,7 +79,14 @@ def _sdoc_rows(sids: list[str]) -> dict[str, dict]:
 
 def recall(query: str, limit: int = 20) -> dict:
     """GET /api/memory/recall — ranked sessions for `query`, each enriched
-    with title/repo/date/snippet from already-synced index state."""
+    with title/repo/date/snippet from already-synced index state.
+
+    Neither search_sessions() nor its underlying index syncs block this call
+    for more than a small budget: a cold index warms/catches up on a
+    background thread (see session_fts.warm_start / ship_graph.warm_start),
+    and a request that lands mid-warm just gets whatever is indexed so far
+    plus `indexing: true` rather than waiting tens of seconds.
+    """
     hits = _sg.search_sessions(query, limit=limit)
     sids = [h["session_id"] for h in hits if h.get("session_id")]
     session_meta = _session_meta_rows(_sg._get_connection(), sids) if sids else {}
@@ -95,7 +102,8 @@ def recall(query: str, limit: int = 20) -> dict:
             "date": sm.get("date", ""),
             "snippet": sd.get("snippet", ""),
         })
-    return {"query": query, "results": results}
+    indexing = _sfts.is_indexing() or _sg.is_indexing()
+    return {"query": query, "results": results, "indexing": indexing}
 
 
 def shipped(topic: str) -> dict:

@@ -26,6 +26,12 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")  # disable cutoff for tests
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    # These tests exercise FTS mechanics, not the optional embeddings channel;
+    # keep them hermetic and fast regardless of whether the dev box happens to
+    # have a local Ollama daemon running. See test_session_fts_embeddings.py
+    # for the embeddings/RRF-fusion behavior, mocked so it never hits a real
+    # network service.
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
 
     # Reset thread-local connection and throttle timestamp
     if hasattr(session_fts._tls, "conn"):
@@ -33,6 +39,11 @@ def fts_env(tmp_path, monkeypatch):
             session_fts._tls.conn.close()
         session_fts._tls.conn = None
     session_fts._last_sync_ts = 0.0
+    session_fts._ollama_state["ts"] = 0.0
+    session_fts._ollama_state["ok"] = False
+    session_fts._vec_cache["sids"] = []
+    session_fts._vec_cache["vecs"] = []
+    session_fts._bg_sync_running = False
 
     return {
         "db": db_path,
@@ -204,3 +215,37 @@ def test_search_sessions_incremental_update_and_deletion(fts_env):
     f.unlink()
     res3 = session_fts.search_sessions("giraffeneck", force_refresh=True)
     assert len(res3) == 0
+
+
+def test_search_sessions_cold_start_offloads_to_background(fts_env, monkeypatch):
+    """MEMO-FIX-12: a catch-up too big to parse inline (cold start, or a big
+    batch of new/changed transcripts) must not block search_sessions() for
+    the whole parse -- it hands off to a background thread and answers
+    immediately with is_indexing() True and whatever is already indexed."""
+    # _BG_SYNC_THRESHOLD is read from its env var once at import time, so a
+    # monkeypatched env var wouldn't take effect here -- set the module
+    # attribute directly instead.
+    monkeypatch.setattr(session_fts, "_BG_SYNC_THRESHOLD", 3)
+
+    for i in range(6):
+        sid = f"aaaaaaaa-bbbb-cccc-dddd-{i:012d}"
+        f = fts_env["projects"] / "repo" / f"{sid}.jsonl"
+        _write_claude_jsonl(f, sid, [
+            {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": "warp core diagnostics"}},
+        ])
+
+    assert session_fts.is_indexing() is False
+    t0 = time.time()
+    results = session_fts.search_sessions("warp core diagnostics")
+    elapsed = time.time() - t0
+    assert elapsed < 2.0, f"cold-start search_sessions() blocked for {elapsed:.2f}s instead of offloading"
+    assert results == []  # nothing indexed yet -- background sync just started
+    assert session_fts.is_indexing() is True
+
+    deadline = time.time() + 10.0
+    while session_fts.is_indexing() and time.time() < deadline:
+        time.sleep(0.05)
+    assert session_fts.is_indexing() is False
+
+    results2 = session_fts.search_sessions("warp core diagnostics")
+    assert len(results2) == 6

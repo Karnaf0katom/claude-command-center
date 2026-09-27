@@ -471,13 +471,18 @@ def cmd_recall(args):
         return 0
     results = payload.get("results") or []
     if not results:
-        print(f"(no sessions found for {text!r})")
+        if payload.get("indexing"):
+            print(f"(indexing: true — no sessions found yet for {text!r}, still warming up)")
+        else:
+            print(f"(no sessions found for {text!r})")
         return 0
     for r in results:
         meta = " | ".join(x for x in (r.get("title"), r.get("repo"), r.get("date")) if x)
         print(f"{r.get('session_id') or '?':<38} {meta}")
         if r.get("snippet"):
             print(f"  {r['snippet']}")
+    if payload.get("indexing"):
+        print("(indexing: true — still warming up, results may be incomplete)")
     return 0
 
 
