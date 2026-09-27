@@ -121,6 +121,11 @@
     // cover that path too.
     document.addEventListener('freeze', _perfMarkHidden);
     document.addEventListener('resume', _perfMarkVisible);
+    // A page that loads already hidden (a background window restored at
+    // launch) gets no visibilitychange until it is shown, so without this
+    // seed its throttled hidden stretch counted as load time (CCC-1201: an
+    // hour-hidden archive_load measured 13s "warm").
+    if (document.hidden) _perfMarkHidden();
   } catch (_) {}
   // Suspension gaps no lifecycle event covers: an occluded window (another
   // Space, display asleep), a frozen renderer, or system sleep can stop all

@@ -16,7 +16,7 @@ const app = fs.readFileSync('static/app.js', 'utf8');
 // event-driven tracking misses it (143s "cold" archive_load). A heartbeat
 // beat now flags much-larger-than-scheduled gaps as inactive segments.
 
-function loadPerf() {
+function loadPerf(opts) {
   const start = app.indexOf('  const _perfHiddenSegs = [];');
   assert.ok(start >= 0, 'hidden-time accounting found');
   const end = app.indexOf('\n  // Single source of truth', start);
@@ -25,7 +25,7 @@ function loadPerf() {
   let now = 0;
   const handlers = {};
   const document = {
-    hidden: false,
+    hidden: !!(opts && opts.startHidden),
     addEventListener: (ev, fn) => { handlers[ev] = fn; },
   };
   const performance = { now: () => now };
@@ -138,4 +138,11 @@ test('both metrics report active ms plus wall_ms/hidden_ms detail', () => {
     assert.match(body, /wall_ms: Math\.round\(_perfWall\)/);
     assert.match(body, /hidden_ms: Math\.round\(_perfWall - _perfActive\)/);
   }
+});
+
+test('a page that loads hidden subtracts time until it is first shown', () => {
+  // CCC-1201: no visibilitychange fires for the initial hidden state.
+  const p = loadPerf({ startHidden: true });
+  p.setNow(3600000); p.show();         // shown an hour later
+  assert.equal(p.active(0, 3601000), 1000);
 });
