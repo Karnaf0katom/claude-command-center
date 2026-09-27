@@ -4883,6 +4883,53 @@ def _live_claude_spawn_for_recovery(sid):
     return spawn
 
 
+_ORPHAN_ADOPT_RETRY_S = 30.0
+_orphan_adopt_last: dict = {}
+
+
+def _adopt_orphaned_spawn(sid, now=None):
+    """Re-adopt a live CCC-spawned Claude child this process lost track of.
+
+    A dashboard or worker restart wipes the in-memory spawn list, but the
+    child keeps reading its stdin FIFO and is still in the on-disk spawn
+    registry. The engine owner (the worker when engines are routed, else
+    this process) reattaches it from that registry, which verifies the pid
+    is still a Claude process and reopens the FIFO writer. Never writes to a
+    process that is not in CCC's own registry. Throttled per session, so a
+    genuinely dead channel still falls through to hold + recovery.
+
+    Returns True when the session now has a reachable channel; the caller
+    re-evaluates on the next tick so the usual busy checks apply to it.
+    """
+    now = time.time() if now is None else now
+    if now - _orphan_adopt_last.get(sid, 0.0) < _ORPHAN_ADOPT_RETRY_S:
+        return False
+    _orphan_adopt_last[sid] = now
+    try:
+        if _core._control_plane_routes_engines():
+            adopted = _core._control_plane_request(
+                "engine.adopt", {}, engine_timeout=True,
+            )
+            if not (isinstance(adopted, dict) and adopted.get("ok")):
+                return False
+            reachable = bool(_worker_owned_claude_input_state(sid).get("owned"))
+        else:
+            _core._reattach_spawned_orphans(
+                skip_engines=("kimi", "grok"),
+                only_engines=("claude", "codex"),
+            )
+            reachable = _core._find_live_spawn_entry_for_session(sid) is not None
+    except Exception:
+        return False
+    if reachable:
+        _core._log_activity(
+            "inject", "ADOPT",
+            f"session={sid} — re-adopted a live CCC-spawned child after its "
+            "spawn handle was lost (restart); delivering through its FIFO",
+        )
+    return reachable
+
+
 def _inject_recovery_state_path():
     return str(_core.COMMAND_CENTER_STATE_DIR / "inject-recovery.json")
 
@@ -5533,6 +5580,13 @@ def _start_resume_queue_watcher() -> None:
                             # not foreign: let the hold/recovery path retire
                             # and resume it instead of parking forever.
                             if _live_claude_spawn_for_recovery(sid) is not None:
+                                # Usually a restart dropped the in-memory
+                                # handle while the child keeps reading its
+                                # FIFO. Re-adopt it first; recovery (kill +
+                                # resume) is only for a channel truly gone.
+                                if _adopt_orphaned_spawn(sid):
+                                    _core._clear_foreign_writer_hold(sid)
+                                    continue
                                 _core._terminal_queue_hold_or_expire(sid, "orphaned_spawn")
                                 continue
                             if _core._note_foreign_writer_hold(sid, status.get("pid")):

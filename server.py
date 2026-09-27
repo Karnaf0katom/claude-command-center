@@ -634,8 +634,15 @@ PRETOOLUSE_HOOK_TIMEOUT = 1800
 
 
 def _question_relay_env():
-    """Child env that opts a spawned session into AskUserQuestion relay."""
-    return dict(os.environ, **{QUESTION_RELAY_ENV: "1"})
+    """Child env that opts a spawned session into AskUserQuestion relay.
+
+    Drops CCC_WORKER_PROCESS: the worker marks itself with it, and a spawned
+    session that inherits it passes it on to anything it launches -- a
+    dashboard restarted from inside that session then believed it was the
+    worker and stopped routing engines to the real one."""
+    env = dict(os.environ, **{QUESTION_RELAY_ENV: "1"})
+    env.pop("CCC_WORKER_PROCESS", None)
+    return env
 
 
 def _read_question_request(session_id):
@@ -38937,9 +38944,13 @@ def main():
     worker_capabilities = set(
         ((worker_health.get("worker") or {}).get("capabilities") or [])
     )
+    # Only skip our own reattach when we really route engines to the worker.
+    # A dashboard that runs engines in-process (routing off) owns the
+    # children it spawned; skipping them left them orphaned after a restart.
     worker_owns_engines = (
         worker_health.get("ok")
         and "engine-execution-v1" in worker_capabilities
+        and _control_plane_routes_engines()
     )
     # Seed /api/health's worker_compat cache from the RPC we already made
     # above (no extra socket round-trip) so the pill has a real value from
@@ -39302,6 +39313,13 @@ def _chuck_imessage_poller() -> None:
 
 
 if __name__ == "__main__":
+    # Running server.py as a script is always the dashboard, never the
+    # worker (the worker imports this module). CCC_WORKER_PROCESS leaks in
+    # when the dashboard is (re)started from inside a session the worker
+    # spawned; left set, the dashboard stops routing engines to the worker,
+    # runs them in-process, and loses every child it spawned on the next
+    # restart (messages held as orphaned_spawn, then kill + resume).
+    os.environ.pop("CCC_WORKER_PROCESS", None)
     if len(sys.argv) >= 2 and sys.argv[1] == "--archive-refresh-worker":
         if len(sys.argv) != 4:
             print(
