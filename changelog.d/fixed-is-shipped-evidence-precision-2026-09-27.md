@@ -1,0 +1,1 @@
+- Improved is_shipped evidence precision with repo-named preference, multi-term matching requirements, and calibrated confidence scoring.

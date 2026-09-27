@@ -174,3 +174,118 @@ def test_search_sessions_contract(mock_graph_env):
 
     empty_res = ship_graph.search_sessions("", limit=10)
     assert empty_res == []
+
+
+@pytest.fixture
+def mock_multi_repo_env(tmp_path, monkeypatch):
+    """Sets up an environment with multiple repositories for testing repo-named and keyword cases."""
+    db_path = tmp_path / "multi_ship_graph.sqlite"
+    wt_db_path = tmp_path / "multi_queues.db"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_ccc = tmp_path / "claude-command-center"
+    repo_bym = tmp_path / "BYM"
+
+    projects_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+    repo_ccc.mkdir(parents=True)
+    repo_bym.mkdir(parents=True)
+
+    for r in (repo_ccc, repo_bym):
+        subprocess.run(["git", "init", "-b", "main"], cwd=r, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=r, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=r, check=True)
+
+    (repo_ccc / "f.txt").write_text("1", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
+    subprocess.run(["git", "commit", "-m", "chore: remove Hunch permanently and block its return"], cwd=repo_ccc, check=True)
+    sha_ccc_hunch = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo_bym / "f.txt").write_text("2", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_bym, check=True)
+    subprocess.run(["git", "commit", "-m", "chore: remove Hunch permanently in bym"], cwd=repo_bym, check=True)
+    sha_bym_hunch = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_bym, check=True, capture_output=True, text=True).stdout.strip()
+
+    (repo_bym / "f2.txt").write_text("3", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_bym, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(booking): add partner controls to booking flows"], cwd=repo_bym, check=True)
+    sha_bym_flow = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_bym, check=True, capture_output=True, text=True).stdout.strip()
+
+    with sqlite3.connect(wt_db_path) as wt_conn:
+        wt_conn.execute("""
+            CREATE TABLE items (
+                ref TEXT PRIMARY KEY,
+                project TEXT,
+                number INTEGER,
+                status TEXT,
+                updated_at TEXT,
+                item_json TEXT
+            )
+        """)
+        wt_conn.commit()
+
+    repos_str = f"{repo_ccc}{os.pathsep}{repo_bym}"
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
+    monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", repos_str)
+
+    if hasattr(ship_graph._tls, "conn") and ship_graph._tls.conn:
+        try:
+            ship_graph._tls.conn.close()
+        except Exception:
+            pass
+        ship_graph._tls.conn = None
+    ship_graph._last_sync_ts = 0.0
+
+    return {
+        "repo_ccc": repo_ccc,
+        "repo_bym": repo_bym,
+        "sha_ccc_hunch": sha_ccc_hunch,
+        "sha_bym_hunch": sha_bym_hunch,
+        "sha_bym_flow": sha_bym_flow,
+    }
+
+
+def test_is_shipped_repo_named_preference(mock_multi_repo_env):
+    """Repo named in question restricts/prefers evidence to that repository."""
+    env = mock_multi_repo_env
+
+    # 1. 'removed Hunch from CCC' should pick CCC commit, not BYM commit
+    res_ccc = ship_graph.is_shipped("Did we remove Hunch from CCC?")
+    assert res_ccc["shipped"] is True
+    assert res_ccc["confidence"] >= 0.90
+    assert len(res_ccc["evidence"]) > 0
+    assert res_ccc["evidence"][0]["repo"] == "claude-command-center"
+    assert res_ccc["evidence"][0]["commit"] == env["sha_ccc_hunch"]
+
+    # 2. 'Did BYM ship booking flows?' matches BYM
+    res_bym = ship_graph.is_shipped("Did BYM ship booking flows?")
+    assert res_bym["shipped"] is True
+    assert res_bym["confidence"] >= 0.90
+    assert len(res_bym["evidence"]) > 0
+    assert res_bym["evidence"][0]["repo"] == "BYM"
+    assert res_bym["evidence"][0]["commit"] == env["sha_bym_flow"]
+
+    # 3. 'Did CCC ship booking flows?' should be False since it was only in BYM
+    res_ccc_flow = ship_graph.is_shipped("Did CCC ship booking flows?")
+    assert res_ccc_flow["shipped"] is False
+    assert res_ccc_flow["evidence"] == []
+
+
+def test_is_shipped_single_keyword_rejected(mock_multi_repo_env):
+    """A single shared keyword is not enough to call something shipped."""
+    # 'flow' alone matching 'booking flows' must be rejected
+    res = ship_graph.is_shipped("Did we ship flows?")
+    assert res["shipped"] is False
+    assert res["confidence"] < 0.90
+    assert res["evidence"] == []
+
+    # 'partner' alone must be rejected
+    res2 = ship_graph.is_shipped("Did we ship partner?")
+    assert res2["shipped"] is False
+    assert res2["confidence"] < 0.90
+    assert res2["evidence"] == []
+

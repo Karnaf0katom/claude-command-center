@@ -77,7 +77,7 @@ between both but by can could did do does doing done down during each few for fr
 having he her here hers him his how i if in into is it its itself just let lets me more most my myself no
 nor not now of off on once only or other our ours out over own same she should so some such than that the
 their them then there these they this those through to too under until up very was we were what when where
-which while who whom why will with would you your yours session sessions chat conversation thread find
+which while who whom why will with would you your yours find
 where remember recall worked working work done did do we i me my the that which built build already
 have has is it there any way something thing things one ones ship shipped shipping feature task
 ticket pr pull request commit commits repo repository support implemented implement
@@ -297,6 +297,60 @@ def discover_repo_roots() -> dict[str, str]:
                 pass
 
     return roots
+
+
+KNOWN_REPO_ALIASES: dict[str, list[str]] = {
+    "claude-command-center": [
+        r"\bccc\b",
+        r"\bclaude[- ]command[- ]center\b",
+        r"\bcommand[- ]center\b",
+        r"\bclaude command center\b",
+        r"\bccc-\d+\b",
+    ],
+    "BYM": [
+        r"\bbym\b",
+        r"\bbook[- ]?your[- ]?mat\b",
+        r"\bbym-\d+\b",
+        r"\bbecky-\d+\b",
+        r"\bbymops-\d+\b",
+    ],
+    "watchtower": [
+        r"\bwatch[- ]?tower\b",
+        r"\bwt\b",
+        r"\bwt-\d+\b",
+        r"\bwatchtower-\d+\b",
+    ],
+}
+
+
+def detect_named_repo(query: str, known_roots: dict[str, str] | None = None) -> tuple[str | None, set[str]]:
+    """Detect if a question names a specific repository or alias."""
+    q_lower = query.lower()
+    for repo, patterns in KNOWN_REPO_ALIASES.items():
+        for pat in patterns:
+            m = re.search(pat, q_lower)
+            if m:
+                words = set(re.findall(r"[a-z0-9]+", m.group(0)))
+                return repo, words
+
+    if known_roots:
+        for r_name in known_roots:
+            if r_name in KNOWN_REPO_ALIASES:
+                continue
+            if len(r_name) <= 2 or r_name.startswith((".", "_")):
+                continue
+            clean = re.sub(r"[-_]", "[-_ ]", r_name.lower())
+            pat = r"\b" + clean + r"\b"
+            m = re.search(pat, q_lower)
+            if m:
+                words = set(re.findall(r"[a-z0-9]+", m.group(0)))
+                return r_name, words
+            m_repo = re.search(r"\b" + re.escape(r_name.lower()) + r"\s+repo\b", q_lower)
+            if m_repo:
+                words = set(re.findall(r"[a-z0-9]+", m_repo.group(0)))
+                return r_name, words
+
+    return None, set()
 
 
 def _get_repo_head_fast(path_str: str) -> str:
@@ -978,22 +1032,88 @@ def is_shipped(topic: str) -> dict:
     conn = _get_connection()
     _sync_all(conn, force=False)
 
-    terms = extract_terms(t)
-    if not terms:
+    roots = discover_repo_roots()
+    detected_repo, repo_words = detect_named_repo(t, roots)
+
+    all_terms = extract_terms(t)
+    if not all_terms:
         return {"shipped": False, "confidence": 0.0, "evidence": [], "tickets": []}
 
-    match_str = fts_query(terms)
+    content_terms = [w for w in all_terms if w not in repo_words]
+    if not content_terms:
+        content_terms = all_terms
+
+    match_str = fts_query(content_terms)
     if not match_str:
         return {"shipped": False, "confidence": 0.0, "evidence": [], "tickets": []}
 
-    stemmed_terms = {_stem(w) for w in terms}
-
-    query_asks_docs = any(w in terms for w in ("doc", "docs", "document", "documentation", "spec", "specs", "readme", "runbook"))
+    stemmed_content_terms = {_stem(w) for w in content_terms}
+    query_asks_docs = any(w in content_terms for w in ("doc", "docs", "document", "documentation", "spec", "specs", "readme", "runbook"))
 
     # 1. Search WatchTower tickets
     candidate_tickets: list[dict] = []
     open_tickets: list[dict] = []
     closed_tickets: list[dict] = []
+    seen_ticket_refs = set()
+
+    def process_ticket(ref, proj, status, commit_sha, title, text, rank):
+        if ref in seen_ticket_refs:
+            return
+        seen_ticket_refs.add(ref)
+        if '/Users/' in (title or '') or '.png' in (title or ''):
+            return
+        title_tokens = re.findall(r"[a-z0-9]+", (title or "").lower())
+        title_stems = {_stem(w) for w in title_tokens if w not in STOPWORDS}
+        text_tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+        text_stems = {_stem(w) for w in text_tokens if w not in STOPWORDS}
+
+        # Check compound pairs in title and text
+        for i in range(len(content_terms) - 1):
+            pair = content_terms[i].lower() + content_terms[i+1].lower()
+            pair_stem = _stem(pair)
+            if pair in title_tokens or pair_stem in title_stems:
+                title_stems.add(_stem(content_terms[i]))
+                title_stems.add(_stem(content_terms[i+1]))
+            if pair in text_tokens or pair_stem in text_stems:
+                text_stems.add(_stem(content_terms[i]))
+                text_stems.add(_stem(content_terms[i+1]))
+
+        # Check synonyms in title and text
+        for orig_term, syn_list in SYNONYMS.items():
+            orig_stem = _stem(orig_term)
+            if orig_stem in stemmed_content_terms:
+                for syn in syn_list:
+                    syn_stem = _stem(syn)
+                    if syn_stem in title_stems:
+                        title_stems.add(orig_stem)
+                    if syn_stem in text_stems:
+                        text_stems.add(orig_stem)
+
+        m_title = stemmed_content_terms & title_stems
+        title_ratio = len(m_title) / len(stemmed_content_terms) if stemmed_content_terms else 0
+        m_text = stemmed_content_terms & text_stems
+        text_ratio = len(m_text) / len(stemmed_content_terms) if stemmed_content_terms else 0
+
+        title_spaced = " " + " ".join(title_tokens) + " "
+        has_phrase_title = any(f" {content_terms[i]} {content_terms[i+1]} " in title_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
+
+        is_relevant = (
+            title_ratio >= 0.40
+            or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_content_terms) <= 4))
+            or (text_ratio >= 0.60 and len(m_title) >= 1)
+        )
+
+        if is_relevant:
+            t_info = {
+                "ref": ref, "status": status, "commit_sha": commit_sha or "",
+                "title": title, "title_ratio": title_ratio,
+                "m_title": m_title, "has_phrase_title": has_phrase_title,
+            }
+            candidate_tickets.append(t_info)
+            if status in ("open", "in_progress", "blocked", "todo"):
+                open_tickets.append(t_info)
+            elif status == "closed" and commit_sha:
+                closed_tickets.append(t_info)
 
     try:
         cur_t = conn.execute(
@@ -1004,160 +1124,160 @@ def is_shipped(topic: str) -> dict:
                ORDER BY rank LIMIT 150""",
             (match_str,),
         )
-        for ref, proj, status, commit_sha, title, text, rank in cur_t.fetchall():
-            if '/Users/' in (title or '') or '.png' in (title or ''):
+        for row in cur_t.fetchall():
+            process_ticket(*row)
+
+        ticket_tokens = re.findall(r"\b([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,10})*)\b", t)
+        for tok in ticket_tokens:
+            if TICKET_STOP.match(tok):
                 continue
-            title_tokens = re.findall(r"[a-z0-9]+", (title or "").lower())
-            title_stems = {_stem(w) for w in title_tokens if w not in STOPWORDS}
-            text_tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
-            text_stems = {_stem(w) for w in text_tokens if w not in STOPWORDS}
-
-            # Check compound pairs in title and text
-            for i in range(len(terms) - 1):
-                pair = terms[i].lower() + terms[i+1].lower()
-                pair_stem = _stem(pair)
-                if pair in title_tokens or pair_stem in title_stems:
-                    title_stems.add(_stem(terms[i]))
-                    title_stems.add(_stem(terms[i+1]))
-                if pair in text_tokens or pair_stem in text_stems:
-                    text_stems.add(_stem(terms[i]))
-                    text_stems.add(_stem(terms[i+1]))
-
-            # Check synonyms in title and text
-            for orig_term, syn_list in SYNONYMS.items():
-                orig_stem = _stem(orig_term)
-                if orig_stem in stemmed_terms:
-                    for syn in syn_list:
-                        syn_stem = _stem(syn)
-                        if syn_stem in title_stems:
-                            title_stems.add(orig_stem)
-                        if syn_stem in text_stems:
-                            text_stems.add(orig_stem)
-
-            m_title = stemmed_terms & title_stems
-            title_ratio = len(m_title) / len(stemmed_terms) if stemmed_terms else 0
-            m_text = stemmed_terms & text_stems
-            text_ratio = len(m_text) / len(stemmed_terms) if stemmed_terms else 0
-
-            title_spaced = " " + " ".join(title_tokens) + " "
-            has_phrase_title = any(f" {terms[i]} {terms[i+1]} " in title_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
-
-            is_relevant = (
-                title_ratio >= 0.40
-                or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_terms) <= 4))
-                or (text_ratio >= 0.60 and len(m_title) >= 1)
-                or (len(stemmed_terms) == 1 and len(m_title) >= 1)
+            cur_direct = conn.execute(
+                """SELECT ref, project, status, commit_sha, title, text, 0.0 as rank
+                   FROM tickets
+                   WHERE project = ? OR ref = ? LIMIT 50""",
+                (tok, tok),
             )
-
-            if is_relevant:
-                t_info = {
-                    "ref": ref, "status": status, "commit_sha": commit_sha or "",
-                    "title": title, "title_ratio": title_ratio,
-                    "m_title": m_title, "has_phrase_title": has_phrase_title,
-                }
-                candidate_tickets.append(t_info)
-                if status in ("open", "in_progress", "blocked", "todo"):
-                    open_tickets.append(t_info)
-                elif status == "closed" and commit_sha:
-                    closed_tickets.append(t_info)
+            for row in cur_direct.fetchall():
+                process_ticket(*row)
     except sqlite3.OperationalError:
         pass
 
     # 2. Search commits via FTS5
     candidate_commits: list[dict] = []
-    try:
-        cur_c = conn.execute(
-            """SELECT commit_id, repo, hash, short_hash, subject, body, files,
-                      bm25(commits_fts, 0, 0, 0, 0, 8.0, 2.0, 0.5) as rank
-               FROM commits_fts
-               WHERE commits_fts MATCH ?
-               ORDER BY rank LIMIT 80""",
-            (match_str,),
+    seen_commits = set()
+
+    def process_commit(cid, repo, h, sh, subj, body, files, rank):
+        if h in seen_commits:
+            return
+        seen_commits.add(h)
+        subj_lower = (subj or "").lower()
+        body_lower = (body or "").lower()
+
+        if subj_lower.startswith("merge "):
+            return
+
+        is_doc_commit = (
+            subj_lower.startswith("docs:")
+            or subj_lower.startswith("docs(")
+            or subj_lower.startswith("doc:")
+            or "document " in subj_lower
         )
-        for cid, repo, h, sh, subj, body, files, rank in cur_c.fetchall():
-            subj_lower = (subj or "").lower()
-            body_lower = (body or "").lower()
+        if is_doc_commit and not query_asks_docs:
+            return
 
-            if subj_lower.startswith("merge "):
-                continue
+        subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
+        subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS}
+        body_tokens = re.findall(r"[a-z0-9]+", body_lower)
+        body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
 
-            is_doc_commit = (
-                subj_lower.startswith("docs:")
-                or subj_lower.startswith("docs(")
-                or subj_lower.startswith("doc:")
-                or "document " in subj_lower
+        # Check compound pairs
+        for i in range(len(content_terms) - 1):
+            pair = content_terms[i].lower() + content_terms[i+1].lower()
+            pair_stem = _stem(pair)
+            if pair in subj_tokens or pair_stem in subj_stems:
+                subj_stems.add(_stem(content_terms[i]))
+                subj_stems.add(_stem(content_terms[i+1]))
+            if pair in body_tokens or pair_stem in body_stems:
+                body_stems.add(_stem(content_terms[i]))
+                body_stems.add(_stem(content_terms[i+1]))
+
+        # Check synonyms
+        for orig_term, syn_list in SYNONYMS.items():
+            orig_stem = _stem(orig_term)
+            if orig_stem in stemmed_content_terms:
+                for syn in syn_list:
+                    syn_stem = _stem(syn)
+                    if syn_stem in subj_stems:
+                        subj_stems.add(orig_stem)
+                    if syn_stem in body_stems:
+                        body_stems.add(orig_stem)
+
+        matched_subj = stemmed_content_terms & subj_stems
+        matched_all = stemmed_content_terms & (subj_stems | body_stems)
+
+        subj_ratio = len(matched_subj) / len(stemmed_content_terms) if stemmed_content_terms else 0
+        all_ratio = len(matched_all) / len(stemmed_content_terms) if stemmed_content_terms else 0
+
+        clean_subj = re.sub(r"^(?:feat|fix|chore|docs|refactor|test|ci|perf|build)(?:\([^)]*\))?:\s*", "", subj_lower)
+        clean_subj_tokens = re.findall(r"[a-z0-9]+", clean_subj)
+        clean_subj_stemmed_spaced = " " + " ".join([_stem(w) for w in clean_subj_tokens]) + " "
+        body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
+
+        has_phrase_subj = any(f" {_stem(content_terms[i])} {_stem(content_terms[i+1])} " in clean_subj_stemmed_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
+        has_phrase_body = any(f" {_stem(content_terms[i])} {_stem(content_terms[i+1])} " in body_stemmed_spaced for i in range(len(content_terms) - 1)) if len(content_terms) >= 2 else False
+
+        candidate_commits.append({
+            "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
+            "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
+            "n_matched_subj": len(matched_subj),
+            "n_matched_all": len(matched_all),
+            "has_phrase": has_phrase_subj or has_phrase_body,
+            "has_phrase_subj": has_phrase_subj,
+            "has_phrase_body": has_phrase_body,
+            "rank": rank,
+        })
+
+    try:
+        if detected_repo:
+            cur_c = conn.execute(
+                """SELECT commit_id, repo, hash, short_hash, subject, body, files,
+                          bm25(commits_fts, 0, 0, 0, 0, 8.0, 2.0, 0.5) as rank
+                   FROM commits_fts
+                   WHERE commits_fts MATCH ? AND repo = ?
+                   ORDER BY rank LIMIT 80""",
+                (match_str, detected_repo),
             )
-            if is_doc_commit and not query_asks_docs:
-                continue
-
-            subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
-            subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS}
-            body_tokens = re.findall(r"[a-z0-9]+", body_lower)
-            body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
-
-            # Check compound pairs
-            for i in range(len(terms) - 1):
-                pair = terms[i].lower() + terms[i+1].lower()
-                pair_stem = _stem(pair)
-                if pair in subj_tokens or pair_stem in subj_stems:
-                    subj_stems.add(_stem(terms[i]))
-                    subj_stems.add(_stem(terms[i+1]))
-                if pair in body_tokens or pair_stem in body_stems:
-                    body_stems.add(_stem(terms[i]))
-                    body_stems.add(_stem(terms[i+1]))
-
-            # Check synonyms
-            for orig_term, syn_list in SYNONYMS.items():
-                orig_stem = _stem(orig_term)
-                if orig_stem in stemmed_terms:
-                    for syn in syn_list:
-                        syn_stem = _stem(syn)
-                        if syn_stem in subj_stems:
-                            subj_stems.add(orig_stem)
-                        if syn_stem in body_stems:
-                            body_stems.add(orig_stem)
-
-            matched_subj = stemmed_terms & subj_stems
-            matched_all = stemmed_terms & (subj_stems | body_stems)
-
-            subj_ratio = len(matched_subj) / len(stemmed_terms) if stemmed_terms else 0
-            all_ratio = len(matched_all) / len(stemmed_terms) if stemmed_terms else 0
-
-            subj_stemmed_spaced = " " + " ".join([_stem(w) for w in subj_tokens]) + " "
-            body_stemmed_spaced = " " + " ".join([_stem(w) for w in body_tokens]) + " "
-            has_phrase_subj = any(f" {_stem(terms[i])} {_stem(terms[i+1])} " in subj_stemmed_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
-            has_phrase_body = any(f" {_stem(terms[i])} {_stem(terms[i+1])} " in body_stemmed_spaced for i in range(len(terms) - 1)) if len(terms) >= 2 else False
-
-            candidate_commits.append({
-                "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
-                "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
-                "n_matched_subj": len(matched_subj),
-                "n_matched_all": len(matched_all),
-                "has_phrase": has_phrase_subj or has_phrase_body,
-                "has_phrase_subj": has_phrase_subj,
-                "has_phrase_body": has_phrase_body,
-                "rank": rank,
-            })
+        else:
+            cur_c = conn.execute(
+                """SELECT commit_id, repo, hash, short_hash, subject, body, files,
+                          bm25(commits_fts, 0, 0, 0, 0, 8.0, 2.0, 0.5) as rank
+                   FROM commits_fts
+                   WHERE commits_fts MATCH ?
+                   ORDER BY rank LIMIT 80""",
+                (match_str,),
+            )
+        for row in cur_c.fetchall():
+            process_commit(*row)
     except sqlite3.OperationalError:
         pass
 
-    n_stems = len(stemmed_terms)
-
-    # 3. Check for direct commits resolved by closed tickets
+    # Closed tickets linking directly to commits
     for ct in closed_tickets:
         t_sha = ct.get("commit_sha", "")
         t_ref = ct.get("ref", "")
         if not t_sha:
             continue
+        found_c = None
         for c in candidate_commits:
             if c["hash"].startswith(t_sha) or t_sha.startswith(c["hash"]):
-                if (ct.get("has_phrase_title") or c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or c["subj_ratio"] >= 0.50 or n_stems <= 2):
-                    c["ticket_boost"] = 15.0
-                    c["ticket_ref"] = t_ref
+                found_c = c
                 break
+        if not found_c:
+            try:
+                cur_direct_c = conn.execute(
+                    "SELECT commit_id, repo, hash, short_hash, subject, body, files, 0.0 FROM commits WHERE hash LIKE ?",
+                    (f"{t_sha}%",),
+                )
+                row_c = cur_direct_c.fetchone()
+                if row_c:
+                    if not detected_repo or row_c[1] == detected_repo:
+                        process_commit(*row_c)
+                        for c in candidate_commits:
+                            if c["hash"].startswith(t_sha) or t_sha.startswith(c["hash"]):
+                                found_c = c
+                                break
+            except Exception:
+                pass
 
-    # 4. Evaluate qualifying commits
+        if found_c:
+            if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50 or len(stemmed_content_terms) <= 2):
+                found_c["ticket_boost"] = 15.0
+                found_c["ticket_ref"] = t_ref
+
+    # 3. Evaluate qualifying commits
     qualifying: list[dict] = []
+    n_stems = len(stemmed_content_terms)
+
     for c in candidate_commits:
         ticket_boost = c.get("ticket_boost", 0.0)
         is_strong = False
@@ -1168,16 +1288,30 @@ def is_shipped(topic: str) -> dict:
         has_phrase_subj = c.get("has_phrase_subj", False)
         has_phrase_body = c.get("has_phrase_body", False)
 
-        if ticket_boost > 0 and (subj_ratio >= 0.40 or has_phrase_subj or n_m_subj >= 2):
-            is_strong = True
-        elif n_stems == 1:
-            is_strong = (n_m_subj >= 1)
+        if n_stems == 1:
+            is_strong = False
         elif n_stems == 2:
-            is_strong = (n_m_subj >= 2) or (n_m_subj >= 1 and has_phrase_subj)
-        else:
+            if n_m_subj >= 2:
+                is_strong = True
+            elif (has_phrase_subj or has_phrase_body) and n_m_subj >= 1:
+                is_strong = True
+            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
+                is_strong = True
+        elif n_stems == 3:
+            if n_m_subj >= 2 and (has_phrase_subj or subj_ratio >= 0.65):
+                is_strong = True
+            elif n_m_subj >= 3:
+                is_strong = True
+            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
+                is_strong = True
+        else:  # n_stems >= 4
             if has_phrase_subj and n_m_subj >= 3:
                 is_strong = True
-            elif subj_ratio >= 0.50:
+            elif n_m_subj >= 3 and subj_ratio >= 0.55:
+                is_strong = True
+            elif subj_ratio >= 0.60 and n_m_subj >= 2:
+                is_strong = True
+            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
             elif (has_phrase_subj or has_phrase_body) and n_m_all >= 4 and all_ratio >= 0.75:
                 is_strong = True
@@ -1202,7 +1336,7 @@ def is_shipped(topic: str) -> dict:
 
     qualifying.sort(key=lambda x: -x["final_score"])
 
-    # 5. Decision logic
+    # 4. Decision logic
     all_tickets = list(dict.fromkeys(
         [t["ref"] for t in candidate_tickets] + [c.get("ticket_ref") for c in qualifying if c.get("ticket_ref")]
     ))
@@ -1212,10 +1346,10 @@ def is_shipped(topic: str) -> dict:
         # Check if an open ticket overrides the commit
         if open_tickets:
             best_ot = max(open_tickets, key=lambda x: x["title_ratio"])
-            if best_ot["title_ratio"] > top_commit["subj_ratio"] or (
-                best_ot["title_ratio"] >= top_commit["subj_ratio"] and not top_commit.get("has_phrase_subj")
-            ) or (
-                best_ot["title_ratio"] >= 0.60 and top_commit["subj_ratio"] < 0.60 and not top_commit.get("has_phrase_subj")
+            if (
+                best_ot["title_ratio"] > top_commit["subj_ratio"]
+                or (best_ot["title_ratio"] >= top_commit["subj_ratio"] and not top_commit.get("has_phrase_subj"))
+                or (best_ot["title_ratio"] >= 0.50 and top_commit["subj_ratio"] < 0.60 and not top_commit.get("has_phrase_subj"))
             ):
                 return {
                     "shipped": False,
@@ -1233,9 +1367,25 @@ def is_shipped(topic: str) -> dict:
             }
             for c in qualifying[:5]
         ]
+
+        top_phrase = top_commit.get("has_phrase_subj", False)
+        top_n_subj = top_commit.get("n_matched_subj", 0)
+        top_subj_ratio = top_commit.get("subj_ratio", 0.0)
+        top_ticket_boost = top_commit.get("ticket_boost", 0.0)
+
+        if (top_phrase and top_n_subj >= 2) or (top_n_subj >= 3 and top_subj_ratio >= 0.60) or (n_stems == 2 and top_n_subj == 2):
+            if top_subj_ratio >= 0.70 or top_phrase or top_ticket_boost > 0:
+                conf = 0.98
+            else:
+                conf = 0.92
+        elif top_ticket_boost > 0 and top_n_subj >= 2:
+            conf = 0.92
+        else:
+            conf = 0.82
+
         return {
             "shipped": True,
-            "confidence": 0.98,
+            "confidence": conf,
             "evidence": evidence,
             "tickets": all_tickets,
         }
@@ -1245,6 +1395,20 @@ def is_shipped(topic: str) -> dict:
         return {
             "shipped": False,
             "confidence": 0.85,
+            "evidence": [],
+            "tickets": all_tickets,
+        }
+
+    has_partial_match = False
+    for c in candidate_commits:
+        if c.get("n_matched_subj", 0) >= 1 or c.get("n_matched_all", 0) >= 1:
+            has_partial_match = True
+            break
+
+    if has_partial_match:
+        return {
+            "shipped": False,
+            "confidence": 0.65,
             "evidence": [],
             "tickets": all_tickets,
         }
