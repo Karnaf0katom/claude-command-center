@@ -83,6 +83,7 @@ have has is it there any way something thing things one ones ship shipped shippi
 ticket pr pull request commit commits repo repository support implemented implement
 ever actually someone onto doesn don didn need needs try trying want wants sure make makes know knows yet
 good get still used use uses using somewhere anywhere anybody somebody anyone
+live merged merge complete completed finish finished exist exists existing currently today
 """.split())
 
 SYNONYMS = {
@@ -125,70 +126,53 @@ COMMON_PRODUCT_WORDS = frozenset({
     "mode", "modes",
 })
 
-CLAUSE_DELIMITERS = frozenset({
-    "in", "for", "on", "at", "from", "to", "under", "during", "into", "onto",
-    "off", "with", "before", "after", "between", "over", "about",
-    "so", "because", "while", "and", "or", "if", "when", "where", "but", "yet",
-    "get", "got", "does", "did", "is", "are", "was", "were", "have", "has", "had",
+CLAUSE_BREAKERS = frozenset({
+    "so", "because", "while", "but", "or", "if", "when", "where",
+    "whether", "instead", "rather",
 })
 
-COMMON_PRODUCT_AREAS = frozenset({
-    "flow", "flows", "queue", "queues", "session", "sessions", "log", "logs",
-    "server", "settings", "setting", "booking", "search", "storage",
+LOCATIVE_PREPS = frozenset({
+    "in", "on", "inside", "within", "into", "onto", "under", "for",
+    "to", "across", "at",
 })
 
-NOUN_PHRASE_DELIMS = frozenset(STOPWORDS) | frozenset(GENERIC_VERBS) | {
-    "did", "does", "do", "is", "are", "was", "were", "have", "has", "had", "will", "would", "can", "could", "should",
-    "the", "a", "an", "this", "that", "these", "those",
-    "in", "on", "at", "for", "from", "to", "with", "by", "of", "under", "over", "off", "into", "onto", "during", "before", "after", "between", "through", "about",
-    "and", "or", "but", "so", "because", "while", "if", "when", "where", "as", "than",
-    "we", "you", "it", "they", "he", "she", "someone", "anyone", "their", "our", "its",
-    "get", "got", "make", "made", "add", "fix", "ship", "show", "see", "try", "want", "need", "ever", "actually", "yet", "now",
-    "hide", "prevent", "block", "stop", "allow", "start", "remove", "drop", "put", "close", "closing",
-}
+VERBISH = GENERIC_VERBS | set(SYNONYMS) | {v for vs in SYNONYMS.values() for v in vs}
+CHUNK_DELIMS = STOPWORDS | VERBISH
 
 
-def _extract_noun_phrases(q: str) -> list[list[str]]:
-    tokens = re.findall(r"[a-zA-Z0-9]+", q.lower())
-    phrases = []
-    cur = []
-    for tok in tokens:
-        if tok in NOUN_PHRASE_DELIMS:
-            if len(cur) >= 2:
-                phrases.append([_stem(w) for w in cur])
-            cur = []
+def _question_structure(topic: str, repo_words: set[str]) -> dict:
+    """Extract structural hints from the question: locative chunks (noun runs
+    introduced by a preposition like 'in the X'), first clause only."""
+    tokens = [t for t in re.findall(r"[a-z0-9]+", topic.lower()) if len(t) >= 2 and t not in repo_words]
+    for i, tok in enumerate(tokens):
+        if tok in CLAUSE_BREAKERS:
+            tokens = tokens[:i]
+            break
+
+    chunks: list[tuple[int, list[str]]] = []
+    cur: list[str] = []
+    cur_start = 0
+    for i, tok in enumerate(tokens):
+        if tok in CHUNK_DELIMS:
+            if cur:
+                chunks.append((cur_start, cur))
+                cur = []
         else:
+            if not cur:
+                cur_start = i
             cur.append(tok)
-    if len(cur) >= 2:
-        phrases.append([_stem(w) for w in cur])
-    return phrases
+    if cur:
+        chunks.append((cur_start, cur))
 
+    locative_chunks: list[set[str]] = []
+    for start_idx, chunk_tokens in chunks:
+        j = start_idx - 1
+        if j >= 0 and tokens[j] in ("the", "a", "an", "this", "that", "our", "its", "their"):
+            j -= 1
+        if j >= 0 and tokens[j] in LOCATIVE_PREPS:
+            locative_chunks.append({_stem(tok) for tok in chunk_tokens})
 
-def _covers_noun_phrase(nps: list[list[str]], matched_stems: set[str]) -> bool:
-    if not nps:
-        return True
-    for np in nps:
-        overlap = set(np) & matched_stems
-        if len(overlap) >= min(2, len(np)):
-            return True
-    return False
-
-
-def _has_scope_conflict(scope: str, q_stems: set[str]) -> bool:
-    if not scope:
-        return False
-    scope_tokens = re.findall(r"[a-z0-9]+", scope.lower())
-    s_stems = {_stem(w) for w in scope_tokens if w not in STOPWORDS}
-    if s_stems & q_stems:
-        return False
-    scope_product_areas = s_stems & COMMON_PRODUCT_AREAS
-    query_product_areas = q_stems & COMMON_PRODUCT_AREAS
-    if scope_product_areas and query_product_areas:
-        if not (scope_product_areas & query_product_areas):
-            return True
-    return False
-
-
+    return {"locative_chunks": locative_chunks}
 
 IRREGULAR_VERBS = {
     "came": "come", "went": "go", "gone": "go", "ran": "run",
@@ -331,6 +315,8 @@ def discover_repo_roots() -> dict[str, str]:
         try:
             p = Path(p_raw).expanduser().resolve()
         except Exception:
+            return
+        if any(part.startswith(".") for part in p.parts[1:]):
             return
         if not (p / ".git").exists():
             return
@@ -594,6 +580,15 @@ def _init_db(conn: sqlite3.Connection) -> None:
             files TEXT
         );
     """)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(commits)")}
+    if "on_main" not in cols:
+        conn.execute("ALTER TABLE commits ADD COLUMN on_main INTEGER DEFAULT 0")
+
+    row_v = conn.execute("SELECT val FROM meta WHERE key = 'schema_v'").fetchone()
+    if not row_v or row_v[0] != "2":
+        conn.execute("UPDATE repos SET head_sha = ''")
+        conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('schema_v', '2')")
     conn.commit()
 
 
@@ -617,6 +612,30 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
             continue
 
         # HEAD changed or new repo: batch git log once
+        main_hashes: set[str] = set()
+        main_ref = None
+        for ref in ("origin/main", "main", "origin/master", "master"):
+            try:
+                vr = subprocess.run(
+                    ["git", "-C", repo_path, "rev-parse", "--verify", "--quiet", ref],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if vr.returncode == 0 and vr.stdout.strip():
+                    main_ref = ref
+                    break
+            except Exception:
+                continue
+        if main_ref:
+            rl_args = ["git", "-C", repo_path, "rev-list", main_ref]
+            if days > 0:
+                rl_args.append(f"--since={int(days)}.days")
+            try:
+                rl = subprocess.run(rl_args, capture_output=True, text=True, timeout=30)
+                if rl.returncode == 0:
+                    main_hashes = {x.strip() for x in rl.stdout.splitlines() if x.strip()}
+            except Exception:
+                pass
+
         branches = ["HEAD"]
         for b in ["next", "main", "master"]:
             p_ref = Path(repo_path) / ".git" / "refs" / "heads" / b
@@ -651,7 +670,7 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
             ts = float(ct) if ct else 0.0
             files_blob = " ".join(files)
 
-            commits_to_insert.append((cid, repo_name, h, sh, ts, subj, body, files_blob))
+            commits_to_insert.append((cid, repo_name, h, sh, ts, subj, body, files_blob, 1 if h in main_hashes else 0))
             fts_to_insert.append((cid, repo_name, h, sh, subj, body, files_blob))
 
             # Extract tickets mentioned in commit
@@ -665,7 +684,7 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
             conn.execute("DELETE FROM commits WHERE repo = ?", (repo_name,))
             conn.execute("DELETE FROM commits_fts WHERE repo = ?", (repo_name,))
             conn.executemany(
-                "INSERT OR REPLACE INTO commits VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO commits (commit_id, repo, hash, short_hash, ts, subject, body, files, on_main) VALUES (?,?,?,?,?,?,?,?,?)",
                 commits_to_insert,
             )
             conn.executemany(
@@ -680,6 +699,17 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
                 "INSERT OR REPLACE INTO repos VALUES (?,?,?,?)",
                 (repo_path, repo_name, current_head, time.time()),
             )
+
+    # Prune repos that disappeared from discovery (e.g. hidden-path clones)
+    root_paths = set(roots.values())
+    stale = [r for r in conn.execute("SELECT path, name FROM repos").fetchall() if r[0] not in root_paths]
+    if stale:
+        with conn:
+            for p_row, n_row in stale:
+                if n_row not in roots:
+                    conn.execute("DELETE FROM commits WHERE repo = ?", (n_row,))
+                    conn.execute("DELETE FROM commits_fts WHERE repo = ?", (n_row,))
+                conn.execute("DELETE FROM repos WHERE path = ?", (p_row,))
 
 
 def _clean_ticket_title(title: str, text: str) -> str:
@@ -1158,10 +1188,12 @@ def is_shipped(topic: str) -> dict:
     common_product_stems = {_stem(w) for w in COMMON_PRODUCT_WORDS}
     generic_verb_stems = {_stem(w) for w in GENERIC_VERBS}
     distinguishing_stems = stemmed_content_terms - common_product_stems - generic_verb_stems
-    noun_phrases = _extract_noun_phrases(t)
+    n_dist = len(distinguishing_stems)
+    locative_chunks = _question_structure(t, repo_words)["locative_chunks"]
+    locative_stems = set().union(*locative_chunks) if locative_chunks else set()
+    non_locative_dist = distinguishing_stems - locative_stems
 
     # 1. Search WatchTower tickets
-
     candidate_tickets: list[dict] = []
     open_tickets: list[dict] = []
     closed_tickets: list[dict] = []
@@ -1222,29 +1254,22 @@ def is_shipped(topic: str) -> dict:
                 if has_phrase_title:
                     break
 
-        m_title_dist = m_title & distinguishing_stems
-        if len(distinguishing_stems) > 0 and len(m_title_dist) == 0:
-            is_relevant = False
-        elif len(distinguishing_stems) >= 2 and len(m_title_dist) < 2 and not has_phrase_title:
-            is_relevant = False
-        else:
-            is_relevant = (
-                title_ratio >= 0.40
-                or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_content_terms) <= 4))
-                or (text_ratio >= 0.60 and len(m_title) >= 1)
-            )
+        is_relevant = (
+            title_ratio >= 0.40
+            or (len(m_title) >= 2 and (has_phrase_title or len(stemmed_content_terms) <= 4))
+            or (text_ratio >= 0.60 and len(m_title) >= 1)
+        )
 
         if is_relevant:
             t_info = {
                 "ref": ref, "status": status, "commit_sha": commit_sha or "",
                 "title": title, "title_ratio": title_ratio,
-                "m_title": m_title, "m_title_dist": m_title_dist, "has_phrase_title": has_phrase_title,
+                "m_title": m_title, "has_phrase_title": has_phrase_title,
             }
             candidate_tickets.append(t_info)
             if status in ("open", "in_progress", "blocked", "todo"):
                 open_tickets.append(t_info)
             elif status == "closed" and commit_sha:
-
                 closed_tickets.append(t_info)
 
     try:
@@ -1297,19 +1322,15 @@ def is_shipped(topic: str) -> dict:
         if is_doc_commit and not query_asks_docs:
             return
 
-        scope = ""
-        m_conv = re.match(r"^([a-z]+)(?:\(([^)]+)\))?:\s*", subj_lower)
-        if m_conv and m_conv.group(2):
-            scope = m_conv.group(2).strip()
-
-        scope_tokens = re.findall(r"[a-z0-9]+", scope) if scope else []
-        scope_stems = {_stem(w) for w in scope_tokens if w not in STOPWORDS}
-        scope_boost = 3.0 if (scope_stems and bool(scope_stems & stemmed_content_terms)) else 0.0
-
         subj_tokens = re.findall(r"[a-z0-9]+", subj_lower)
         subj_stems = {_stem(w) for w in subj_tokens if w not in STOPWORDS}
         body_tokens = re.findall(r"[a-z0-9]+", body_lower)
         body_stems = {_stem(w) for w in body_tokens if w not in STOPWORDS}
+
+        m_scope = re.match(r"^(?:feat|fix|chore|docs|refactor|test|ci|perf|build)(?:\(([^)]*)\))?:", subj_lower)
+        scope_stems = set()
+        if m_scope and m_scope.group(1):
+            scope_stems = {_stem(w) for w in re.findall(r"[a-z0-9]+", m_scope.group(1)) if w not in STOPWORDS}
 
         # Check compound pairs
         for i in range(len(content_terms) - 1):
@@ -1334,8 +1355,8 @@ def is_shipped(topic: str) -> dict:
                         body_stems.add(orig_stem)
 
         matched_subj = stemmed_content_terms & subj_stems
-        matched_all = stemmed_content_terms & (subj_stems | body_stems)
-        matched_distinguishing = matched_subj & distinguishing_stems
+        matched_all_stems = stemmed_content_terms & (subj_stems | body_stems)
+        matched_all = matched_all_stems
 
         subj_ratio = len(matched_subj) / len(stemmed_content_terms) if stemmed_content_terms else 0
         all_ratio = len(matched_all) / len(stemmed_content_terms) if stemmed_content_terms else 0
@@ -1362,13 +1383,15 @@ def is_shipped(topic: str) -> dict:
 
         candidate_commits.append({
             "commit_id": cid, "repo": repo, "hash": h, "short_hash": sh,
-            "subject": subj, "scope": scope, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
+            "subject": subj, "subj_ratio": subj_ratio, "all_ratio": all_ratio,
             "matched_subj": matched_subj,
-            "n_matched_subj": len(matched_subj),
-            "matched_distinguishing": matched_distinguishing,
-            "n_matched_distinguishing": len(matched_distinguishing),
+            "matched_all_stems": matched_all_stems,
+            "matched_dist_subj": matched_subj & distinguishing_stems,
+            "matched_dist_all": matched_all_stems & distinguishing_stems,
             "subj_stems": subj_stems,
-            "scope_boost": scope_boost,
+            "scope_stems": scope_stems,
+            "evidence_stems": subj_stems | scope_stems | body_stems,
+            "n_matched_subj": len(matched_subj),
             "n_matched_all": len(matched_all),
             "has_phrase": has_phrase_subj or has_phrase_body,
             "has_phrase_subj": has_phrase_subj,
@@ -1438,44 +1461,41 @@ def is_shipped(topic: str) -> dict:
     # 3. Evaluate qualifying commits
     qualifying: list[dict] = []
     n_stems = len(stemmed_content_terms)
-    n_dist = len(distinguishing_stems)
 
     for c in candidate_commits:
         ticket_boost = c.get("ticket_boost", 0.0)
-        scope_boost = c.get("scope_boost", 0.0)
+
+        matched_dist_subj = c.get("matched_dist_subj", set())
+        matched_dist_all = c.get("matched_dist_all", set())
+        evidence_stems = c.get("evidence_stems", set())
+        c["locative_in_subject"] = (not locative_chunks) or any(
+            chunk & (c["subj_stems"] | c["scope_stems"]) for chunk in locative_chunks
+        )
+
+        # (a) keyword lookalike: subject shares no distinguishing term
+        if n_dist > 0 and len(matched_dist_subj) == 0:
+            continue
+        if ticket_boost <= 0:
+            # (b) short question: every distinguishing term must appear in subject or body
+            if 1 <= n_dist <= 2 and not distinguishing_stems <= matched_dist_all:
+                continue
+            # (c) question names a place/scope the commit never mentions —
+            # unless the subject alone covers 3+ non-locative distinguishing
+            # terms (the place may be named by path or alias)
+            if locative_chunks and not any(chunk & evidence_stems for chunk in locative_chunks):
+                if not (len(non_locative_dist) >= 3 and non_locative_dist <= matched_dist_subj):
+                    continue
+
         is_strong = False
         n_m_subj = c["n_matched_subj"]
-        n_m_dist = c["n_matched_distinguishing"]
         n_m_all = c["n_matched_all"]
         subj_ratio = c["subj_ratio"]
         has_phrase_subj = c.get("has_phrase_subj", False)
-        c_stems = c.get("subj_stems", set())
-
-        # TRAP CHECK 1: Scope conflict
-        # If commit is explicitly scoped to an unrelated product area (e.g. log, server),
-        # but query specifies a different product area (e.g. queue, flow) and does not mention commit's scope,
-        # it is a lookalike from an unrelated feature.
-        if _has_scope_conflict(c.get("scope", ""), stemmed_content_terms) and ticket_boost == 0:
-            continue
-
-        # TRAP CHECK 2: Common product words penalty / Distinguishing stems requirement
-        # A match whose only substantive terms are common product words is a lookalike trap.
-        # If question has >= 2 distinguishing terms, commit must cover at least 2.
-        if n_dist > 0 and n_m_dist == 0:
-            continue
-        if n_dist >= 2 and n_m_dist < 2 and not has_phrase_subj and ticket_boost == 0:
-            continue
 
         matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
-        if matched_substantive and matched_substantive.issubset(common_product_stems) and ticket_boost == 0:
-            continue
-
 
         if n_stems <= 1 or len(matched_substantive) < 2:
-            if ticket_boost > 0 and n_m_subj >= 1:
-                is_strong = True
-            else:
-                is_strong = False
+            is_strong = False
         elif n_stems == 2:
             if n_m_subj >= 2:
                 is_strong = True
@@ -1493,9 +1513,9 @@ def is_shipped(topic: str) -> dict:
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and (n_m_subj >= 3 or subj_ratio >= 0.45 or (n_m_subj >= 2 and n_m_dist >= 2)):
+            if has_phrase_subj and n_m_subj >= 2:
                 is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.35 and n_m_dist >= 2:
+            elif n_m_subj >= 3 and subj_ratio >= 0.50:
                 is_strong = True
             elif subj_ratio >= 0.65 and n_m_subj >= 3:
                 is_strong = True
@@ -1509,19 +1529,25 @@ def is_shipped(topic: str) -> dict:
             )
             s_row = cur_s.fetchone()
             c["session_id"] = s_row[0] if s_row else ""
+            row_tom = conn.execute(
+                "SELECT ts, on_main FROM commits WHERE hash = ?", (c["hash"],)
+            ).fetchone()
+            c["ts"] = row_tom[0] if row_tom else 0.0
+            c["on_main"] = row_tom[1] if row_tom else 0
             score = (
                 ticket_boost
-                + scope_boost
                 + subj_ratio * 25.0
                 + n_m_subj * 10.0
                 + (12.0 if has_phrase_subj else 0.0)
                 + n_m_all * 3.0
+                + len(matched_dist_subj) * 6.0
+                + (4.0 if c["on_main"] else 0.0)
                 - (c["rank"] * 0.1)
             )
             c["final_score"] = score
             qualifying.append(c)
 
-    qualifying.sort(key=lambda x: -x["final_score"])
+    qualifying.sort(key=lambda x: (-x["final_score"], -x.get("on_main", 0), -x.get("ts", 0.0)))
 
     # 4. Decision logic
     all_tickets = list(dict.fromkeys(
@@ -1545,21 +1571,6 @@ def is_shipped(topic: str) -> dict:
                     "tickets": all_tickets,
                 }
 
-        top_phrase = top_commit.get("has_phrase_subj", False)
-        top_n_subj = top_commit.get("n_matched_subj", 0)
-        top_subj_ratio = top_commit.get("subj_ratio", 0.0)
-        top_ticket_boost = top_commit.get("ticket_boost", 0.0)
-        repo_matched = (detected_repo is not None and top_commit.get("repo") == detected_repo)
-
-        # Check for weak evidence: if best evidence is weak, answer shipped=false!
-        if top_commit["final_score"] < 40.0 or (top_subj_ratio < 0.60 and not top_phrase and top_ticket_boost == 0):
-            return {
-                "shipped": False,
-                "confidence": 0.65,
-                "evidence": [],
-                "tickets": all_tickets,
-            }
-
         evidence = [
             {
                 "repo": c["repo"],
@@ -1569,6 +1580,12 @@ def is_shipped(topic: str) -> dict:
             }
             for c in qualifying[:5]
         ]
+
+        top_phrase = top_commit.get("has_phrase_subj", False)
+        top_n_subj = top_commit.get("n_matched_subj", 0)
+        top_subj_ratio = top_commit.get("subj_ratio", 0.0)
+        top_ticket_boost = top_commit.get("ticket_boost", 0.0)
+        repo_matched = (detected_repo is not None and top_commit.get("repo") == detected_repo)
 
         if top_ticket_boost > 0 and top_n_subj >= 2 and (top_phrase or top_subj_ratio >= 0.60):
             conf = 0.95
@@ -1582,6 +1599,12 @@ def is_shipped(topic: str) -> dict:
             conf = 0.92
         else:
             conf = 0.85
+
+        dist_cov = len(top_commit.get("matched_dist_subj", set())) / n_dist if n_dist else 1.0
+        if dist_cov < 0.75:
+            conf = min(conf, 0.85)
+        if not top_commit.get("locative_in_subject", True):
+            conf = min(conf, 0.85)
 
         return {
             "shipped": True,
@@ -1619,4 +1642,3 @@ def is_shipped(topic: str) -> dict:
         "evidence": [],
         "tickets": all_tickets,
     }
-

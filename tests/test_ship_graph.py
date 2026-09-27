@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -177,70 +178,70 @@ def test_search_sessions_contract(mock_graph_env):
 
 
 @pytest.fixture
-def mock_multi_repo_env(tmp_path, monkeypatch):
-    """Sets up an environment with multiple repositories for testing repo-named and keyword cases."""
-    db_path = tmp_path / "multi_ship_graph.sqlite"
-    wt_db_path = tmp_path / "multi_queues.db"
+def mock_trap_env(tmp_path, monkeypatch):
+    """Synthetic two-repo trap environment: locative scopes, keyword lookalikes,
+    a hidden-dir mirror clone, and a same-subject branch/main duplicate."""
+    db_path = tmp_path / "trap_ship_graph.sqlite"
+    wt_db_path = tmp_path / "trap_queues.db"
     projects_dir = tmp_path / "projects"
     codex_dir = tmp_path / "codex"
-    repo_ccc = tmp_path / "claude-command-center"
-    repo_bym = tmp_path / "BYM"
+    repo_alpha = tmp_path / "alpha-app"
+    repo_beta = tmp_path / "beta-site"
 
     projects_dir.mkdir(parents=True)
     codex_dir.mkdir(parents=True)
-    repo_ccc.mkdir(parents=True)
-    repo_bym.mkdir(parents=True)
 
-    for r in (repo_ccc, repo_bym):
-        subprocess.run(["git", "init", "-b", "main"], cwd=r, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test User"], cwd=r, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=r, check=True)
+    def init_repo(path):
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
 
-    (repo_ccc / "f.txt").write_text("1", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "chore: remove Hunch permanently and block its return"], cwd=repo_ccc, check=True)
-    sha_ccc_hunch = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+    def commit(path, filename, content, subject, ts=None):
+        (path / filename).write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", filename], cwd=path, check=True, capture_output=True)
+        env = None
+        if ts is not None:
+            env = {**os.environ,
+                   "GIT_AUTHOR_DATE": f"@{int(ts)} +0000",
+                   "GIT_COMMITTER_DATE": f"@{int(ts)} +0000"}
+        subprocess.run(["git", "commit", "-m", subject], cwd=path, check=True,
+                       capture_output=True, env=env)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True,
+                              capture_output=True, text=True).stdout.strip()
 
-    (repo_bym / "f.txt").write_text("2", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_bym, check=True)
-    subprocess.run(["git", "commit", "-m", "chore: remove Hunch permanently in bym"], cwd=repo_bym, check=True)
-    sha_bym_hunch = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_bym, check=True, capture_output=True, text=True).stdout.strip()
+    init_repo(repo_alpha)
+    init_repo(repo_beta)
 
-    (repo_bym / "f2.txt").write_text("3", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_bym, check=True)
-    subprocess.run(["git", "commit", "-m", "feat(booking): add partner controls to booking flows"], cwd=repo_bym, check=True)
-    sha_bym_flow = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_bym, check=True, capture_output=True, text=True).stdout.strip()
+    sha_a1 = commit(repo_alpha, "a1.txt", "1",
+                    "feat(chat): add step-back button to huddle replay controls")
+    sha_a2 = commit(repo_alpha, "a2.txt", "2",
+                    "feat(canvas): huddle replay controls inside the canvas board")
+    sha_a3 = commit(repo_alpha, "a3.txt", "3",
+                    "fix(queue): resolve ticket detail lantern button when claim is unbackfilled")
+    sha_a4 = commit(repo_alpha, "a4.txt", "4",
+                    "feat(prefs): add toggle to hide the memory banner in preferences")
+    sha_a5 = commit(repo_alpha, "a5.txt", "5",
+                    "feat(chat): add emoji reaction picker to huddle replay")
 
-    (repo_ccc / "f_server.txt").write_text("server", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "refactor(server): extract group-chat sidecar to server.py"], cwd=repo_ccc, check=True)
-    sha_ccc_gc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+    sha_b1 = commit(repo_beta, "b1.txt", "1",
+                    "feat(site): add partner controls to checkout flows")
+    sha_b2 = commit(repo_beta, "b2.txt", "2",
+                    "fix(site): ignore .build-tmp so the stylesheet scanner skips build output")
 
-    (repo_ccc / "f_log.txt").write_text("metrics", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "feat(metrics): add per-event copy button"], cwd=repo_ccc, check=True)
-    sha_ccc_log = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
+    now = time.time()
+    subprocess.run(["git", "checkout", "-b", "next"], cwd=repo_beta, check=True, capture_output=True)
+    sha_b3 = commit(repo_beta, "b3.txt", "3",
+                    "fix(site): visitor SMS skips crawler visits", ts=now - 3600)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_beta, check=True, capture_output=True)
+    sha_b4 = commit(repo_beta, "b4.txt", "4",
+                    "fix(site): visitor SMS skips crawler visits", ts=now)
 
-    (repo_ccc / "f_set.txt").write_text("settings", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "fix(settings): per-event copy button reference"], cwd=repo_ccc, check=True)
-    sha_ccc_set = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
-
-
-    (repo_ccc / "f_sess.txt").write_text("sess", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_ccc, check=True)
-    subprocess.run(["git", "commit", "-m", "fix(sessions): fix button styling in session list"], cwd=repo_ccc, check=True)
-    sha_ccc_sess = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_ccc, check=True, capture_output=True, text=True).stdout.strip()
-
-    repo_idx = tmp_path / "indexing"
-    repo_idx.mkdir(parents=True)
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo_idx, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_idx, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_idx, check=True)
-    (repo_idx / "f_idx.txt").write_text("idx", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo_idx, check=True)
-    subprocess.run(["git", "commit", "-m", "fix(search): drop self-referential sessions, add exclude-session"], cwd=repo_idx, check=True)
-    sha_idx_search = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_idx, check=True, capture_output=True, text=True).stdout.strip()
+    # Hidden-dir mirror clone of beta-site: must never be indexed
+    mirror_dir = tmp_path / ".mirror"
+    mirror_dir.mkdir(parents=True)
+    subprocess.run(["git", "clone", str(repo_beta), str(mirror_dir / "beta-site")],
+                   check=True, capture_output=True)
 
     with sqlite3.connect(wt_db_path) as wt_conn:
         wt_conn.execute("""
@@ -255,7 +256,9 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
         """)
         wt_conn.commit()
 
-    repos_str = f"{repo_ccc}{os.pathsep}{repo_bym}{os.pathsep}{repo_idx}"
+    repos_str = os.pathsep.join([
+        str(repo_alpha), str(repo_beta), str(mirror_dir / "beta-site"),
+    ])
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
@@ -272,96 +275,134 @@ def mock_multi_repo_env(tmp_path, monkeypatch):
     ship_graph._last_sync_ts = 0.0
 
     return {
-        "repo_ccc": repo_ccc,
-        "repo_bym": repo_bym,
-        "repo_idx": repo_idx,
-        "sha_ccc_hunch": sha_ccc_hunch,
-        "sha_bym_hunch": sha_bym_hunch,
-        "sha_bym_flow": sha_bym_flow,
-        "sha_ccc_gc": sha_ccc_gc,
-        "sha_ccc_log": sha_ccc_log,
-        "sha_ccc_set": sha_ccc_set,
-        "sha_ccc_sess": sha_ccc_sess,
-        "sha_idx_search": sha_idx_search,
+        "repo_alpha": repo_alpha,
+        "repo_beta": repo_beta,
+        "mirror": mirror_dir / "beta-site",
+        "db_path": db_path,
+        "sha_a1": sha_a1, "sha_a2": sha_a2, "sha_a3": sha_a3, "sha_a4": sha_a4,
+        "sha_a5": sha_a5,
+        "sha_b1": sha_b1, "sha_b2": sha_b2, "sha_b3": sha_b3, "sha_b4": sha_b4,
     }
 
 
-def test_is_shipped_repo_named_preference(mock_multi_repo_env):
-    """Repo named in question restricts/prefers evidence to that repository."""
-    env = mock_multi_repo_env
+def test_locative_chunk_required(mock_trap_env):
+    """A locative scope named in the question selects the right commit and rejects wrong scopes."""
+    env = mock_trap_env
 
-    # 1. 'removed Hunch from CCC' should pick CCC commit, not BYM commit
-    res_ccc = ship_graph.is_shipped("Did we remove Hunch from CCC?")
-    assert res_ccc["shipped"] is True
-    assert res_ccc["confidence"] >= 0.90
-    assert len(res_ccc["evidence"]) > 0
-    assert res_ccc["evidence"][0]["repo"] == "claude-command-center"
-    assert res_ccc["evidence"][0]["commit"] == env["sha_ccc_hunch"]
-
-    # 2. 'Did BYM ship booking flows?' matches BYM
-    res_bym = ship_graph.is_shipped("Did BYM ship booking flows?")
-    assert res_bym["shipped"] is True
-    assert res_bym["confidence"] >= 0.90
-    assert len(res_bym["evidence"]) > 0
-    assert res_bym["evidence"][0]["repo"] == "BYM"
-    assert res_bym["evidence"][0]["commit"] == env["sha_bym_flow"]
-
-    # 3. 'Did CCC ship booking flows?' should be False since it was only in BYM
-    res_ccc_flow = ship_graph.is_shipped("Did CCC ship booking flows?")
-    assert res_ccc_flow["shipped"] is False
-    assert res_ccc_flow["evidence"] == []
-
-
-def test_is_shipped_single_keyword_rejected(mock_multi_repo_env):
-    """A single shared keyword is not enough to call something shipped."""
-    # 'flow' alone matching 'booking flows' must be rejected
-    res = ship_graph.is_shipped("Did we ship flows?")
-    assert res["shipped"] is False
-    assert res["confidence"] < 0.90
-    assert res["evidence"] == []
-
-    # 'partner' alone must be rejected
-    res2 = ship_graph.is_shipped("Did we ship partner?")
-    assert res2["shipped"] is False
-    assert res2["confidence"] < 0.90
-    assert res2["evidence"] == []
-
-
-def test_is_shipped_common_product_word_and_noun_phrase_traps(mock_multi_repo_env):
-    """Trap tests: common product words alone or partial noun phrases must not trigger shipped."""
-    # 1. 'group chat in Flow':
-    # BYM commit has 'booking flows' (only 'flow' matches).
-    # CCC commit has 'extract group-chat sidecar' (matches 'group' & 'chat', but missing 'flow').
-    # Neither should qualify as shipped for 'group chat in Flow'!
-    res_flow = ship_graph.is_shipped("Did we ship group chat in Flow?")
-    assert res_flow["shipped"] is False
-    assert res_flow["evidence"] == []
-    assert res_flow["confidence"] <= 0.65
-
-    # 2. 'bulk export button for sessions':
-    # CCC has 'fix(sessions): fix button styling in session list'
-    # Matching 'button' and 'sessions' without 'bulk export' is a keyword trap!
-    res_bulk = ship_graph.is_shipped("Did we add a bulk export button for sessions?")
-    assert res_bulk["shipped"] is False
-    assert res_bulk["evidence"] == []
-    assert res_bulk["confidence"] <= 0.65
-
-    # 3. 'MEMO-FIX session search':
-    # indexing has 'fix(search): drop self-referential sessions'
-    # Matches 'fix', 'search', 'sessions' - but MEMO-FIX project is not matched!
-    res_memo = ship_graph.is_shipped("Did we ship MEMO-FIX session search?")
-    assert res_memo["shipped"] is False
-    assert res_memo["evidence"] == []
-    assert res_memo["confidence"] <= 0.65
-
-
-def test_is_shipped_scope_preference(mock_multi_repo_env):
-    """Conventional-commit scope matching the question subject should be preferred."""
-    env = mock_multi_repo_env
-    res = ship_graph.is_shipped("Did the metrics panel get a per-event copy button?")
+    res = ship_graph.is_shipped("Did we ship huddle replay in the canvas board?")
     assert res["shipped"] is True
-    assert len(res["evidence"]) > 0
-    assert res["evidence"][0]["commit"] == env["sha_ccc_log"]
+    assert res["evidence"][0]["commit"] == env["sha_a2"]
+
+    res_side = ship_graph.is_shipped("Did we ship huddle replay in the sidebar?")
+    assert res_side["shipped"] is False
+    assert res_side["evidence"] == []
+    assert res_side["confidence"] <= 0.85
+
+
+def test_locative_escape_hatch_for_specific_subject(mock_trap_env):
+    """A subject covering 3+ non-locative distinguishing terms outweighs an
+    unmatched location — deliberate tradeoff, but never at high confidence."""
+    env = mock_trap_env
+
+    res = ship_graph.is_shipped("Did we ship the emoji reaction picker in the sidebar?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha_a5"]
+    assert res["confidence"] <= 0.85
+
+    # Only 2 non-locative distinguishing terms: the escape hatch must NOT apply
+    res_side = ship_graph.is_shipped("Did we ship huddle replay in the sidebar?")
+    assert res_side["shipped"] is False
+    assert res_side["evidence"] == []
+
+
+def test_short_question_requires_all_distinguishing_terms(mock_trap_env):
+    """Short questions require every distinguishing term in subject or body."""
+    res1 = ship_graph.is_shipped("Did we add lantern search for the queue?")
+    assert res1["shipped"] is False
+    assert res1["evidence"] == []
+    assert res1["confidence"] <= 0.85
+
+    res2 = ship_graph.is_shipped("Did we ship the dusk theme on the preferences page?")
+    assert res2["shipped"] is False
+    assert res2["evidence"] == []
+    assert res2["confidence"] <= 0.85
+
+    res3 = ship_graph.is_shipped("Did we ship the checkout flow overhaul?")
+    assert res3["shipped"] is False
+    assert res3["evidence"] == []
+    assert res3["confidence"] <= 0.85
+
+
+def test_repo_named_lookalike_in_other_repo(mock_trap_env):
+    """Naming a repo restricts evidence to it; a lookalike term elsewhere stays False."""
+    res_beta = ship_graph.is_shipped("Did beta-site ship huddle replay controls?")
+    assert res_beta["shipped"] is False
+    assert res_beta["evidence"] == []
+
+    res_alpha = ship_graph.is_shipped("Did alpha-app ship huddle replay controls?")
+    assert res_alpha["shipped"] is True
+    assert res_alpha["evidence"][0]["repo"] == "alpha-app"
+
+
+def test_hidden_root_ignored_and_stale_repo_pruned(mock_trap_env):
+    """Hidden-path roots are rejected at discovery, and stale repos are pruned on sync."""
+    env = mock_trap_env
+
+    roots = ship_graph.discover_repo_roots()
+    assert roots.get("beta-site") == str(env["repo_beta"].resolve())
+    assert all("/.mirror/" not in p for p in roots.values())
+
+    res = ship_graph.is_shipped("Did we make the stylesheet scanner skip build output?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["repo"] == "beta-site"
+    assert res["evidence"][0]["commit"] == env["sha_b2"]
+
+    db_path = env["db_path"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO repos (path, name, head_sha, indexed_at) VALUES (?, ?, ?, ?)",
+            ("/nonexistent/ghost-repo", "ghost-repo", "x", 0),
+        )
+        conn.execute(
+            "INSERT INTO commits (commit_id, repo, hash, short_hash, ts, subject, body, files) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("ghost-repo:deadbeef", "ghost-repo", "deadbeef" * 5, "deadbee",
+             0.0, "chore: phantom commit", "", ""),
+        )
+
+    ship_graph._last_sync_ts = 0.0
+    ship_graph.is_shipped("anything")
+
+    with sqlite3.connect(db_path) as conn:
+        n_commits = conn.execute(
+            "SELECT count(*) FROM commits WHERE repo = 'ghost-repo'").fetchone()[0]
+        n_repos = conn.execute(
+            "SELECT count(*) FROM repos WHERE name = 'ghost-repo'").fetchone()[0]
+    assert n_commits == 0
+    assert n_repos == 0
+
+
+def test_identical_subject_prefers_main_commit(mock_trap_env):
+    """Identical-subject duplicates prefer the commit reachable from the main ref."""
+    env = mock_trap_env
+    res = ship_graph.is_shipped("Did we make visitor SMS skip crawler visits?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha_b4"]
+
+
+def test_question_structure_helper():
+    """_question_structure extracts locative chunks from the first clause only."""
+    s = ship_graph._question_structure
+    stem = ship_graph._stem
+
+    res = s("Did we ship huddle replay in the canvas board so it works?", set())
+    assert res["locative_chunks"] == [{stem("canvas"), stem("board")}]
+
+    res_no_prep = s("Did we ship huddle replay controls?", set())
+    assert res_no_prep["locative_chunks"] == []
+
+    res_after_break = s("Did we ship huddle replay so it lands in the sidebar?", set())
+    assert res_after_break["locative_chunks"] == []
 
 
 
