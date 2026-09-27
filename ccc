@@ -23,12 +23,17 @@ command, without opening the dashboard:
     ccc send <session> "…" --steer      # interrupt the current turn with it
     ccc ask <session> "question"        # send and wait for the reply text
 
+    ccc recall "that bug with the flaky test"   # sessions that touched it
+    ccc shipped "dark mode"                     # did we already build this?
+
 <session> is a session id, a unique id prefix, or a (unique, case-
 insensitive) fragment of the session's display name from `ccc sessions`.
 
 Agents: model ids and effort ladders differ per engine and change over
 time — never guess them. `ccc models` is the live catalog; pass its ids
-to `ccc spawn --model` / `--effort` verbatim.
+to `ccc spawn --model` / `--effort` verbatim. Before building a feature, run
+`ccc shipped` to check it isn't already done; when a task references
+earlier work, run `ccc recall` instead of guessing from scratch.
 
 Server discovery: --server URL > $CCC_SERVER > the port.txt the server
 publishes at ~/.claude/command-center/port.txt (see write_port_file in
@@ -42,13 +47,14 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
-               "rebind-report-to")
+               "rebind-report-to", "recall", "shipped")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -433,6 +439,81 @@ def cmd_ask(args):
         src = result.get("source") or "?"
         print(f"(session ended its turn with no reply text — source: {src})",
               file=sys.stderr)
+    return 0
+
+
+def cmd_recall(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.query).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc recall: missing query (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    qs = urllib.parse.urlencode({"q": text, "limit": args.limit})
+    try:
+        payload = _get_json(base, f"/api/memory/recall?{qs}", timeout=15)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    results = payload.get("results") or []
+    if not results:
+        print(f"(no sessions found for {text!r})")
+        return 0
+    for r in results:
+        meta = " | ".join(x for x in (r.get("title"), r.get("repo"), r.get("date")) if x)
+        print(f"{r.get('session_id') or '?':<38} {meta}")
+        if r.get("snippet"):
+            print(f"  {r['snippet']}")
+    return 0
+
+
+def cmd_shipped(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.topic).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc shipped: missing topic (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    qs = urllib.parse.urlencode({"topic": text})
+    try:
+        payload = _get_json(base, f"/api/memory/shipped?{qs}", timeout=15)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    verdict = "SHIPPED" if payload.get("shipped") else "NOT SHIPPED"
+    confidence = payload.get("confidence")
+    conf_str = f" (confidence {confidence:.2f})" if isinstance(confidence, (int, float)) else ""
+    print(f"{verdict}{conf_str}: {text}")
+    for ev in payload.get("evidence") or []:
+        subj = ev.get("subject") or ""
+        print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}")
+    tickets = payload.get("tickets") or []
+    if tickets:
+        print(f"  tickets: {', '.join(tickets)}")
     return 0
 
 
@@ -980,6 +1061,30 @@ def main(argv=None):
                         "(default 120, server caps at 600)")
     p.add_argument("--json", action="store_true", help="raw ask result JSON")
     p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser(
+        "recall",
+        help="find past sessions relevant to a query (title, repo, date, snippet)",
+        description="GET /api/memory/recall: ranked sessions from CCC's commit/"
+                    "ticket-aware session graph. Use before re-deriving context "
+                    "a past session already covered.",
+    )
+    p.add_argument("query", nargs="*", help="the search query (or pipe it on stdin)")
+    p.add_argument("--limit", type=int, default=10, metavar="N",
+                   help="max sessions to return (default 10, server caps at 50)")
+    p.add_argument("--json", action="store_true", help="raw recall result JSON")
+    p.set_defaults(func=cmd_recall)
+
+    p = sub.add_parser(
+        "shipped",
+        help="check whether a feature/topic was already shipped",
+        description="GET /api/memory/shipped: is_shipped()'s verdict — shipped, "
+                    "confidence, commit evidence, and any linked tickets. Run "
+                    "this before building something that might already exist.",
+    )
+    p.add_argument("topic", nargs="*", help="the feature/topic (or pipe it on stdin)")
+    p.add_argument("--json", action="store_true", help="raw shipped result JSON")
+    p.set_defaults(func=cmd_shipped)
 
     p = sub.add_parser(
         "models",

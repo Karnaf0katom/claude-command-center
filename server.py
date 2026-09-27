@@ -28139,6 +28139,33 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, 404)
             else:
                 self.send_json(msg)
+        elif path == "/api/memory/recall":
+            # ccc_server/ship_graph.search_sessions(), enriched — see
+            # ccc_server/memory_api.py. Powers `ccc recall` and any agent
+            # asking "did we work on this before?".
+            from ccc_server.memory_api import recall as _memory_recall
+            qs = urllib.parse.parse_qs(parsed.query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                self.send_json({"query": "", "results": []})
+            else:
+                limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
+                try:
+                    limit = max(1, min(int(limit_raw), 50))
+                except ValueError:
+                    limit = 20
+                self.send_json(_memory_recall(q, limit=limit))
+        elif path == "/api/memory/shipped":
+            # ccc_server/ship_graph.is_shipped(), contract as-is — see
+            # ccc_server/memory_api.py. Powers `ccc shipped` and any agent
+            # asking "did we already ship this?" before building a feature.
+            from ccc_server.memory_api import shipped as _memory_shipped
+            qs = urllib.parse.parse_qs(parsed.query)
+            topic = (qs.get("topic", [""])[0] or "").strip()
+            if not topic:
+                self.send_json({"error": "missing topic"}, 400)
+            else:
+                self.send_json(_memory_shipped(topic))
         elif path == "/api/version/check":
             # Is the local install behind the latest GitHub release? Used by
             # the in-app "Update available" pill. Cached 6h in memory so we

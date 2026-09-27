@@ -66,6 +66,9 @@ alongside `ccc-orchestration`, so the integrations work out of the box.
   multi-session group chats without loops or ghost posts.
 - [`spawn-ux-worker.md`](spawn-ux-worker.md) — spawn a repo-scoped worker that
   drains one repo's UX-fixes queue.
+- [`memory-recall.md`](memory-recall.md) — before building a feature run
+  `ccc shipped`, before acting on an "earlier work" claim run `ccc recall`.
+  Zero spawns; just two CLI verbs over CCC's own session index.
 
 ## Wave 2 — four of the cut candidates, re-scoped and shipped
 

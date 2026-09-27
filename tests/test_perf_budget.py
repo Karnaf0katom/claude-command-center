@@ -3693,3 +3693,112 @@ def test_ship_graph_second_call_does_no_reparse_or_subprocesses(tmp_path, monkey
     )
 
 
+def test_memory_recall_warm_call_spawns_no_subprocesses(tmp_path, monkeypatch):
+    """ccc_server.memory_api.recall() joins two already-synced tables; a warm
+    repeat call (within the 5s sync TTL) must spawn zero subprocesses — the
+    ticket's explicit "no per-row subprocess" requirement for the recall path."""
+    import sqlite3
+    from ccc_server import memory_api, session_fts, ship_graph
+
+    ship_db = tmp_path / "ship_graph.sqlite"
+    fts_db = tmp_path / "session_fts.sqlite"
+    wt_db_path = tmp_path / "queues.db"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_dir = tmp_path / "widget-repo"
+
+    projects_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    (repo_dir / "app.py").write_text("# initial", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo_dir, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat(widgets): add confetti animation"],
+        cwd=repo_dir, check=True,
+    )
+    commit_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    session_dir = projects_dir / "widget-repo"
+    session_dir.mkdir(parents=True)
+    session_file = session_dir / "session-abc.jsonl"
+    lines = [
+        {
+            "type": "user",
+            "cwd": str(repo_dir),
+            "timestamp": "2026-09-20T10:00:00Z",
+            "message": {"role": "user", "content": "add a confetti animation on save"},
+        },
+        {
+            "type": "assistant",
+            "cwd": str(repo_dir),
+            "timestamp": "2026-09-20T10:01:00Z",
+            "message": {
+                "role": "assistant",
+                "content": f"Done — [main {commit_sha[:7]}] feat(widgets): add confetti animation",
+            },
+        },
+    ]
+    session_file.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(ship_db))
+    monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "0")
+    monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(fts_db))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+
+    for mod in (ship_graph, session_fts):
+        if hasattr(mod._tls, "conn") and mod._tls.conn:
+            try:
+                mod._tls.conn.close()
+            except Exception:
+                pass
+            mod._tls.conn = None
+    ship_graph._last_sync_ts = 0.0
+    session_fts._last_sync_ts = 0.0
+    # ship_graph.search_sessions() re-ranks a *separate* dynamically-loaded
+    # copy of session_fts (see _get_base_search_sessions) with its own TTL
+    # clock; an earlier test's warm copy would otherwise skip syncing this
+    # test's fixture data. Force a fresh copy so the cold call below actually
+    # syncs.
+    ship_graph._base_search_sessions = None
+
+    # Cold call: allowed to sync (spawn git log, parse the transcript, etc).
+    cold = memory_api.recall("confetti animation", limit=10)
+    assert cold["results"], "expected at least one hit to enrich"
+
+    subprocess_calls = []
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+
+    def spy_run(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_run(*args, **kwargs)
+
+    def spy_popen(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    monkeypatch.setattr(subprocess, "Popen", spy_popen)
+
+    # Warm repeat calls (well within the 5s sync TTL) must not spawn anything,
+    # and must keep returning the same enriched result.
+    for _ in range(5):
+        warm = memory_api.recall("confetti animation", limit=10)
+        assert warm == cold, "warm recall() result drifted from the cold call"
+
+    assert len(subprocess_calls) == 0, (
+        f"Warm recall() calls spawned subprocesses: {subprocess_calls}"
+    )
+
+

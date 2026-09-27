@@ -1,0 +1,44 @@
+---
+name: memory-recall
+description: Check CCC's cross-session memory before building a feature or acting on "earlier work" claims.
+allowed-tools: Bash
+---
+
+CCC indexes every session's commits, tickets, and transcripts across this
+machine. Two `ccc` CLI verbs surface that index — use them instead of
+re-deriving history from scratch or trusting an unverified claim in a prompt.
+
+## Before building a feature
+
+Run `ccc shipped "<feature description>"` first. It returns a verdict
+(`shipped: true/false`), a confidence score, and evidence (repo, commit,
+ticket) when true.
+
+```bash
+ccc shipped "csv export for dashboard tables"
+```
+
+- `shipped: true` with real evidence → don't rebuild it; go look at the
+  evidence and extend it instead.
+- `shipped: false`, or `true` with thin/no evidence → treat it as unshipped
+  and proceed.
+
+## When a task references earlier work
+
+If a prompt or ticket says "like we did before", "the session that fixed X",
+or otherwise assumes context you don't have, run `ccc recall "<query>"` to
+find the session(s) it means.
+
+```bash
+ccc recall "csv export dashboard"
+```
+
+Each hit carries `session_id`, `title`, `repo`, `date`, and a `snippet` —
+enough to decide whether to open the full transcript before acting.
+
+Both commands accept `--json` for scripted use and exit non-zero on a missing
+argument. Neither call is destructive or slow enough to need `run_in_background`.
+
+Out of scope for this skill: no pre-spawn hook wires this in automatically —
+you decide when to run these, this just tells you they exist and when they're
+worth reaching for.
