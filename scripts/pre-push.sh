@@ -11,6 +11,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# git exports GIT_DIR (and friends) into a hook's environment so the hook
+# itself operates on the right repo. That's correct for git's own purposes,
+# but it leaks into every subprocess this script spawns — including pytest's
+# `git init`/`git commit` calls in throwaway tmp_path fixtures (e.g.
+# test_ship_graph_second_call_does_no_reparse_or_subprocesses). An inherited
+# GIT_DIR overrides directory-based repo discovery, so those fixture git
+# commands silently operate on THIS repo's real .git instead of the fresh tmp
+# one, producing spurious commit failures only reproducible via `git push`
+# (never via a direct `pytest` invocation, which has no such env leak).
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR 2>/dev/null || true
+
 # Hunch was removed on purpose (twice). Sessions kept re-adding it after seeing
 # leftovers, so block any push that brings it back.
 if git ls-files --error-unmatch .hunch >/dev/null 2>&1 || \
