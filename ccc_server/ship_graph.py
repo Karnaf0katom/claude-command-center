@@ -330,6 +330,12 @@ KNOWN_REPO_ALIASES: dict[str, list[str]] = {
         r"\bwt-\d+\b",
         r"\bwatchtower-\d+\b",
     ],
+    "chuck-realtor-web": [
+        r"\bchuck\b",
+        r"\bchuck[- ]realtor\b",
+        r"\bchuck[- ]realtor[- ]web\b",
+        r"\bchuckrealtor\b",
+    ],
 }
 
 
@@ -1029,6 +1035,17 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
     return [{"session_id": sid} for sid in fused[:limit]]
 
 
+def _ticket_matches_repo(t_ref: str, repo: str) -> bool:
+    pfx = t_ref.split("-")[0].upper()
+    if pfx == "CCC" and repo != "claude-command-center":
+        return False
+    if pfx in ("WT", "WATCHTOWER") and repo != "watchtower":
+        return False
+    if pfx in ("BYM", "BECKY", "BYMOPS") and repo not in ("BYM", "becky-pro", "amirfish1__BYM-Finie"):
+        return False
+    return True
+
+
 def is_shipped(topic: str) -> dict:
     """Determine whether a topic has been shipped.
 
@@ -1289,6 +1306,8 @@ def is_shipped(topic: str) -> dict:
             if c["hash"].startswith(t_sha) or t_sha.startswith(c["hash"]):
                 found_c = c
                 break
+        if found_c and not _ticket_matches_repo(t_ref, found_c["repo"]):
+            found_c = None
         if not found_c:
             try:
                 cur_direct_c = conn.execute(
@@ -1297,7 +1316,7 @@ def is_shipped(topic: str) -> dict:
                 )
                 row_c = cur_direct_c.fetchone()
                 if row_c:
-                    if not detected_repo or row_c[1] == detected_repo:
+                    if (not detected_repo or row_c[1] == detected_repo) and _ticket_matches_repo(t_ref, row_c[1]):
                         process_commit(*row_c)
                         for c in candidate_commits:
                             if c["hash"].startswith(t_sha) or t_sha.startswith(c["hash"]):
@@ -1325,30 +1344,30 @@ def is_shipped(topic: str) -> dict:
 
         matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
 
-        if n_stems <= 1:
+        if n_stems <= 1 or len(matched_substantive) < 2:
             is_strong = False
         elif n_stems == 2:
-            if n_m_subj >= 2 and len(matched_substantive) >= 2:
+            if n_m_subj >= 2:
                 is_strong = True
-            elif has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
+            elif has_phrase_subj:
                 is_strong = True
-            elif ticket_boost > 0 and n_m_subj >= 2:
+            elif ticket_boost > 0:
                 is_strong = True
         elif n_stems == 3:
-            if has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
+            if has_phrase_subj and n_m_subj >= 2:
                 is_strong = True
-            elif n_m_subj >= 3 and len(matched_substantive) >= 2:
+            elif n_m_subj >= 3:
                 is_strong = True
-            elif n_m_subj >= 2 and len(matched_substantive) >= 2 and subj_ratio >= 0.65:
+            elif n_m_subj >= 2 and subj_ratio >= 0.65:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
         else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 2 and len(matched_substantive) >= 1:
+            if has_phrase_subj and n_m_subj >= 2:
                 is_strong = True
-            elif n_m_subj >= 3 and len(matched_substantive) >= 2 and subj_ratio >= 0.50:
+            elif n_m_subj >= 3 and subj_ratio >= 0.50:
                 is_strong = True
-            elif subj_ratio >= 0.65 and n_m_subj >= 3 and len(matched_substantive) >= 2:
+            elif subj_ratio >= 0.65 and n_m_subj >= 3:
                 is_strong = True
             elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
                 is_strong = True
