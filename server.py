@@ -28289,6 +28289,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 except ValueError:
                     limit = 20
                 self.send_json(_memory_file_history(file_path, repo=repo_q, limit=limit))
+        elif re.match(r"^/api/memory/brief/.+$", path):
+            # ccc_server/session_brief.py — "where did this session leave
+            # off and how do I resume it?" for one session. Powers
+            # `ccc brief <session>` and the "continue in a new session"
+            # handoff prompt's first move.
+            from ccc_server.session_brief import brief as _memory_brief
+            query = urllib.parse.unquote(path[len("/api/memory/brief/"):])
+            self.send_json(_memory_brief(query))
         elif path == "/api/memory/decisions":
             # Heuristic decision-shaped filter over ship_graph.search_sessions()
             # — see ccc_server/memory_api.py. Powers `ccc decisions`. Stand-in

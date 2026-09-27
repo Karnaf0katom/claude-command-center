@@ -27,6 +27,7 @@ command, without opening the dashboard:
     ccc shipped "dark mode"                     # did we already build this?
     ccc history src/app.py                      # commits + sessions that touched a file
     ccc decisions "which queue engine"          # sessions that recorded a decision
+    ccc brief <session>                         # where a session left off + how to resume it
 
 <session> is a session id, a unique id prefix, or a (unique, case-
 insensitive) fragment of the session's display name from `ccc sessions`.
@@ -35,7 +36,9 @@ Agents: model ids and effort ladders differ per engine and change over
 time — never guess them. `ccc models` is the live catalog; pass its ids
 to `ccc spawn --model` / `--effort` verbatim. Before building a feature, run
 `ccc shipped` to check it isn't already done; when a task references
-earlier work, run `ccc recall` instead of guessing from scratch.
+earlier work, run `ccc recall` instead of guessing from scratch. To resume a
+specific earlier session, run `ccc brief <session>` first — it answers
+"where did this stop" without opening the transcript.
 
 Server discovery: --server URL > $CCC_SERVER > the port.txt the server
 publishes at ~/.claude/command-center/port.txt (see write_port_file in
@@ -56,7 +59,7 @@ from datetime import datetime, timezone
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
-               "rebind-report-to", "recall", "shipped", "history", "decisions")
+               "rebind-report-to", "recall", "shipped", "history", "decisions", "brief")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -484,6 +487,79 @@ def cmd_recall(args):
         m = r.get("match")
         if m and m.get("snippet"):
             print(f"  @turn {m.get('turn')}: {m['snippet']}")
+    if payload.get("indexing"):
+        print("(indexing: true — still warming up, results may be incomplete)")
+    return 0
+
+
+def cmd_brief(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.session).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc brief: missing session id/prefix/query (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    try:
+        payload = _get_json(base, f"/api/memory/brief/{urllib.parse.quote(text, safe='')}", timeout=20)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("found") else 1
+    if not payload.get("found"):
+        print(f"(no session found for {text!r})")
+        for alt in payload.get("alternates") or []:
+            print(f"  maybe: {alt}")
+        return 1
+    print(f"{payload['session_id']}  {payload.get('title') or '(untitled)'}")
+    meta = " | ".join(x for x in (payload.get("repo"), payload.get("engine"),
+                                  payload.get("start_date"), payload.get("end_date")) if x)
+    if meta:
+        print(f"  {meta}")
+    for t in payload.get("tickets") or []:
+        title = f" — {t['title']}" if t.get("title") else ""
+        print(f"  ticket: {t['ref']} [{t.get('status') or '?'}]{title}")
+    asks = payload.get("last_user_asks") or []
+    if asks:
+        print("  last asks:")
+        for a in asks:
+            print(f"    - {a}")
+    reply = payload.get("last_assistant_reply")
+    if reply:
+        print("  last reply:")
+        for line in reply.splitlines():
+            print(f"    {line}")
+    commits = payload.get("commits") or []
+    if commits:
+        print("  commits:")
+        for c in commits:
+            origin = {"True": "on origin", "False": "local only", "None": "origin unknown"}[
+                str(c.get("on_origin"))]
+            print(f"    {c['sha']}  ({origin})  {c.get('subject') or ''}")
+    artifacts = payload.get("artifacts_outside_repos") or []
+    if artifacts:
+        print("  artifacts outside repos:")
+        for a in artifacts:
+            print(f"    - {a}")
+    files = payload.get("files_touched") or []
+    if files:
+        print(f"  files touched: {len(files)}")
+        for f in files[:20]:
+            print(f"    - {f}")
+    if payload.get("resume_command"):
+        print(f"  resume: {payload['resume_command']}")
+    if payload.get("alternates"):
+        print(f"  (other matches: {', '.join(payload['alternates'])})")
     if payload.get("indexing"):
         print("(indexing: true — still warming up, results may be incomplete)")
     return 0
@@ -1260,6 +1336,21 @@ def main(argv=None):
                    help="max sessions to return (default 10, server caps at 50)")
     p.add_argument("--json", action="store_true", help="raw decisions result JSON")
     p.set_defaults(func=cmd_decisions)
+
+    p = sub.add_parser(
+        "brief",
+        help="where a session left off, and how to resume it",
+        description="GET /api/memory/brief/<session>: title, repo/engine/dates, "
+                    "WatchTower ticket(s) + status, last asks, last reply, "
+                    "commits (+ whether pushed), files touched, artifacts "
+                    "written outside any repo, and the exact resume command. "
+                    "Run this before re-deriving context a past session "
+                    "already has.",
+    )
+    p.add_argument("session", nargs="*",
+                   help="session id, id prefix, or a recall-style query (or pipe it on stdin)")
+    p.add_argument("--json", action="store_true", help="raw brief result JSON")
+    p.set_defaults(func=cmd_brief)
 
     p = sub.add_parser(
         "models",

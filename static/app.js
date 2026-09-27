@@ -3702,6 +3702,8 @@
       lines.push(
         'Retrieve context SELECTIVELY. Never open or Read the whole transcript',
         '(it is ~' + f2FmtTokens(gate.tokens) + ' tokens). Pull only the slice you need:',
+        '  - run `ccc brief ' + sid + '` first — it already has the last asks, last',
+        '    reply, commits, and files touched without reading the transcript',
         '  - tail -n 80 the transcript for the most recent turns (cut by',
         '    lines, not bytes: a byte cut splits a JSON line), then jq the',
         '    message text',

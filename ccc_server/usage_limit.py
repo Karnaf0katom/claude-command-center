@@ -495,6 +495,8 @@ def _usage_limit_retrieval_prompt(engine, sid, context_tokens):
         "",
         "Retrieve context SELECTIVELY. Never open or Read the whole transcript",
         f"(it is ~{tokens_label} tokens). Pull only the slice you need:",
+        f"  - run `ccc brief {sid}` first — it already has the last asks, last",
+        "    reply, commits, and files touched without reading the transcript",
         "  - tail -n 80 the transcript for the most recent turns (cut by",
         "    lines, not bytes: a byte cut splits a JSON line), then jq the",
         "    message text",
