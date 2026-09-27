@@ -68,27 +68,75 @@ _history_query_lock = threading.Lock()
 # '^', ':' on their own — those routinely show up in identifiers /
 # filenames the user wants to search literally (e.g. `archive-filter-1d33`,
 # `feat/foo-bar`, `user@example.com`).
-_HISTORY_FTS_OPERATOR_RE = re.compile(r'["()*]|\b(?:AND|OR|NOT|NEAR)\b', re.IGNORECASE)
-_HISTORY_FTS_TOKEN_RE = re.compile(r"[\w']+", re.UNICODE)
+_HISTORY_FTS_OPERATOR_RE = re.compile(r'\b(?:AND|OR|NOT|NEAR)\b')
+_HISTORY_FTS_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+# Question scaffolding and English function words.
+_HISTORY_STOPWORDS = frozenset(
+    "a about above after again all also am an and any are as at be because been "
+    "before being below between both but by can could did do does doing done down "
+    "during each few for from further had has have having he her here hers him his "
+    "how i if in into is it its itself just know let like me more most my no nor "
+    "not now of off on once only or other our out over own same she should so some "
+    "such than that the their them then there these they this those through to too "
+    "under until up us very was we were what when where which while who whom why "
+    "will with would you your yours "
+    "decide decided decision decisions discuss discussed talk talked work worked "
+    "working session sessions status thing things stuff way ways find found "
+    "remember recall earlier ago last previous previously please tell show "
+    "didn doesn don wasn weren haven hasn hadn won wouldn shouldn couldn "
+    "s t d m re ll ve".split()
+)
 
 
-def _rewrite_history_query(q):
-    """Bare multi-word queries → OR-form so a single missing word doesn't
-    zero out FTS5's implicit-AND. Tokens are quoted so embedded punctuation
-    (e.g. '-' inside an identifier) can't be mis-parsed as an operator.
+def _is_explicit_history_fts_query(query: str) -> bool:
+    q = (query or "").strip()
+    if not q or "?" in q:
+        return False
+    if q.startswith('"') and q.endswith('"') and q.count('"') == 2:
+        return True
+    if _HISTORY_FTS_OPERATOR_RE.search(q):
+        return True
+    if re.search(r'\b\w+\*', q):
+        return True
+    return False
 
-    Mirrors rewrite_query() in claude-index — kept inline so CCC has no
-    runtime dependency on that package.
+
+def extract_history_terms(query: str, max_terms: int = 8) -> list[str]:
+    """Topic words of a natural query with stopwords removed and punctuation stripped."""
+    tokens = _HISTORY_FTS_TOKEN_RE.findall(query or "")
+    seen: set[str] = set()
+    terms: list[str] = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in _HISTORY_STOPWORDS or tl in seen:
+            continue
+        seen.add(tl)
+        terms.append(t)
+    if not terms:
+        for t in tokens:
+            tl = t.lower()
+            if tl not in seen:
+                seen.add(tl)
+                terms.append(t)
+    return terms[:max_terms]
+
+
+def _rewrite_history_query(q, mode="and"):
+    """Rewrite bare queries to an FTS5 expression over topic terms.
+    Tokens are quoted so embedded punctuation (e.g. '-' inside an identifier)
+    can't be mis-parsed as an operator.
     """
     q = (q or "").strip()
-    if not q or _HISTORY_FTS_OPERATOR_RE.search(q):
+    if not q or _is_explicit_history_fts_query(q):
         return q
-    tokens = _HISTORY_FTS_TOKEN_RE.findall(q)
-    if not tokens:
+    terms = extract_history_terms(q)
+    if not terms:
         return q
-    if len(tokens) == 1:
-        return tokens[0]
-    return " OR ".join(f'"{t}"' for t in tokens)
+    if len(terms) == 1:
+        return f'"{terms[0]}"'
+    joiner = " OR " if mode == "or" else " AND "
+    return joiner.join(f'"{t}"' for t in terms)
 
 
 # Patterns that crowd out useful preview text in FTS5 snippets. The cleaner
@@ -137,9 +185,9 @@ def _rerank_history_results(results, query, conn):
     if not results:
         return results
     q = (query or "").strip()
-    if not q or _HISTORY_FTS_OPERATOR_RE.search(q):
+    if not q or _is_explicit_history_fts_query(q):
         return results
-    tokens = [t.lower() for t in _HISTORY_FTS_TOKEN_RE.findall(q)]
+    tokens = [t.lower() for t in extract_history_terms(q)]
     if len(tokens) < 2:
         return results
     phrase = " ".join(tokens)
@@ -306,45 +354,63 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None, sema
             results.append(d)
         return {"results": _rerank_history_results(results, query, conn)}
 
-    # Lexical path — CCC's existing BM25 SQL with the snippet cleaner.
-    fts_query = _rewrite_history_query(query)
-    if not fts_query:
+    # Lexical path — AND-first with OR fallback for natural language queries.
+    and_query = _rewrite_history_query(query, mode="and")
+    if not and_query:
         return {"results": []}
-    where = ["messages_fts MATCH ?"]
-    params = [fts_query]
-    if cwd_like:
-        where.append("m.cwd LIKE ?")
-        params.append(f"%{cwd_like}%")
+
     threshold = _history_since_threshold(since)
-    if threshold is not None:
-        where.append("m.ts_unix >= ?")
-        params.append(threshold)
-    sql = f"""
-        SELECT m.uuid, m.session_id, m.type, m.cwd, m.git_branch,
-               m.timestamp, m.ts_unix,
-               snippet(messages_fts, 0, '<mark>', '</mark>', '…', 12) AS snippet,
-               bm25(messages_fts) AS score
-        FROM messages_fts
-        JOIN messages m ON m.id = messages_fts.rowid
-        WHERE {' AND '.join(where)}
-        ORDER BY score
-        LIMIT ?
-    """
-    params.append(limit)
-    try:
+
+    def _execute_fts(fts_expr, fetch_limit):
+        where = ["messages_fts MATCH ?"]
+        params = [fts_expr]
+        if cwd_like:
+            where.append("m.cwd LIKE ?")
+            params.append(f"%{cwd_like}%")
+        if threshold is not None:
+            where.append("m.ts_unix >= ?")
+            params.append(threshold)
+        sql = f"""
+            SELECT m.uuid, m.session_id, m.type, m.cwd, m.git_branch,
+                   m.timestamp, m.ts_unix,
+                   snippet(messages_fts, 0, '<mark>', '</mark>', '…', 12) AS snippet,
+                   bm25(messages_fts) AS score
+            FROM messages_fts
+            JOIN messages m ON m.id = messages_fts.rowid
+            WHERE {' AND '.join(where)}
+            ORDER BY score
+            LIMIT ?
+        """
+        params.append(fetch_limit)
         with _history_query_lock:
-            rows = conn.execute(sql, params).fetchall()
+            return conn.execute(sql, params).fetchall()
+
+    try:
+        rows = _execute_fts(and_query, limit)
     except sqlite3.OperationalError as e:
-        # FTS5 rejects malformed queries (unbalanced quotes, dangling
-        # operators, etc.) with OperationalError. Surface as an empty
-        # result + error string so the UI can show "syntax error" rather
-        # than a 500.
         return {"error": f"search failed: {e}", "results": []}
     except sqlite3.ProgrammingError as e:
-        # Connection closed under us (e.g. a concurrent index reset between
-        # fetching the handle and acquiring the query lock). Degrade, don't 500.
         return {"error": f"search failed: {e}", "results": []}
+
     results = [dict(r) for r in rows]
+
+    or_query = _rewrite_history_query(query, mode="or")
+    floor = min(limit, 5)
+    unique_sessions = {r["session_id"] for r in results if r.get("session_id")}
+    if (len(results) < floor or len(unique_sessions) < floor) and or_query != and_query and not _is_explicit_history_fts_query(query):
+        try:
+            or_rows = _execute_fts(or_query, limit)
+            seen_uuids = {r["uuid"] for r in results if r.get("uuid")}
+            for r in or_rows:
+                d = dict(r)
+                if d.get("uuid") not in seen_uuids:
+                    seen_uuids.add(d["uuid"])
+                    results.append(d)
+                    if len(results) >= limit:
+                        break
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
+            pass
+
     # Title boost (CCC-615): sessions whose first NON-synthetic user message
     # (the display-title proxy) matches are ABOUT the topic — promote them
     # above incidental content hits, same as the vendored semantic search.
@@ -359,7 +425,12 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None, sema
                 title_params.append(threshold)
             with _history_query_lock:
                 title_rows = _hi_search._title_row_hits(
-                    conn, fts_query, title_where, title_params)
+                    conn, and_query, title_where, title_params)
+                if len(title_rows) < 3 and or_query != and_query and not _is_explicit_history_fts_query(query):
+                    extra = _hi_search._title_row_hits(
+                        conn, or_query, title_where, title_params)
+                    seen_ids = {r["id"] for r in title_rows}
+                    title_rows = list(title_rows) + [r for r in extra if r["id"] not in seen_ids]
         except (sqlite3.OperationalError, sqlite3.ProgrammingError):
             title_rows = []
         if title_rows:
@@ -378,7 +449,7 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None, sema
         if r.get("snippet"):
             r["snippet"] = _clean_history_snippet(r["snippet"])
         r["_source"] = "bm25"
-    return {"results": _rerank_history_results(results, query, conn)}
+    return {"results": results}
 
 
 def get_history_message(uuid):

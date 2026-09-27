@@ -20,8 +20,60 @@ from typing import Any, Optional
 # their own — those routinely show up in identifiers / filenames the user
 # wants to search literally (e.g. `archive-filter-1d33`, `feat/foo-bar`,
 # `user@example.com`).
-_HAS_OPERATOR = re.compile(r'["()*]|\b(?:AND|OR|NOT|NEAR)\b', re.IGNORECASE)
-_TOKENIZER = re.compile(r"[\w']+", re.UNICODE)
+_HAS_OPERATOR = re.compile(r'\b(?:AND|OR|NOT|NEAR)\b')
+_TOKENIZER = re.compile(r"[^\W_]+", re.UNICODE)
+
+STOPWORDS = frozenset(
+    "a about above after again all also am an and any are as at be because been "
+    "before being below between both but by can could did do does doing done down "
+    "during each few for from further had has have having he her here hers him his "
+    "how i if in into is it its itself just know let like me more most my no nor "
+    "not now of off on once only or other our out over own same she should so some "
+    "such than that the their them then there these they this those through to too "
+    "under until up us very was we were what when where which while who whom why "
+    "will with would you your yours "
+    "decide decided decision decisions discuss discussed talk talked work worked "
+    "working session sessions status thing things stuff way ways find found "
+    "remember recall earlier ago last previous previously please tell show "
+    "didn doesn don wasn weren haven hasn hadn won wouldn shouldn couldn "
+    "s t d m re ll ve".split()
+)
+
+
+def _is_operator_query(query: str) -> bool:
+    q = (query or "").strip()
+    if not q or "?" in q:
+        return False
+    if q.startswith('"') and q.endswith('"') and q.count('"') == 2:
+        return True
+    if _HAS_OPERATOR.search(q):
+        return True
+    if re.search(r'\b\w+\*', q):
+        return True
+    return False
+
+
+def tokenize(query: str) -> list[str]:
+    return _TOKENIZER.findall(query or "")
+
+
+def topic_terms(query: str, max_terms: int = 8) -> list[str]:
+    tokens = tokenize(query)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in STOPWORDS or tl in seen:
+            continue
+        seen.add(tl)
+        out.append(t)
+    if not out:
+        out = []
+        for t in tokens:
+            if t.lower() not in seen:
+                seen.add(t.lower())
+                out.append(t)
+    return out[:max_terms]
 
 
 def rewrite_query(query: str) -> str:
@@ -37,17 +89,15 @@ def rewrite_query(query: str) -> str:
     Queries that already use real FTS5 operators (quotes, OR, NEAR, prefix*,
     parens) are passed through unchanged — caller knows what they want.
     """
-    q = query.strip()
-    if not q or _HAS_OPERATOR.search(q):
+    q = (query or "").strip()
+    if not q or _is_operator_query(q):
         return q
-    tokens = _TOKENIZER.findall(q)
-    if not tokens:
+    terms = topic_terms(q)
+    if not terms:
         return q
-    if len(tokens) == 1:
-        # Single token: don't quote — preserves prefix-search behavior if the
-        # user later types `*`, and reads cleaner in debug output.
-        return tokens[0]
-    return " OR ".join(f'"{t}"' for t in tokens)
+    if len(terms) == 1:
+        return f'"{terms[0]}"'
+    return " OR ".join(f'"{t}"' for t in terms)
 
 
 def parse_since(since: Optional[str]) -> Optional[float]:
@@ -161,8 +211,10 @@ def _title_row_hits(
     # wider pool before filtering in Python against the cached id set — no
     # per-request table scan.
     first_ids = _first_user_message_ids(conn)
-    params.append(max(cap * 20, 500))
-    rows = [r for r in conn.execute(sql, params) if r["id"] in first_ids]
+    try:
+        rows = [r for r in conn.execute(sql, params) if r["id"] in first_ids]
+    except sqlite3.OperationalError:
+        return []
     return rows[:cap]
 
 
@@ -192,7 +244,10 @@ def _bm25_hits(
         ORDER BY score
         LIMIT ?
     """
-    rows = list(conn.execute(sql, [*params, limit]))
+    try:
+        rows = list(conn.execute(sql, [*params, limit]))
+    except sqlite3.OperationalError:
+        rows = []
     # Title boost: sessions whose first user message matches are ABOUT the
     # topic — promote them (ranked by score among themselves) above the
     # incidental content hits, preserving the content hits after.
