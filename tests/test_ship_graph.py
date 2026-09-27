@@ -440,4 +440,205 @@ def test_question_structure_helper():
     assert res_after_break["locative_chunks"] == []
 
 
+@pytest.fixture
+def mock_coverage_env(tmp_path, monkeypatch):
+    """Two-repo coverage environment: distinctive-term, multi-clause, polarity,
+    and deep-history cases with plain synthetic words."""
+    db_path = tmp_path / "cov_ship_graph.sqlite"
+    wt_db_path = tmp_path / "cov_queues.db"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_gamma = tmp_path / "gamma-tool"
+    repo_delta = tmp_path / "delta-hub"
+
+    projects_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+
+    def init_repo(path):
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+
+    def commit(path, filename, content, subject, ts=None):
+        (path / filename).write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", filename], cwd=path, check=True, capture_output=True)
+        env = None
+        if ts is not None:
+            env = {**os.environ,
+                   "GIT_AUTHOR_DATE": f"@{int(ts)} +0000",
+                   "GIT_COMMITTER_DATE": f"@{int(ts)} +0000"}
+        subprocess.run(["git", "commit", "-m", subject], cwd=path, check=True,
+                       capture_output=True, env=env)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    init_repo(repo_gamma)
+    init_repo(repo_delta)
+
+    # The backdated commit goes FIRST: `git log --since` stops traversal at the
+    # first too-old commit, so if it were HEAD the whole repo would index empty.
+    sha5 = commit(repo_gamma, "g5.txt", "5",
+                  "feat(vault): add zircon key rotation for the vault",
+                  ts=time.time() - 120 * 86400)
+    sha1 = commit(repo_gamma, "g1.txt", "1",
+                  "feat(history): add pin button to the ledger panel")
+    sha2 = commit(repo_gamma, "g2.txt", "2",
+                  "feat(quota): add usage sparkline for the tenant overview")
+    sha3 = commit(repo_gamma, "g3.txt", "3",
+                  "feat(export): send parquet snapshots instead of csv bundles")
+    sha4 = commit(repo_gamma, "g4.txt", "4",
+                  "fix(relay): dedupe the beacon heartbeats")
+
+    sha6 = commit(repo_delta, "d1.txt", "1",
+                  "feat(vault): zircon banner for the hub")
+
+    with sqlite3.connect(wt_db_path) as wt_conn:
+        wt_conn.execute("""
+            CREATE TABLE items (
+                ref TEXT PRIMARY KEY,
+                project TEXT,
+                number INTEGER,
+                status TEXT,
+                updated_at TEXT,
+                item_json TEXT
+            )
+        """)
+        wt_conn.commit()
+
+    repos_str = os.pathsep.join([str(repo_gamma), str(repo_delta)])
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
+    monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", repos_str)
+
+    if hasattr(ship_graph._tls, "conn") and ship_graph._tls.conn:
+        try:
+            ship_graph._tls.conn.close()
+        except Exception:
+            pass
+        ship_graph._tls.conn = None
+    ship_graph._last_sync_ts = 0.0
+    ship_graph._deep_history_cache.clear()
+
+    return {
+        "repo_gamma": repo_gamma,
+        "repo_delta": repo_delta,
+        "sha1": sha1, "sha2": sha2, "sha3": sha3,
+        "sha4": sha4, "sha5": sha5, "sha6": sha6,
+    }
+
+
+def test_distinctive_term_missing_is_not_shipped(mock_coverage_env):
+    """The rarest distinctive first-clause term must be covered by the evidence."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we add a rename button to the ledger panel?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+    assert res["confidence"] <= 0.65
+
+    res_ok = ship_graph.is_shipped("Did we add a pin button to the ledger panel?")
+    assert res_ok["shipped"] is True
+    assert res_ok["evidence"][0]["commit"] == env["sha1"]
+
+
+def test_multi_clause_requires_both_clauses(mock_coverage_env):
+    """Each clause of a compound question needs its own evidence."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we add a usage sparkline that also emails a weekly digest?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+    assert res["confidence"] <= 0.65
+
+    res_and = ship_graph.is_shipped("Did we add a usage sparkline and email a weekly digest?")
+    assert res_and["shipped"] is False
+    assert res_and["evidence"] == []
+
+    res_ok = ship_graph.is_shipped("Did we add a usage sparkline for the tenant overview?")
+    assert res_ok["shipped"] is True
+    assert res_ok["evidence"][0]["commit"] == env["sha2"]
+
+    # Noun-phrase "and" with no verb on the right must NOT split
+    res_np = ship_graph.is_shipped("Did we dedupe the beacon and relay heartbeats?")
+    assert res_np["shipped"] is True
+    assert res_np["evidence"][0]["commit"] == env["sha4"]
+
+
+def test_split_clauses_helper():
+    """_split_clauses splits on strong joiners; 'and' only when both sides are verbish."""
+    sc = ship_graph._split_clauses
+
+    assert sc(["did", "we", "add", "a", "usage", "sparkline",
+               "that", "also", "emails", "a", "weekly", "digest"]) == [
+        ["did", "we", "add", "a", "usage", "sparkline"],
+        ["emails", "a", "weekly", "digest"],
+    ]
+    assert sc(["add", "metrics", "as", "well", "as", "logs"]) == [
+        ["add", "metrics"], ["logs"],
+    ]
+    # Plain 'and' with verbs on both sides splits
+    assert sc(["did", "we", "add", "the", "panel", "and", "remove", "the", "old", "one"]) == [
+        ["did", "we", "add", "the", "panel"],
+        ["remove", "the", "old", "one"],
+    ]
+    # Plain 'and' with no verb on the right does not split
+    assert sc(["did", "we", "dedupe", "the", "beacon", "and", "relay", "heartbeats"]) == [
+        ["did", "we", "dedupe", "the", "beacon", "and", "relay", "heartbeats"],
+    ]
+
+
+def test_named_repo_falls_back_to_deep_history(mock_coverage_env):
+    """A repo named in the question greps pre-window history when the index misses."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did gamma-tool add zircon key rotation for the vault?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha5"]
+    assert res["evidence"][0]["repo"] == "gamma-tool"
+    assert res["confidence"] <= 0.85
+
+    # Second identical call: deep-history cache hit, zero subprocesses
+    subprocess_calls = []
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+
+    def spy_run(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_run(*args, **kwargs)
+
+    def spy_popen(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_popen(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", spy_run)
+        mp.setattr(subprocess, "Popen", spy_popen)
+        res2 = ship_graph.is_shipped("Did gamma-tool add zircon key rotation for the vault?")
+    assert res2["shipped"] is True
+    assert subprocess_calls == [], (
+        f"Second deep-history call spawned subprocesses: {subprocess_calls}"
+    )
+
+    res_delta = ship_graph.is_shipped("Did delta-hub add zircon key rotation for the vault?")
+    assert res_delta["shipped"] is False
+    assert res_delta["evidence"] == []
+
+
+def test_polarity_instead_of(mock_coverage_env):
+    """'X instead of Y' must not match a commit that did 'Y instead of X'."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we send csv bundles instead of parquet snapshots?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+
+    res_ok = ship_graph.is_shipped("Did we send parquet snapshots instead of csv bundles?")
+    assert res_ok["shipped"] is True
+    assert res_ok["evidence"][0]["commit"] == env["sha3"]
+
+
 

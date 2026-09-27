@@ -84,6 +84,7 @@ ticket pr pull request commit commits repo repository support implemented implem
 ever actually someone onto doesn don didn need needs try trying want wants sure make makes know knows yet
 good get still used use uses using somewhere anywhere anybody somebody anyone
 live merged merge complete completed finish finished exist exists existing currently today
+able
 """.split())
 
 SYNONYMS = {
@@ -568,6 +569,9 @@ def _init_db(conn: sqlite3.Connection) -> None:
             indexed INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_transcripts_sid ON transcripts(sid);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS commits_vocab USING fts5vocab(commits_fts, 'row');
+        CREATE VIRTUAL TABLE IF NOT EXISTS tickets_vocab USING fts5vocab(tickets_fts, 'row');
 
         CREATE TABLE IF NOT EXISTS session_meta (
             sid TEXT PRIMARY KEY,
@@ -1143,6 +1147,119 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
     return [{"session_id": sid} for sid in fused[:limit]]
 
 
+_STRONG_JOINERS = [
+    ("that", "also"), ("and", "also"), ("as", "well", "as"),
+    ("alongside",), ("along", "with"), ("together", "with"),
+    ("plus",), ("which", "also"), ("also",),
+]
+
+_POLARITY_MARKERS = frozenset({_stem(w) for w in ("instead", "rather", "over", "not")})
+
+_deep_history_cache: dict[tuple[str, str, tuple[str, ...]], list[tuple]] = {}
+_deep_history_lock = threading.Lock()
+
+
+def _split_clauses(first_clause_tokens: list[str]) -> list[list[str]]:
+    """Split a question's first clause into coordinated sub-clauses.
+
+    Strong joiners ('that also', 'as well as', 'plus', ...) always split and the
+    joiner tokens are dropped. A bare 'and' splits only when both sides contain
+    a verb-ish token, so noun-phrase 'and' ('bot and crawler visits') stays whole.
+    """
+    clauses: list[list[str]] = [[]]
+    i = 0
+    n = len(first_clause_tokens)
+    while i < n:
+        matched = 0
+        for seq in _STRONG_JOINERS:
+            m = len(seq)
+            if tuple(first_clause_tokens[i:i + m]) == seq:
+                matched = m
+                break
+        if matched:
+            clauses.append([])
+            i += matched
+            continue
+        tok = first_clause_tokens[i]
+        if tok == "and":
+            left = clauses[-1]
+            right = first_clause_tokens[i + 1:]
+            if any(w in VERBISH for w in left) and any(w in VERBISH for w in right):
+                clauses.append([])
+                i += 1
+                continue
+        clauses[-1].append(tok)
+        i += 1
+    return [c for c in clauses if c]
+
+
+def _corpus_df(conn: sqlite3.Connection, stems: set[str]) -> dict[str, int]:
+    """Document frequency per stem across the commits and tickets corpora.
+
+    Stems match fts5vocab terms directly (both FTS tables use porter). On any
+    schema problem (older DBs without the vocab tables) returns all zeros so
+    callers treat 'no DF info' as 'don't require anything'.
+    """
+    out = {s: 0 for s in stems}
+    if not stems:
+        return out
+    ph = ",".join("?" * len(stems))
+    params = tuple(stems)
+    try:
+        for term, doc in conn.execute(
+            f"SELECT term, doc FROM commits_vocab WHERE term IN ({ph})", params
+        ):
+            out[term] = out.get(term, 0) + doc
+        for term, doc in conn.execute(
+            f"SELECT term, doc FROM tickets_vocab WHERE term IN ({ph})", params
+        ):
+            out[term] = out.get(term, 0) + doc
+    except sqlite3.OperationalError:
+        return {s: 0 for s in stems}
+    return out
+
+
+def _deep_history(repo_path: str, head: str, terms: tuple[str, ...],
+                  branches: list[str], cutoff_ts: float) -> list[tuple]:
+    """git-log grep of commits older than the indexed window, for one repo.
+
+    Cached per (repo_path, head, terms) so a repeated question spawns no
+    subprocess; a new HEAD invalidates automatically.
+    """
+    key = (repo_path, head, tuple(terms))
+    with _deep_history_lock:
+        if key in _deep_history_cache:
+            return _deep_history_cache[key]
+
+    args = ["git", "-C", repo_path, "log"] + list(dict.fromkeys(branches))
+    args += ["--max-count=200", "-i", "--extended-regexp"]
+    args += [f"--grep={t}" for t in terms]
+    if cutoff_ts:
+        args.append(f"--before=@{int(cutoff_ts)}")
+    args.append("--format=\x1e%H\x1f%h\x1f%ct\x1f%s\x1f%b\x1f")
+
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=20)
+        stdout = res.stdout if res.returncode == 0 else ""
+    except Exception:
+        stdout = ""
+
+    records = []
+    for rec in stdout.split("\x1e")[1:]:
+        parts = rec.split("\x1f")
+        if len(parts) < 5:
+            continue
+        h, sh, ct, subj, body = (parts[0].strip(), parts[1].strip(),
+                                 parts[2].strip(), parts[3].strip(), parts[4].strip())
+        records.append((h, sh, ct, subj, body))
+
+    with _deep_history_lock:
+        if len(_deep_history_cache) > 256:
+            _deep_history_cache.clear()
+        _deep_history_cache[key] = records
+    return records
+
+
 def _ticket_matches_repo(t_ref: str, repo: str) -> bool:
     pfx = t_ref.split("-")[0].upper()
     if pfx == "CCC" and repo != "claude-command-center":
@@ -1215,6 +1332,79 @@ def is_shipped(topic: str) -> dict:
     locative_chunks = _question_structure(t, repo_words)["locative_chunks"]
     locative_stems = set().union(*locative_chunks) if locative_chunks else set()
     non_locative_dist = distinguishing_stems - locative_stems
+
+    # First-clause tokens, truncated at the first clause breaker (same cut as
+    # _question_structure). The breaker token itself is kept for polarity.
+    q_tokens_full = [tok for tok in re.findall(r"[a-z0-9]+", t.lower())
+                     if len(tok) >= 2 and tok not in repo_words]
+    break_idx = None
+    for i, tok in enumerate(q_tokens_full):
+        if tok in CLAUSE_BREAKERS:
+            break_idx = i
+            break
+    first_clause_tokens = q_tokens_full[:break_idx] if break_idx is not None else q_tokens_full
+    break_token = q_tokens_full[break_idx] if break_idx is not None else None
+
+    # Class A: distinctive-term coverage. Corpus DF picks the rarest
+    # first-clause distinctive stems (plus anything nearly as rare) as required.
+    fc_dist = {_stem(w) for w in first_clause_tokens if w not in STOPWORDS} & distinguishing_stems
+    df = _corpus_df(conn, fc_dist)
+    if not fc_dist or all(v == 0 for v in df.values()):
+        required_stems: set[str] = set()
+    else:
+        min_df = min(df.values())
+        required_stems = {s for s in fc_dist if df[s] <= 2 * min_df + 1}
+
+    # Class B: multi-clause questions — every clause needs coverage, including
+    # its own rarest stems.
+    clause_reqs: list[tuple[set[str], set[str]]] = []
+    clauses = _split_clauses(first_clause_tokens)
+    if len(clauses) >= 2:
+        for clause in clauses:
+            clause_dist = {_stem(w) for w in clause if w not in STOPWORDS} & distinguishing_stems
+            if not clause_dist:
+                continue
+            clause_dfs = {s: df.get(s, 0) for s in clause_dist}
+            if all(v == 0 for v in clause_dfs.values()):
+                clause_rare: set[str] = set()
+            else:
+                c_min = min(clause_dfs.values())
+                clause_rare = {s for s in clause_dist if clause_dfs[s] <= 2 * c_min + 1}
+            clause_reqs.append((clause_dist, clause_rare))
+
+    # Class D: polarity — 'X instead/rather (of|than) Y' records the Y stems so
+    # commits that did 'Y instead of X' can be dropped.
+    x_stems = fc_dist
+    y_stems: set[str] = set()
+    if break_token in ("instead", "rather"):
+        y_tokens = []
+        for tok in q_tokens_full[break_idx + 1:]:
+            if tok in CLAUSE_BREAKERS:
+                break
+            y_tokens.append(tok)
+        y_stems = {_stem(w) for w in y_tokens if w not in STOPWORDS} - x_stems
+
+    def _coverage_ok(c: dict) -> bool:
+        if c.get("ticket_boost", 0) > 0:
+            return True
+        ev = c.get("evidence_stems", set())
+        if required_stems and (required_stems - ev):
+            return False
+        for clause_dist, clause_rare in clause_reqs:
+            if not (clause_dist & ev):
+                return False
+            if clause_rare and (clause_rare - ev):
+                return False
+        if y_stems:
+            toks = c.get("clean_subj_stem_tokens") or []
+            k = None
+            for i, tk in enumerate(toks):
+                if tk in _POLARITY_MARKERS:
+                    k = i
+                    break
+            if k is not None and (y_stems & set(toks[:k])) and (x_stems & set(toks[k + 1:])):
+                return False
+        return True
 
     # 1. Search WatchTower tickets
     candidate_tickets: list[dict] = []
@@ -1418,6 +1608,7 @@ def is_shipped(topic: str) -> dict:
             "has_phrase": has_phrase_subj or has_phrase_body,
             "has_phrase_subj": has_phrase_subj,
             "has_phrase_body": has_phrase_body,
+            "clean_subj_stem_tokens": [_stem(w) for w in clean_subj_tokens],
             "rank": rank,
         })
 
@@ -1481,95 +1672,141 @@ def is_shipped(topic: str) -> dict:
                 found_c["ticket_ref"] = t_ref
 
     # 3. Evaluate qualifying commits
-    qualifying: list[dict] = []
     n_stems = len(stemmed_content_terms)
 
-    for c in candidate_commits:
-        ticket_boost = c.get("ticket_boost", 0.0)
+    def qualify(cands: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for c in cands:
+            ticket_boost = c.get("ticket_boost", 0.0)
 
-        matched_dist_subj = c.get("matched_dist_subj", set())
-        matched_dist_all = c.get("matched_dist_all", set())
-        evidence_stems = c.get("evidence_stems", set())
-        c["locative_in_subject"] = (not locative_chunks) or any(
-            chunk & (c["subj_stems"] | c["scope_stems"]) for chunk in locative_chunks
-        )
+            matched_dist_subj = c.get("matched_dist_subj", set())
+            matched_dist_all = c.get("matched_dist_all", set())
+            evidence_stems = c.get("evidence_stems", set())
+            c["locative_in_subject"] = (not locative_chunks) or any(
+                chunk & (c["subj_stems"] | c["scope_stems"]) for chunk in locative_chunks
+            )
 
-        # (a) keyword lookalike: subject shares no distinguishing term
-        if n_dist > 0 and len(matched_dist_subj) == 0:
-            continue
-        if ticket_boost <= 0:
-            # (b) short question: every distinguishing term must appear in subject or body
-            if 1 <= n_dist <= 2 and not distinguishing_stems <= matched_dist_all:
+            # (a) keyword lookalike: subject shares no distinguishing term
+            if n_dist > 0 and len(matched_dist_subj) == 0:
                 continue
-            # (c) question names a place/scope the commit never mentions —
-            # unless the subject alone covers 3+ non-locative distinguishing
-            # terms (the place may be named by path or alias)
-            if locative_chunks and not any(chunk & evidence_stems for chunk in locative_chunks):
-                if not (len(non_locative_dist) >= 3 and non_locative_dist <= matched_dist_subj):
+            if ticket_boost <= 0:
+                # (b) short question: every distinguishing term must appear in subject or body
+                if 1 <= n_dist <= 2 and not distinguishing_stems <= matched_dist_all:
                     continue
+                # (c) question names a place/scope the commit never mentions —
+                # unless the subject alone covers 3+ non-locative distinguishing
+                # terms (the place may be named by path or alias)
+                if locative_chunks and not any(chunk & evidence_stems for chunk in locative_chunks):
+                    if not (len(non_locative_dist) >= 3 and non_locative_dist <= matched_dist_subj):
+                        continue
 
-        is_strong = False
-        n_m_subj = c["n_matched_subj"]
-        n_m_all = c["n_matched_all"]
-        subj_ratio = c["subj_ratio"]
-        has_phrase_subj = c.get("has_phrase_subj", False)
-
-        matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
-
-        if n_stems <= 1 or len(matched_substantive) < 2:
             is_strong = False
-        elif n_stems == 2:
-            if n_m_subj >= 2:
-                is_strong = True
-            elif has_phrase_subj:
-                is_strong = True
-            elif ticket_boost > 0:
-                is_strong = True
-        elif n_stems == 3:
-            if has_phrase_subj and n_m_subj >= 2:
-                is_strong = True
-            elif n_m_subj >= 3:
-                is_strong = True
-            elif n_m_subj >= 2 and subj_ratio >= 0.65:
-                is_strong = True
-            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
-                is_strong = True
-        else:  # n_stems >= 4
-            if has_phrase_subj and n_m_subj >= 2:
-                is_strong = True
-            elif n_m_subj >= 3 and subj_ratio >= 0.50:
-                is_strong = True
-            elif subj_ratio >= 0.65 and n_m_subj >= 3:
-                is_strong = True
-            elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
-                is_strong = True
+            n_m_subj = c["n_matched_subj"]
+            n_m_all = c["n_matched_all"]
+            subj_ratio = c["subj_ratio"]
+            has_phrase_subj = c.get("has_phrase_subj", False)
 
-        if is_strong:
-            cur_s = conn.execute(
-                "SELECT src FROM edges WHERE dst IN (?, ?) AND kind IN ('made', 'window') LIMIT 1",
-                (f"commit:{c['hash']}", f"commit:{c['short_hash']}"),
-            )
-            s_row = cur_s.fetchone()
-            c["session_id"] = s_row[0] if s_row else ""
-            row_tom = conn.execute(
-                "SELECT ts, on_main FROM commits WHERE hash = ?", (c["hash"],)
-            ).fetchone()
-            c["ts"] = row_tom[0] if row_tom else 0.0
-            c["on_main"] = row_tom[1] if row_tom else 0
-            score = (
-                ticket_boost
-                + subj_ratio * 25.0
-                + n_m_subj * 10.0
-                + (12.0 if has_phrase_subj else 0.0)
-                + n_m_all * 3.0
-                + len(matched_dist_subj) * 6.0
-                + (4.0 if c["on_main"] else 0.0)
-                - (c["rank"] * 0.1)
-            )
-            c["final_score"] = score
-            qualifying.append(c)
+            matched_substantive = {w for w in c.get("matched_subj", set()) if w not in GENERIC_VERBS and _stem(w) not in GENERIC_VERBS}
 
-    qualifying.sort(key=lambda x: (-x["final_score"], -x.get("on_main", 0), -x.get("ts", 0.0)))
+            if n_stems <= 1 or len(matched_substantive) < 2:
+                is_strong = False
+            elif n_stems == 2:
+                if n_m_subj >= 2:
+                    is_strong = True
+                elif has_phrase_subj:
+                    is_strong = True
+                elif ticket_boost > 0:
+                    is_strong = True
+            elif n_stems == 3:
+                if has_phrase_subj and n_m_subj >= 2:
+                    is_strong = True
+                elif n_m_subj >= 3:
+                    is_strong = True
+                elif n_m_subj >= 2 and subj_ratio >= 0.65:
+                    is_strong = True
+                elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
+                    is_strong = True
+            else:  # n_stems >= 4
+                if has_phrase_subj and n_m_subj >= 2:
+                    is_strong = True
+                elif n_m_subj >= 3 and subj_ratio >= 0.50:
+                    is_strong = True
+                elif subj_ratio >= 0.65 and n_m_subj >= 3:
+                    is_strong = True
+                elif ticket_boost > 0 and (n_m_subj >= 2 or has_phrase_subj):
+                    is_strong = True
+
+            if is_strong:
+                cur_s = conn.execute(
+                    "SELECT src FROM edges WHERE dst IN (?, ?) AND kind IN ('made', 'window') LIMIT 1",
+                    (f"commit:{c['hash']}", f"commit:{c['short_hash']}"),
+                )
+                s_row = cur_s.fetchone()
+                c["session_id"] = s_row[0] if s_row else ""
+                row_tom = conn.execute(
+                    "SELECT ts, on_main FROM commits WHERE hash = ?", (c["hash"],)
+                ).fetchone()
+                if row_tom:
+                    c["ts"] = row_tom[0]
+                    c["on_main"] = row_tom[1]
+                else:
+                    # Deep-history commits are not in the commits table
+                    c["ts"] = c.get("deep_ts", 0.0)
+                    c["on_main"] = 0
+                score = (
+                    ticket_boost
+                    + subj_ratio * 25.0
+                    + n_m_subj * 10.0
+                    + (12.0 if has_phrase_subj else 0.0)
+                    + n_m_all * 3.0
+                    + len(matched_dist_subj) * 6.0
+                    + (4.0 if c["on_main"] else 0.0)
+                    - (c["rank"] * 0.1)
+                )
+                c["final_score"] = score
+                out.append(c)
+        return out
+
+    def sort_qualifying(q: list[dict]) -> list[dict]:
+        q.sort(key=lambda x: (-x["final_score"], -x.get("on_main", 0), -x.get("ts", 0.0)))
+        return q
+
+    qualifying = sort_qualifying(qualify(candidate_commits))
+
+    # Coverage gates (classes A/B/D): a qualifying commit that fails distinctive,
+    # per-clause, or polarity coverage is dropped unless a ticket boosts it.
+    n_qualifying_pre = len(qualifying)
+    qualifying = [c for c in qualifying if _coverage_ok(c)]
+    coverage_filtered = n_qualifying_pre > len(qualifying)
+
+    # Class C: named repo but nothing qualified — grep pre-window git history.
+    if not qualifying and detected_repo and not open_tickets:
+        repo_path = roots.get(detected_repo)
+        head = _get_repo_head_fast(repo_path) if repo_path else ""
+        terms = sorted(s for s in distinguishing_stems if len(s) >= 3)[:8]
+        if repo_path and head and terms:
+            branches = ["HEAD"]
+            for b in ["next", "main", "master"]:
+                p_ref = Path(repo_path) / ".git" / "refs" / "heads" / b
+                p_rem = Path(repo_path) / ".git" / "refs" / "remotes" / "origin" / b
+                if p_ref.exists() or p_rem.exists():
+                    branches.append(b)
+            days = _get_days()
+            cutoff_ts = (time.time() - days * 86400) if days > 0 else 0.0
+            records = _deep_history(repo_path, head, tuple(terms), branches, cutoff_ts)
+            deep_cands: list[dict] = []
+            for rank_i, (h, sh, ct, subj, body) in enumerate(records):
+                before = len(candidate_commits)
+                process_commit(f"{detected_repo}:{h}", detected_repo, h, sh, subj, body, "", float(rank_i))
+                if len(candidate_commits) > before:
+                    c_new = candidate_commits[-1]
+                    c_new["deep_history"] = True
+                    c_new["deep_ts"] = float(ct) if ct else 0.0
+                    deep_cands.append(c_new)
+            deep_q = [c for c in qualify(deep_cands) if _coverage_ok(c)]
+            if deep_cands and not deep_q:
+                coverage_filtered = True
+            qualifying = sort_qualifying(deep_q)
 
     # 4. Decision logic
     all_tickets = list(dict.fromkeys(
@@ -1627,6 +1864,8 @@ def is_shipped(topic: str) -> dict:
             conf = min(conf, 0.85)
         if not top_commit.get("locative_in_subject", True):
             conf = min(conf, 0.85)
+        if top_commit.get("deep_history"):
+            conf = min(conf, 0.85)
 
         return {
             "shipped": True,
@@ -1640,6 +1879,14 @@ def is_shipped(topic: str) -> dict:
         return {
             "shipped": False,
             "confidence": 0.85,
+            "evidence": [],
+            "tickets": all_tickets,
+        }
+
+    if coverage_filtered:
+        return {
+            "shipped": False,
+            "confidence": 0.60,
             "evidence": [],
             "tickets": all_tickets,
         }
