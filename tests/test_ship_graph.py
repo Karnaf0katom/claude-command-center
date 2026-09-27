@@ -225,6 +225,8 @@ def mock_trap_env(tmp_path, monkeypatch):
                     "feat(chat): add emoji reaction picker to huddle replay")
     sha_a6 = commit(repo_alpha, "a6.txt", "6",
                     "feat(history): ticket graph for lantern search and ledger")
+    sha_a7 = commit(repo_alpha, "a7.txt", "7",
+                    "chore: update star chart [skip ci]")
 
     sha_b1 = commit(repo_beta, "b1.txt", "1",
                     "feat(site): add partner controls to checkout flows")
@@ -301,7 +303,7 @@ def mock_trap_env(tmp_path, monkeypatch):
         "mirror": mirror_dir / "beta-site",
         "db_path": db_path,
         "sha_a1": sha_a1, "sha_a2": sha_a2, "sha_a3": sha_a3, "sha_a4": sha_a4,
-        "sha_a5": sha_a5, "sha_a6": sha_a6,
+        "sha_a5": sha_a5, "sha_a6": sha_a6, "sha_a7": sha_a7,
         "sha_b1": sha_b1, "sha_b2": sha_b2, "sha_b3": sha_b3, "sha_b4": sha_b4,
     }
 
@@ -423,6 +425,23 @@ def test_ticket_project_identifier_not_treated_as_content(mock_trap_env):
     res2 = ship_graph.is_shipped("Did we ship the lantern search for ZEPHYR-2?")
     assert res2["shipped"] is True
     assert res2["evidence"][0]["commit"] == env["sha_a6"]
+
+
+def test_ci_bot_commits_ignored(mock_trap_env):
+    """Automated CI-marker commits are not shipping evidence."""
+    res = ship_graph.is_shipped("Did we ship the star chart widget?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+
+
+def test_detect_named_repo_prefers_exact_root_over_alias():
+    """An exact discovered root name beats a shorter alias match."""
+    roots = {"claude-command-center": "/x/claude-command-center",
+             "ccc-memory": "/x/ccc-memory"}
+    assert ship_graph.detect_named_repo(
+        "Did we ship the accept gate in ccc-memory?", roots)[0] == "ccc-memory"
+    assert ship_graph.detect_named_repo(
+        "Did CCC add the gate?", roots)[0] == "claude-command-center"
 
 
 def test_question_structure_helper():

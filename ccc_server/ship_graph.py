@@ -325,6 +325,23 @@ def discover_repo_roots() -> dict[str, str]:
         if p.name not in roots:
             roots[p.name] = str(p)
 
+    def add_root_or_children(p_raw: str) -> None:
+        """Config entries may be parent dirs (e.g. ~/Apps) — scan one level."""
+        try:
+            p = Path(p_raw).expanduser().resolve()
+        except Exception:
+            return
+        if (p / ".git").exists():
+            add_root(p)
+            return
+        if p.is_dir():
+            try:
+                for child in p.iterdir():
+                    if child.is_dir() and (child / ".git").exists():
+                        add_root(child)
+            except Exception:
+                pass
+
     # 0. Environment override
     env_repos = os.environ.get("CCC_SHIP_GRAPH_REPOS", os.environ.get("CCC_KNOWN_REPOS"))
     if env_repos:
@@ -341,7 +358,7 @@ def discover_repo_roots() -> dict[str, str]:
                 for line in p.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        add_root(line)
+                        add_root_or_children(line)
             except Exception:
                 pass
 
@@ -355,8 +372,8 @@ def discover_repo_roots() -> dict[str, str]:
         except Exception:
             pass
 
-    # 3. Conventional directories under HOME, Apps, dev
-    for parent in [Path.home() / "Apps", Path.home(), Path.home() / "dev", Path.home() / "dev" / "tools"]:
+    # 3. Conventional directories under HOME, Apps, dev, rnd
+    for parent in [Path.home() / "Apps", Path.home(), Path.home() / "dev", Path.home() / "dev" / "tools", Path.home() / "rnd"]:
         if parent.exists():
             try:
                 for child in parent.iterdir():
@@ -364,6 +381,36 @@ def discover_repo_roots() -> dict[str, str]:
                         add_root(child)
             except Exception:
                 pass
+
+    # 4. Working directories of indexed sessions — the nearest ancestor
+    # with a .git is a repo worth tracking
+    db_p = _get_db_path()
+    if db_p.exists():
+        cwds: list[str] = []
+        try:
+            sc = sqlite3.connect(f"file:{db_p}?mode=ro", uri=True)
+            try:
+                cwds = [r[0] for r in sc.execute(
+                    "SELECT DISTINCT cwd FROM session_meta WHERE cwd != '' LIMIT 500"
+                ).fetchall()]
+            except sqlite3.OperationalError:
+                pass
+            sc.close()
+        except Exception:
+            pass
+        home = Path.home()
+        for cwd in cwds:
+            if not cwd or SCRATCH_RE.search(cwd):
+                continue
+            try:
+                cur = Path(cwd).expanduser().resolve()
+            except Exception:
+                continue
+            while cur != home and cur.parent != cur:
+                if (cur / ".git").exists():
+                    add_root(cur)
+                    break
+                cur = cur.parent
 
     return roots
 
@@ -406,6 +453,19 @@ KNOWN_REPO_ALIASES: dict[str, list[str]] = {
 def detect_named_repo(query: str, known_roots: dict[str, str] | None = None) -> tuple[str | None, set[str]]:
     """Detect if a question names a specific repository or alias."""
     q_lower = query.lower()
+
+    # Exact root names win over aliases (e.g. a repo literally named ccc-memory
+    # must not be hijacked by the \bccc\b alias)
+    if known_roots:
+        for r_name in sorted(known_roots, key=len, reverse=True):
+            if len(r_name) <= 2 or r_name.startswith((".", "_")):
+                continue
+            clean = re.sub(r"[-_]", "[-_ ]", r_name.lower())
+            m = re.search(r"\b" + clean + r"\b", q_lower)
+            if m:
+                words = set(re.findall(r"[a-z0-9]+", m.group(0)))
+                return r_name, words
+
     for repo, patterns in KNOWN_REPO_ALIASES.items():
         for pat in patterns:
             m = re.search(pat, q_lower)
@@ -415,16 +475,8 @@ def detect_named_repo(query: str, known_roots: dict[str, str] | None = None) -> 
 
     if known_roots:
         for r_name in known_roots:
-            if r_name in KNOWN_REPO_ALIASES:
-                continue
             if len(r_name) <= 2 or r_name.startswith((".", "_")):
                 continue
-            clean = re.sub(r"[-_]", "[-_ ]", r_name.lower())
-            pat = r"\b" + clean + r"\b"
-            m = re.search(pat, q_lower)
-            if m:
-                words = set(re.findall(r"[a-z0-9]+", m.group(0)))
-                return r_name, words
             m_repo = re.search(r"\b" + re.escape(r_name.lower()) + r"\s+repo\b", q_lower)
             if m_repo:
                 words = set(re.findall(r"[a-z0-9]+", m_repo.group(0)))
@@ -1333,6 +1385,8 @@ def is_shipped(topic: str) -> dict:
         body_lower = (body or "").lower()
 
         if subj_lower.startswith("merge "):
+            return
+        if "[skip ci]" in subj_lower or "[ci skip]" in subj_lower:
             return
 
         is_doc_commit = (
