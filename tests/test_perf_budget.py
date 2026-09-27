@@ -3558,6 +3558,56 @@ def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
     )
 
 
+def test_session_fts_search_never_triggers_embedding_backfill_scan(tmp_path, monkeypatch):
+    """_backfill_missing_embeddings() scans sdoc for sids missing a semb row --
+    an O(corpus) query. It must only ever run from the background loop started
+    by warm_start(), never from search_sessions() (the user-facing path),
+    regardless of force_refresh. Guards the sdoc/semb backfill added for the
+    'sessions indexed while Ollama was down never get embedded' bug."""
+    from ccc_server import session_fts
+
+    db_path = tmp_path / "session_fts.sqlite"
+    projects_dir = tmp_path / "projects"
+    repo_dir = projects_dir / "repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+    monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
+
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+
+    backfill_calls = []
+    monkeypatch.setattr(
+        session_fts, "_backfill_missing_embeddings",
+        lambda conn: backfill_calls.append(1) or 0,
+    )
+
+    for i in range(3):
+        sid = f"session-{i:04d}"
+        path = repo_dir / f"{sid}.jsonl"
+        lines = [
+            {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": f"task {i} nebula scan"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "done"}},
+        ]
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    session_fts.search_sessions("nebula scan", force_refresh=True)
+    session_fts.search_sessions("nebula scan", force_refresh=False)
+    session_fts.search_sessions("nebula scan", force_refresh=True)
+
+    assert backfill_calls == [], (
+        f"search_sessions() triggered the embedding backfill scan {len(backfill_calls)} time(s); "
+        "that O(corpus) scan must only run from the background loop started by warm_start()"
+    )
+
+
 def test_ship_graph_second_call_does_no_reparse_or_subprocesses(tmp_path, monkeypatch):
     """Calling ship_graph a second time re-parses nothing and spawns no per-row subprocesses."""
     import sqlite3

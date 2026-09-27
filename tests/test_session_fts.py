@@ -44,6 +44,7 @@ def fts_env(tmp_path, monkeypatch):
     session_fts._vec_cache["sids"] = []
     session_fts._vec_cache["vecs"] = []
     session_fts._bg_sync_running = False
+    session_fts._backfill_running = False
 
     return {
         "db": db_path,
@@ -249,3 +250,140 @@ def test_search_sessions_cold_start_offloads_to_background(fts_env, monkeypatch)
 
     results2 = session_fts.search_sessions("warp core diagnostics")
     assert len(results2) == 6
+
+
+def test_drain_embeddings_queues_jobs_when_ollama_down(fts_env, monkeypatch):
+    """Root-cause regression: sessions parsed while Ollama is unreachable must
+    be queued to semb_pending, not silently dropped -- previously
+    _drain_embeddings returned early on an unavailable Ollama without ever
+    recording the job, so those sessions were never embedded again."""
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: False)
+
+    def boom(*a, **kw):
+        raise AssertionError("must not call Ollama when unavailable")
+
+    monkeypatch.setattr(session_fts, "_embed_texts", boom)
+
+    session_fts._drain_embeddings(conn, [("sid-outage", [("card", "some text")])])
+
+    pending = [r[0] for r in conn.execute("SELECT sid FROM semb_pending")]
+    assert pending == ["sid-outage"]
+
+
+def _insert_sdoc_row(conn, sid: str) -> None:
+    conn.execute(
+        "INSERT INTO sdoc VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sid, "title", "prompt text", "report text", "body text", "meta", ""),
+    )
+
+
+def test_backfill_missing_embeddings_queues_unembedded_sdoc_sids(fts_env):
+    """sdoc rows with no matching semb row (the historical-outage backlog, or
+    any other sdoc/semb gap) get queued into semb_pending; rows that already
+    have a semb row or are already pending are left alone."""
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+
+    _insert_sdoc_row(conn, "sid-missing-1")
+    _insert_sdoc_row(conn, "sid-missing-2")
+    _insert_sdoc_row(conn, "sid-has-semb")
+    _insert_sdoc_row(conn, "sid-already-pending")
+    conn.execute("INSERT INTO semb (sid, kind, vec) VALUES (?, ?, ?)", ("sid-has-semb", "card", b""))
+    conn.execute("INSERT INTO semb_pending (sid) VALUES (?)", ("sid-already-pending",))
+    conn.commit()
+
+    queued = session_fts._backfill_missing_embeddings(conn)
+
+    assert queued == 2
+    pending = {r[0] for r in conn.execute("SELECT sid FROM semb_pending")}
+    assert pending == {"sid-missing-1", "sid-missing-2", "sid-already-pending"}
+
+
+def test_backfill_missing_embeddings_is_bounded_per_call(fts_env, monkeypatch):
+    """Never an O(all sessions) scan queued in one shot -- each call queues at
+    most _MAX_EMBED_SESSIONS_PER_SYNC sids, matching the existing drain cap."""
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+    monkeypatch.setattr(session_fts, "_MAX_EMBED_SESSIONS_PER_SYNC", 3)
+
+    for i in range(10):
+        _insert_sdoc_row(conn, f"sid-{i:02d}")
+    conn.commit()
+
+    queued = session_fts._backfill_missing_embeddings(conn)
+
+    assert queued == 3
+    assert conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0] == 3
+
+
+def test_run_embedding_backfill_drains_full_backlog_when_ollama_returns(fts_env, monkeypatch):
+    """End-to-end: a backlog of un-embedded sdoc rows (simulating everything
+    indexed during the OPS-1251 Ollama outage) gets fully drained by the
+    background backfill loop once Ollama is available, in bounded slices
+    rather than one big batch."""
+    monkeypatch.setattr(session_fts, "_MAX_EMBED_SESSIONS_PER_SYNC", 2)
+    monkeypatch.setattr(session_fts, "_BACKFILL_RETRY_INTERVAL", 0.05)
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
+    monkeypatch.setattr(
+        session_fts, "_embed_texts",
+        lambda texts, batch=32, timeout=None: [[1.0, 0.0] for _ in texts],
+    )
+
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+    for i in range(7):
+        _insert_sdoc_row(conn, f"sid-{i:02d}")
+    conn.commit()
+
+    session_fts._run_embedding_backfill()
+
+    deadline = time.time() + 5.0
+    while session_fts._backfill_running and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert not session_fts._backfill_running, "backfill loop did not finish in time"
+    assert conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0] == 0
+    embedded = conn.execute("SELECT COUNT(DISTINCT sid) FROM semb").fetchone()[0]
+    assert embedded == 7
+
+
+def test_run_embedding_backfill_backs_off_while_ollama_down(fts_env, monkeypatch):
+    """While Ollama stays unreachable the loop must not spin hot or drop the
+    backlog -- it keeps the sids queued and retries on its backoff interval."""
+    monkeypatch.setattr(session_fts, "_BACKFILL_RETRY_INTERVAL", 0.05)
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: False)
+
+    def boom(*a, **kw):
+        raise AssertionError("must not call Ollama while unavailable")
+
+    monkeypatch.setattr(session_fts, "_embed_texts", boom)
+
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+    _insert_sdoc_row(conn, "sid-stuck")
+    conn.commit()
+
+    session_fts._run_embedding_backfill()
+    time.sleep(0.3)
+
+    assert session_fts._backfill_running, "loop should still be retrying, not exited"
+    pending = [r[0] for r in conn.execute("SELECT sid FROM semb_pending")]
+    assert pending == ["sid-stuck"]
+
+    # Ollama recovers -- the same running loop should pick it up without a
+    # fresh trigger.
+    monkeypatch.setattr(session_fts, "_ollama_available", lambda: True)
+    monkeypatch.setattr(
+        session_fts, "_embed_texts",
+        lambda texts, batch=32, timeout=None: [[1.0, 0.0] for _ in texts],
+    )
+
+    deadline = time.time() + 5.0
+    while session_fts._backfill_running and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert not session_fts._backfill_running
+    assert conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM semb WHERE sid = ?", ("sid-stuck",)).fetchone()[0] > 0

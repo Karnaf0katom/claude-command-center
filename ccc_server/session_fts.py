@@ -86,7 +86,12 @@ _bg_sync_running = False
 # behavior. Nothing here ever raises out of search_sessions().
 EMB_MODEL = "nomic-embed-text"
 _EMBED_BATCH = 32
-_EMBED_TIMEOUT = float(os.environ.get("CCC_SESSION_FTS_EMBED_TIMEOUT", "20"))
+# Background-only budget (document embedding, and the backfill drain below).
+# A cold Ollama model-load has been measured at ~20s when the model lives on
+# an external drive (OPS-1251); a 20s timeout here would race that load and
+# fail the very first background batch. This is never on a user-facing
+# request path -- _QUERY_EMBED_TIMEOUT below is the short one that is.
+_EMBED_TIMEOUT = float(os.environ.get("CCC_SESSION_FTS_EMBED_TIMEOUT", "45"))
 # The per-query embed in _vector_rank() runs synchronously on the request
 # thread (it must, to rank *this* call's results) -- unlike document
 # embedding, it can't be backgrounded. Capped short so a cold Ollama model
@@ -99,6 +104,14 @@ _MAX_EMBED_SESSIONS_PER_SYNC = int(os.environ.get("CCC_SESSION_FTS_EMBED_BATCH_C
 
 _ollama_state = {"ts": 0.0, "ok": False}
 _vec_cache: dict = {"sids": [], "vecs": []}
+
+# Catch-up backfill for sdoc rows that never got a semb row (eg. everything
+# indexed while Ollama was unreachable, before semb_pending queueing existed).
+# Runs once per process as a background loop kicked off from warm_start();
+# see _run_embedding_backfill().
+_BACKFILL_RETRY_INTERVAL = 30.0  # seconds; matches _OLLAMA_TTL cadence
+_backfill_lock = threading.Lock()
+_backfill_running = False
 
 
 def _get_db_path() -> Path:
@@ -551,6 +564,16 @@ def _drain_embeddings(conn: sqlite3.Connection, embed_jobs: list[tuple[str, list
     """Embed newly-changed sessions plus a bounded slice of any backlog left
     over from a prior cycle where Ollama was unavailable or over-capacity."""
     if not _ollama_available():
+        # Ollama down for this cycle: don't drop these sids on the floor --
+        # queue them so a later cycle (or the backfill loop) picks them up.
+        # This was the root cause of sessions indexed during an Ollama outage
+        # (OPS-1251: ~/.ollama/models on an external drive) never getting
+        # embedded -- they were parsed into sdoc/file_cache fine, but the
+        # embed job for them was silently discarded right here.
+        if embed_jobs:
+            with conn:
+                for sid, _chunks in embed_jobs:
+                    conn.execute("INSERT OR IGNORE INTO semb_pending (sid) VALUES (?)", (sid,))
         return
 
     if not embed_jobs:
@@ -595,6 +618,71 @@ def _drain_embeddings(conn: sqlite3.Connection, embed_jobs: list[tuple[str, list
             conn.execute("INSERT INTO semb (sid, kind, vec) VALUES (?, ?, ?)", (sid, kind, array("f", nv).tobytes()))
         for sid, _chunks in jobs:
             conn.execute("DELETE FROM semb_pending WHERE sid = ?", (sid,))
+
+
+def _backfill_missing_embeddings(conn: sqlite3.Connection) -> int:
+    """Queue one bounded slice of sdoc sids that have no semb row at all into
+    semb_pending, so the normal drain picks them up. Covers sdoc rows that
+    were indexed before semb_pending queueing existed (or from any other gap
+    between sdoc and semb) -- never a full-corpus scan, and never called on a
+    user-facing path. Returns the number of sids queued."""
+    rows = conn.execute(
+        """
+        SELECT sid FROM sdoc
+        WHERE sid NOT IN (SELECT sid FROM semb)
+          AND sid NOT IN (SELECT sid FROM semb_pending)
+        LIMIT ?
+        """,
+        (_MAX_EMBED_SESSIONS_PER_SYNC,),
+    ).fetchall()
+    if not rows:
+        return 0
+    with conn:
+        for (sid,) in rows:
+            conn.execute("INSERT OR IGNORE INTO semb_pending (sid) VALUES (?)", (sid,))
+    return len(rows)
+
+
+def _run_embedding_backfill() -> None:
+    """Background-only catch-up loop for _backfill_missing_embeddings(): keep
+    queueing and draining bounded slices until no sdoc sid is missing a semb
+    row, backing off when Ollama is unavailable or a slice makes no progress
+    (eg. a cold model-load timeout) instead of hammering it in a tight loop.
+    Started once from warm_start(); idempotent while already running.
+    """
+    global _backfill_running
+    with _backfill_lock:
+        if _backfill_running:
+            return
+        _backfill_running = True
+
+    def _worker() -> None:
+        global _backfill_running
+        try:
+            conn = _connect(_get_db_path())
+            try:
+                while True:
+                    queued = _backfill_missing_embeddings(conn)
+                    pending = conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0]
+                    if not queued and not pending:
+                        break
+                    if not _ollama_available():
+                        time.sleep(_BACKFILL_RETRY_INTERVAL)
+                        continue
+                    _drain_embeddings(conn, [])
+                    _refresh_vec_cache(conn)
+                    still_pending = conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0]
+                    if still_pending >= pending:
+                        time.sleep(_BACKFILL_RETRY_INTERVAL)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        finally:
+            with _backfill_lock:
+                _backfill_running = False
+
+    threading.Thread(target=_worker, daemon=True, name="session-fts-backfill").start()
 
 
 def _defer_embeddings(embed_jobs: list[tuple[str, list[tuple[str, str]]]]) -> None:
@@ -837,6 +925,7 @@ def warm_start() -> None:
     background before the first real request arrives, per CLAUDE.md's perf
     gates (no O(all sessions) work inline on a user-facing path)."""
     _start_background_sync()
+    _run_embedding_backfill()
 
 
 def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) -> list[dict]:
