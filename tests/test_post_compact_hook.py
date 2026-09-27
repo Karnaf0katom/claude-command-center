@@ -101,6 +101,18 @@ def test_asks_skip_tag_wrapped_meta_content():
     assert state["asks"] == []
 
 
+def test_asks_skip_injected_notifications():
+    state = {"asks": [], "ticket_ref": "", "ticket_title": ""}
+    hook._scan_into(_jsonl([
+        _user_text("fix the flaky test"),
+        _user_text("[watchtower] WT-9 claimed"),
+        _user_text("Another Claude session sent a message: <cross-session-message>hi</cross-session-message>"),
+        _user_text("[SYSTEM NOTIFICATION - NOT USER INPUT] task done"),
+    ]), state)
+    assert state["asks"] == ["fix the flaky test"]
+    assert state["ticket_ref"] == ""
+
+
 def test_asks_keeps_true_last_three_including_repeats():
     """Head/tail windows never overlap (see main()'s size check), so a
     literal repeat ("continue" asked twice) must survive, not collapse."""

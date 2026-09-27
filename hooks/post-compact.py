@@ -30,6 +30,13 @@ TICKET_REF_RE = re.compile(r"\b([A-Z][A-Z0-9]{0,20}(?:-[A-Z][A-Z0-9]{0,20}){0,3}
 HEAD_BYTES = 320_000
 TAIL_BYTES = 400_000
 MAX_BLOCK_CHARS = 600
+# User-role turns that were injected by tooling, not typed by the user: queue
+# notifications, peer-session messages, background-task events.
+INJECTED_PREFIXES = (
+    "[watchtower]",
+    "Another Claude session sent a message",
+    "[SYSTEM NOTIFICATION",
+)
 
 
 def _clear_compacting_marker(session_id):
@@ -110,7 +117,7 @@ def _scan_into(text, state):
         if not _has_tool_result(content):
             for t in _text_blocks(content):
                 t = re.sub(r"\s+", " ", t).strip()
-                if not t or t.startswith("<"):
+                if not t or t.startswith("<") or t.startswith(INJECTED_PREFIXES):
                     continue
                 state["asks"].append(t)
                 m = TICKET_REF_RE.search(t)

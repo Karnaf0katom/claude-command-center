@@ -1,0 +1,1 @@
+- The post-compaction re-orientation block no longer lists queue notifications or peer-session messages as "last asks".
