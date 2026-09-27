@@ -36,8 +36,27 @@ ccc recall "csv export dashboard"
 Each hit carries `session_id`, `title`, `repo`, `date`, and a `snippet` —
 enough to decide whether to open the full transcript before acting.
 
-Both commands accept `--json` for scripted use and exit non-zero on a missing
-argument. Neither call is destructive or slow enough to need `run_in_background`.
+## Two more verbs: file history and decisions
+
+`ccc history <path>` lists commits (`git log --follow`) and indexed sessions
+that touched a file, newest first — useful before editing something
+unfamiliar, to see who touched it and why.
+
+```bash
+ccc history src/app.py
+```
+
+`ccc decisions "<topic>"` finds sessions whose snippet reads as a decision
+("went with", "instead of", ...) rather than just mentioning the topic — a
+heuristic stand-in until a dedicated decision store lands.
+
+```bash
+ccc decisions "which queue engine"
+```
+
+All four commands accept `--json` for scripted use and exit non-zero on a
+missing argument. None is destructive or slow enough to need
+`run_in_background`.
 
 Out of scope for this skill: no pre-spawn hook wires this in automatically —
 you decide when to run these, this just tells you they exist and when they're

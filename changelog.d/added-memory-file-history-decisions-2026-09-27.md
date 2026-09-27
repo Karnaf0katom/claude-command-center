@@ -1,0 +1,1 @@
+Added `GET /api/memory/file-history` and `GET /api/memory/decisions`, plus `ccc history <path>` and `ccc decisions "<topic>"` CLI verbs, so an agent can ask "who touched this file and why" or "did we already decide this" without re-deriving history from scratch. The Ask tab now also pulls in `shipped`/`recall` context for "did we already ship X" questions.
