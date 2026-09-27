@@ -3489,3 +3489,71 @@ def test_hermes_conv_open_does_not_scan_whole_sessions_table(monkeypatch, tmp_pa
     )
     lineage = [e for e in parsed["events"] if e.get("subtype") == "hermes_lineage"]
     assert lineage and lineage[0]["lineage_session_ids"] == [parent, child]
+
+
+def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
+    """A second search must reuse cached (mtime, size) index without re-parsing transcripts."""
+    from ccc_server import session_fts
+
+    db_path = tmp_path / "session_fts.sqlite"
+    projects_dir = tmp_path / "projects"
+    repo_dir = projects_dir / "repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CCC_SESSION_FTS_DB", str(db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(tmp_path / "codex"))
+    monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
+    monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
+
+    # Reset thread local and state
+    if hasattr(session_fts._tls, "conn") and session_fts._tls.conn:
+        session_fts._tls.conn.close()
+        session_fts._tls.conn = None
+    session_fts._last_sync_ts = 0.0
+
+    for i in range(5):
+        sid = f"session-{i:04d}"
+        path = repo_dir / f"{sid}.jsonl"
+        lines = [
+            {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": f"task number {i} kernel optimization"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "done"}},
+        ]
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    parse_calls = []
+    real_parse = session_fts._parse_file
+
+    def spy_parse(args):
+        parse_calls.append(args)
+        return real_parse(args)
+
+    monkeypatch.setattr(session_fts, "_parse_file", spy_parse)
+
+    res1 = session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert len(res1) == 5
+    assert len(parse_calls) == 5, f"cold build should parse 5 files, got {len(parse_calls)}"
+
+    parse_calls.clear()
+    res2 = session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert len(res2) == 5
+    assert len(parse_calls) == 0, (
+        f"second search re-parsed {len(parse_calls)} files; "
+        "incremental (mtime, size) cache regressed"
+    )
+
+    parse_calls.clear()
+    mod_path = repo_dir / "session-0002.jsonl"
+    lines = [
+        {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": "updated task number 2 kernel optimization"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "updated done"}},
+    ]
+    mod_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    os.utime(mod_path, None)
+
+    res3 = session_fts.search_sessions("kernel optimization", force_refresh=True)
+    assert len(res3) == 5
+    assert len(parse_calls) == 1, (
+        f"expected exactly 1 re-parse for 1 modified file, got {len(parse_calls)}"
+    )
+
