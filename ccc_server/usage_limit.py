@@ -495,9 +495,11 @@ def _usage_limit_retrieval_prompt(engine, sid, context_tokens):
         "",
         "Retrieve context SELECTIVELY. Never open or Read the whole transcript",
         f"(it is ~{tokens_label} tokens). Pull only the slice you need:",
-        '  - Total Recall:  total-recall recall --query "<terms>" --limit 10',
+        "  - tail -n 80 the transcript for the most recent turns (cut by",
+        "    lines, not bytes: a byte cut splits a JSON line), then jq the",
+        "    message text",
         "  - grep/rg the transcript for specific strings",
-        "  - tail the transcript for the most recent turns",
+        '  - ccc recall "<terms>" / ccc shipped "<topic>" for related work',
         "",
         "Load the minimum slice that answers the task, then proceed.",
     ]

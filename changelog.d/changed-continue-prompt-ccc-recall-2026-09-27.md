@@ -1,0 +1,1 @@
+- "Continue in a new session" handoff prompts now point at `ccc recall` / `ccc shipped` instead of Total Recall, and warn against byte-cutting the transcript.
