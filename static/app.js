@@ -636,6 +636,76 @@
       close();
     });
   }
+  // "Where are we?" (MEMO-FIX-where): one session's whole lineage chain,
+  // summarized by a cached headless Sonnet call (ccc_server/where_answer.py)
+  // into a plain-language status, a human action-item checklist, and an
+  // optional "Continue" button. Overlay pattern mirrors _showAnomalyPrompt.
+  function _showWhereOverlay(sid) {
+    if (document.getElementById('cccWhereOverlay')) return;
+    const ov = document.createElement('div');
+    ov.id = 'cccWhereOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10000;display:flex;align-items:center;justify-content:center;';
+    ov.innerHTML = '<div class="where-panel" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px 20px;max-width:560px;width:calc(100% - 40px);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.5);color:var(--text);font-size:13px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+      '<div style="font-size:15px;font-weight:600">Where are we?</div>' +
+      '<button type="button" class="sh-btn" data-act="close">Close</button></div>' +
+      '<div class="where-body">Thinking&hellip; this can take up to a couple minutes the first time.</div></div>';
+    document.body.appendChild(ov);
+    const close = function () { ov.remove(); };
+    ov.addEventListener('click', function (ev) { if (ev.target === ov) close(); });
+    ov.querySelector('[data-act="close"]').addEventListener('click', close);
+    const body = ov.querySelector('.where-body');
+    fetch('/api/memory/where/' + encodeURIComponent(sid), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (payload) {
+        if (!ov.isConnected) return;
+        if (!payload || !payload.found) {
+          body.textContent = 'No session found for ' + sid + '.';
+          return;
+        }
+        if (payload.error) {
+          body.textContent = 'Could not generate an answer: ' + payload.error;
+          return;
+        }
+        body.innerHTML = payload.html || 'No answer.';
+      })
+      .catch(function (err) {
+        if (!ov.isConnected) return;
+        body.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
+      });
+  }
+  // Delegated on document since the where-overlay lives outside $convList.
+  if (!document.body._whereContinueWired) {
+    document.body._whereContinueWired = true;
+    document.body.addEventListener('click', function (ev) {
+      const btn = ev.target.closest && ev.target.closest('.where-continue-btn');
+      if (!btn) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      let payload;
+      try {
+        payload = JSON.parse(btn.getAttribute('data-spawn-payload') || '{}');
+      } catch (e) {
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      fetch('/api/sessions/spawn', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) throw new Error((res.d && (res.d.error || res.d.message)) || 'spawn failed');
+          btn.textContent = 'Started';
+          if (typeof showOpToast === 'function') showOpToast('New session started', 'info');
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          btn.textContent = 'Continue';
+          if (typeof showOpToast === 'function') showOpToast('Could not start session: ' + (err && err.message ? err.message : err), 'error');
+        });
+    });
+  }
   function _startAnomalyPoll() {
     const tick = _gated('cccAnomalies', function () {
       return fetch('/api/system/anomalies', { cache: 'no-store' })
@@ -34504,6 +34574,16 @@
       const historyBadgeHtml = c._historyMatch
         ? '<span class="conv-history-badge' + _historyBadgeClass + '" title="' + escapeAttr(_historyBadgeTitle) + '">' + _historyBadgeLabel + '</span>'
         : '';
+      // Search/recall results are a flat list of matched sessions, so a
+      // continuation or spawn chain with more than one matching leg would
+      // otherwise show as duplicate rows. The server already folds those
+      // into the newest leg (see lineage.collapse_chain_hits) and reports
+      // how many earlier legs got folded in chain_collapsed.
+      const historyChainBadgeHtml = (c._historyMatch && c._historyChainCollapsed > 0)
+        ? '<span class="conv-chain-badge" title="' + escapeAttr(
+            (c._historyChainCollapsedSids || []).join(', ') + ' folded into this row as the newest leg')
+          + '">+' + c._historyChainCollapsed + ' earlier</span>'
+        : '';
       const repoBadgeHtml = c._repoSearchMatch
         ? '<span class="conv-history-badge" title="Matched repo search; showing latest sessions from ' + escapeHtml(c._repoSearchLabel || 'repo') + '">repo</span>'
         : '';
@@ -34653,11 +34733,20 @@
           + ' title="Show / hide brief" aria-expanded="' + (_briefOpen ? 'true' : 'false') + '">'
           + (_briefOpen ? '&#9662;' : '&#9656;') + '</button>'
         : '';
+      // "Where are we?" (MEMO-FIX-where): same gate as the brief chevron --
+      // a row only earns this button once it has a captured session-state
+      // summary worth turning into a full status + human checklist.
+      const _whereBtnHtml = _hasBrief
+        ? '<button type="button" class="conv-where-btn" data-role="where-btn"'
+          + ' data-where-sid="' + escapeHtml(_briefSid) + '"'
+          + ' title="Where are we? Plain-language status, action items, and a continue prompt">Where?</button>'
+        : '';
       // Meta row: always shown when there are chips or a brief chevron.
       const _hasMetaContent = !opts.evergreenAgent && (_hmObjectChip || _hmFolderChip || sessionProvenanceChipHtml || sessionIdChipHtml || goalMetaHtml || pinnedHtml || rowSizeHtml || branchSlotHtml || _hasBrief);
       const hoverMetaRowHtml = _hasMetaContent
         ? '<div class="conv-hover-meta-row">'
           + _briefChevronHtml
+          + _whereBtnHtml
           + _hmObjectChip
           + _hmFolderChip
           + sessionProvenanceChipHtml
@@ -34782,7 +34871,7 @@
         const _mStatus = deriveMobileRowStatus(c, _isAgentRunning, _isWaitingForUser, _hasStaleToolCall, _knownActivityTool);
         mobileStatusHtml = mobileCardStatusLineHtml(_mStatus);
         const _detailInner = rowMetaHtml + hoverMetaRowHtml
-          + historyBadgeHtml + repoBadgeHtml + orchChildBadgeHtml + pctBadgeHtml + qcBadgeHtml
+          + historyBadgeHtml + historyChainBadgeHtml + repoBadgeHtml + orchChildBadgeHtml + pctBadgeHtml + qcBadgeHtml
           + (opts.evergreenAgent ? '' : evergreenGoalHtml)
           + (goalIconOnly ? goalIconHtml : '');
         if (_detailInner) {
@@ -34817,6 +34906,7 @@
             + (opts.evergreenAgent ? '' : uxFixesQueueProgressHtml)
             + (opts.evergreenAgent ? '' : evergreenStateHtml)
             + historyBadgeHtml
+            + historyChainBadgeHtml
             + repoBadgeHtml
             + emptySessionChipHtml
             + (opts.evergreenAgent ? '' : rowMetaHtml)
@@ -39319,6 +39409,21 @@
         chev.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
         const row = chev.closest('.conv-item');
         if (row) row.classList.toggle('is-brief-open', nowOpen);
+      });
+    }
+    // "Where are we?" (MEMO-FIX-where): fetches /api/memory/where/<sid> and
+    // shows the result in an overlay. Delegated + wired once, mirroring the
+    // brief-toggle handler above.
+    if (!$convList._whereBtnWired) {
+      $convList._whereBtnWired = true;
+      $convList.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-role="where-btn"]');
+        if (!btn) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+        const sid = btn.getAttribute('data-where-sid') || '';
+        if (!sid) return;
+        _showWhereOverlay(sid);
       });
     }
     // Compact subagent clusters are collapsed by default. Toggle the selected
@@ -61110,6 +61215,8 @@
         cwd: r.cwd || '',
         type: r.type || '',
         source: r._source || 'bm25',
+        chainCollapsed: r.chain_collapsed || 0,
+        chainCollapsedSids: Array.isArray(r.chain_collapsed_sids) ? r.chain_collapsed_sids : [],
       };
       const existing = map.get(sid);
       if (!existing || _historySourceRank(hit.source) > _historySourceRank(existing.source)) {
@@ -61180,6 +61287,8 @@
           c._historyMatch = false;
           c._historySnippet = '';
           c._historySource = '';
+          c._historyChainCollapsed = 0;
+          c._historyChainCollapsedSids = [];
         }
         if (c._repoSearchMatch) {
           c._repoSearchMatch = false;
@@ -61202,11 +61311,15 @@
         c._historyMatch = true;
         c._historySnippet = hit.snippet;
         c._historySource = hit.source || 'bm25';
+        c._historyChainCollapsed = hit.chainCollapsed || 0;
+        c._historyChainCollapsedSids = hit.chainCollapsedSids || [];
       } else if (c._historyMatch) {
         // Was decorated for a previous query; clear.
         c._historyMatch = false;
         c._historySnippet = '';
         c._historySource = '';
+        c._historyChainCollapsed = 0;
+        c._historyChainCollapsedSids = [];
       }
       const localSid = c.session_id || c.id;
       if (localSid && repoRows.some(r => (r.session_id || r.id) === localSid)) {
@@ -61244,6 +61357,8 @@
         _historyMatch: true,
         _historySnippet: hit.snippet,
         _historySource: hit.source || 'bm25',
+        _historyChainCollapsed: hit.chainCollapsed || 0,
+        _historyChainCollapsedSids: hit.chainCollapsedSids || [],
         _historyOnly: true,
       });
     }
@@ -68625,6 +68740,8 @@
           s._historyMatch = true;
           s._historySnippet = hit.snippet;
           s._historySource = hit.source || 'bm25';
+          s._historyChainCollapsed = hit.chainCollapsed || 0;
+          s._historyChainCollapsedSids = hit.chainCollapsedSids || [];
           // Archive mode normally hides the ask preview to keep rows
           // single-line; re-enable it for matched rows so the snippet
           // line has somewhere to render.

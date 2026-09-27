@@ -152,6 +152,27 @@ def latest_successor(conn: sqlite3.Connection, sid: str) -> str:
     return current
 
 
+def continuation_chain_members(conn: sqlite3.Connection, sid: str) -> list[str]:
+    """Every sid in `sid`'s continuation chain, oldest first, `sid` itself
+    included. For a "where are we" answer that needs the whole chain's
+    `ccc brief` output, not just the parent/latest endpoints `chain_summary`
+    reports."""
+    ancestors = continuation_ancestors_of(conn, sid)
+    root = ancestors[-1] if ancestors else sid
+    members = [root]
+    seen = {root}
+    current = root
+    for _ in range(MAX_CHAIN_DEPTH):
+        children = _sg.continuation_children_of(conn, current)
+        nxt = next((c for c in children if c not in seen), "")
+        if not nxt:
+            break
+        members.append(nxt)
+        seen.add(nxt)
+        current = nxt
+    return members
+
+
 def orchestrator_parent(sid: str, session_graph_path=None, report_routes_path=None) -> str:
     """The dispatcher that kicked off `sid`'s chain: `sid`'s own spawn parent,
     falling back to its report-to address, if either exists. Callers that

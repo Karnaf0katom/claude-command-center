@@ -28,6 +28,7 @@ command, without opening the dashboard:
     ccc history src/app.py                      # commits + sessions that touched a file
     ccc decisions "which queue engine"          # sessions that recorded a decision
     ccc brief <session>                         # where a session left off + how to resume it
+    ccc where <session|query>                   # plain-language status + human checklist + continue
 
 <session> is a session id, a unique id prefix, or a (unique, case-
 insensitive) fragment of the session's display name from `ccc sessions`.
@@ -59,7 +60,7 @@ from datetime import datetime, timezone
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
-               "rebind-report-to", "recall", "shipped", "history", "decisions", "brief")
+               "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -573,6 +574,61 @@ def cmd_brief(args):
         print(f"  (other matches: {', '.join(payload['alternates'])})")
     if payload.get("indexing"):
         print("(indexing: true — still warming up, results may be incomplete)")
+    return 0
+
+
+def cmd_where(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    text = " ".join(args.query).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print("ccc where: missing session id/prefix/query (pass it as an argument or pipe it on stdin)",
+              file=sys.stderr)
+        return 2
+    try:
+        # Uncached, this round-trips through one headless Claude call —
+        # give it real room, not cmd_brief's 20s.
+        payload = _get_json(base, f"/api/memory/where/{urllib.parse.quote(text, safe='')}", timeout=130)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("found") else 1
+    if not payload.get("found"):
+        print(f"(no session found for {text!r})")
+        return 1
+    if payload.get("error"):
+        print(f"ccc where: {payload['error']}", file=sys.stderr)
+        return 1
+    print(f"session: {payload.get('session_id')}")
+    if payload.get("parent"):
+        print(f"parent: {payload['parent']}")
+    chain = payload.get("chain_sids") or []
+    if len(chain) > 1:
+        print(f"chain: {' -> '.join(chain)}")
+    print()
+    print(payload.get("status") or "(no status)")
+    items = payload.get("action_items") or []
+    if items:
+        print("\nfor you:")
+        for it in items:
+            link = f"  ({it['deep_link']})" if it.get("deep_link") else ""
+            print(f"  - {it.get('text')}{link}")
+    else:
+        print("\nnothing outstanding for you — next step is more agent work.")
+    if payload.get("continue_prompt"):
+        print(f"\ncontinue with: {payload['continue_prompt']}")
+    if payload.get("cached"):
+        print("\n(cached)")
     return 0
 
 
@@ -1362,6 +1418,22 @@ def main(argv=None):
                    help="session id, id prefix, or a recall-style query (or pipe it on stdin)")
     p.add_argument("--json", action="store_true", help="raw brief result JSON")
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser(
+        "where",
+        help='"where are we?" across a session\'s whole lineage chain',
+        description="GET /api/memory/where/<query>: one cached, read-only "
+                    "headless Sonnet call over ccc brief's output for a "
+                    "session's whole continuation chain plus any runbook it "
+                    "referenced, producing a plain-language status, a "
+                    "checklist of what a human still needs to do, and a "
+                    "prompt to continue with in a new session. Slow "
+                    "(up to ~2 min) unless already cached.",
+    )
+    p.add_argument("query", nargs="*",
+                   help="session id, id prefix, or a recall-style query (or pipe it on stdin)")
+    p.add_argument("--json", action="store_true", help="raw where result JSON")
+    p.set_defaults(func=cmd_where)
 
     p = sub.add_parser(
         "models",

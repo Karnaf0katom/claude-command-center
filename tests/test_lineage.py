@@ -127,6 +127,23 @@ def test_continuation_cycle_is_guarded(db_conn):
     assert lineage.latest_successor(db_conn, "session-a") in ("session-a", "session-b")
 
 
+def test_continuation_chain_members_orders_oldest_first(db_conn):
+    _insert_session_meta(db_conn, "session-a", start_ts=1.0)
+    _insert_session_meta(db_conn, "session-b", start_ts=2.0, continuation_origin="session-a")
+    _insert_session_meta(db_conn, "session-c", start_ts=3.0, continuation_origin="session-b")
+    assert lineage.continuation_chain_members(db_conn, "session-b") == [
+        "session-a", "session-b", "session-c",
+    ]
+    assert lineage.continuation_chain_members(db_conn, "session-a") == [
+        "session-a", "session-b", "session-c",
+    ]
+
+
+def test_continuation_chain_members_single_session_is_itself(db_conn):
+    _insert_session_meta(db_conn, "session-solo", start_ts=1.0)
+    assert lineage.continuation_chain_members(db_conn, "session-solo") == ["session-solo"]
+
+
 # -- chain_summary -----------------------------------------------------------
 
 def test_chain_summary_full_chain(tmp_path, db_conn, session_graph_file):
