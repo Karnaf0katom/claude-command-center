@@ -337,6 +337,12 @@ def _dashboard_event_watch_exit():
 # activity.log so the human log stays skim-able. Rotated by nothing --
 # truncate it by hand when the investigation ends.
 APP_SERVER_TRACE_FILE = COMMAND_CENTER_STATE_DIR / "logs" / "app-server-trace.log"
+if test_isolation_active():
+    # Tests drive fake transports (Mock pids, fixed clocks); keep their records
+    # out of the live trace used to debug real app-server failures.
+    APP_SERVER_TRACE_FILE = (
+        Path(tempfile.gettempdir()) / f"ccc-test-app-server-trace-{os.getpid()}.log"
+    )
 _APP_SERVER_TRACE_FH = None
 _APP_SERVER_TRACE_LOCK = threading.Lock()
 
