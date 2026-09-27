@@ -7442,7 +7442,17 @@ def _model_policy_blocked_models():
     cache = _MODEL_POLICY_CACHE
     if cache["sig"] != sig:
         file_blocked = set()
-        if sig[1] is not None:
+        if sig[1] is None:
+            # MEMO-FIX-25: a missing file used to be silently treated as "no
+            # policy" (2026-09-27 incident: gpt-6-astra fully unblocked for
+            # hours with nothing surfacing it). Loud on every sig change
+            # (i.e. once, not per-request) so it lands in the server log.
+            print(
+                f"[model-policy] {path} is missing — the model deny-list is "
+                "fully unenforced until it's restored",
+                file=sys.stderr,
+            )
+        else:
             try:
                 data = json.loads(path.read_text())
                 raw = data.get("blocked_models") if isinstance(data, dict) else None
@@ -7450,8 +7460,12 @@ def _model_policy_blocked_models():
                     key = _model_catalog_key(item)
                     if key:
                         file_blocked.add(key)
-            except (OSError, ValueError, AttributeError):
-                pass
+            except (OSError, ValueError, AttributeError) as e:
+                print(
+                    f"[model-policy] {path} is unparseable ({e}) — treated as "
+                    "empty, deny-list unenforced",
+                    file=sys.stderr,
+                )
         cache["sig"] = sig
         cache["blocked"] = frozenset(file_blocked)
     return frozenset(blocked | cache["blocked"])
@@ -7470,6 +7484,73 @@ def _model_policy_error(model):
         f"model {_clean_spawn_default_model(model)!r} is blocked by model policy "
         f"({MODEL_POLICY_FILE}); remove it from blocked_models to allow it"
     )
+
+
+def _model_policy_health():
+    """Model-policy deny-list health for `ccc doctor` and /api/healthcheck
+    (MEMO-FIX-25). The deny-list gate (_model_policy_blocks) only catches an
+    *explicit* spawn/save request -- it can't see a blocked model sitting as
+    someone's ambient default, which is exactly how the 2026-09-05 incident
+    happened. MEMO-FIX-23 (2026-09-27) found both failure modes recurring
+    independently with no alert: model-policy.json had vanished from disk
+    (silently unblocking everything) and ~/.codex/config.toml's top-level
+    model had drifted back onto the deny-list. This checks both: the policy
+    file itself, and every engine's ambient default (codex config.toml,
+    spawn-defaults.json models.*).
+    """
+    errors = []
+    path = MODEL_POLICY_FILE
+    try:
+        raw_text = path.read_text()
+        exists = True
+    except OSError:
+        raw_text = None
+        exists = False
+    parseable = True
+    if not exists:
+        errors.append(
+            f"model-policy.json is missing ({path}) — the deny-list is fully unenforced"
+        )
+    else:
+        try:
+            data = json.loads(raw_text)
+            if not isinstance(data, dict) or not isinstance(data.get("blocked_models"), list):
+                raise ValueError("blocked_models is missing or not a list")
+        except (ValueError, TypeError) as e:
+            parseable = False
+            errors.append(
+                f"model-policy.json is unparseable ({e}) — treated as empty, deny-list unenforced"
+            )
+
+    ambient = {}
+    codex_model = _codex_configured_model()
+    if codex_model:
+        ambient["codex:config.toml"] = codex_model
+        if _model_policy_blocks(codex_model):
+            errors.append(
+                f"~/.codex/config.toml model={codex_model!r} is on the deny-list "
+                "(every bare `codex` invocation defaults to a blocked model)"
+            )
+    try:
+        spawn_models = (_load_spawn_defaults() or {}).get("models") or {}
+    except Exception:
+        spawn_models = {}
+    for engine, model in sorted(spawn_models.items()):
+        if not model:
+            continue
+        ambient[f"spawn-defaults:{engine}"] = model
+        if _model_policy_blocks(model):
+            errors.append(
+                f"spawn-defaults.json models.{engine}={model!r} is on the deny-list "
+                f"(blank {engine} spawns default to a blocked model)"
+            )
+
+    return {
+        "status": "error" if errors else "ok",
+        "errors": errors,
+        "policy_file": {"path": str(path), "exists": exists, "parseable": parseable},
+        "ambient_defaults": ambient,
+    }
 
 
 def _first_allowed_curated_model(engine):
@@ -18910,6 +18991,26 @@ def _build_healthcheck():
             "No repo folders discovered yet"
         ),
         "hint": None if repo_count else "Add a repo from the repo picker.",
+    })
+
+    # ── Model policy deny-list (MEMO-FIX-25) ────────────────────────────
+    try:
+        policy_health = _model_policy_health()
+    except Exception as e:
+        policy_health = {"status": "error", "errors": [f"model policy health check failed: {e}"]}
+    out["checks"].append({
+        "id": "model_policy",
+        "label": "Model policy deny-list",
+        "status": policy_health["status"],
+        "message": (
+            "; ".join(policy_health["errors"])
+            if policy_health["status"] == "error"
+            else "policy file present, no blocked ambient defaults"
+        ),
+        "hint": (
+            f"Check {MODEL_POLICY_FILE}, ~/.codex/config.toml, and spawn-defaults.json models.*"
+            if policy_health["status"] == "error" else None
+        ),
     })
 
     # Overall summary: worst status wins.
@@ -38519,6 +38620,7 @@ def build_ccc_doctor():
         "github_quota": read_graphql_quota(),
         "server_instances": build_doctor_instances(),
         "memory": build_memory_doctor(),
+        "model_policy": _model_policy_health(),
     }
 
 

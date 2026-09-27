@@ -28,6 +28,7 @@ class _PolicyFixture(unittest.TestCase):
         root = pathlib.Path(self._tmp.name)
         self.policy = root / "model-policy.json"
         self.defaults = root / "spawn-defaults.json"
+        self.codex_home = root / "codex_home"
         self._patches = [
             patch.object(server, "MODEL_POLICY_FILE", self.policy),
             patch.object(server, "SPAWN_DEFAULTS_FILE", self.defaults),
@@ -37,6 +38,7 @@ class _PolicyFixture(unittest.TestCase):
             p.start()
         os.environ.pop("CCC_BLOCKED_MODELS", None)
         os.environ.pop("CCC_CODEX_MODEL", None)
+        os.environ["CODEX_HOME"] = str(self.codex_home)
         server._MODEL_POLICY_CACHE["sig"] = None
 
     def tearDown(self):
@@ -52,6 +54,10 @@ class _PolicyFixture(unittest.TestCase):
         base = server._factory_spawn_defaults()
         base["models"].update(models)
         self.defaults.write_text(json.dumps(base))
+
+    def write_codex_config(self, model):
+        self.codex_home.mkdir(parents=True, exist_ok=True)
+        (self.codex_home / "config.toml").write_text(f'model = "{model}"\n')
 
 
 class TestModelPolicy(_PolicyFixture):
@@ -170,6 +176,95 @@ class TestModelPolicy(_PolicyFixture):
         self.write_defaults(codex="gpt-6-astra")
         self.block("gpt-6-astra")
         self.assertNotEqual(server._spawn_model_for_engine("codex"), "gpt-6-astra")
+
+
+class TestModelPolicyHealth(_PolicyFixture):
+    """MEMO-FIX-25: `ccc doctor` / /api/healthcheck must flag deny-list drift
+    that the runtime gate itself can't see -- a missing/unparseable policy
+    file, or a blocked model sitting as an engine's ambient default (codex
+    config.toml, spawn-defaults.json models.*). Regression for the 2026-09-27
+    recurrence of the 2026-09-05 incident: both drifted independently with
+    nothing surfacing it until a human manually diffed state.
+    """
+
+    def test_ok_when_policy_present_and_ambient_defaults_clean(self):
+        self.block("gpt-6-astra")
+        self.write_defaults(codex="gpt-5.6-terra")
+        self.write_codex_config("gpt-5.6-terra")
+
+        report = server._model_policy_health()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["errors"], [])
+        self.assertTrue(report["policy_file"]["exists"])
+        self.assertTrue(report["policy_file"]["parseable"])
+        self.assertEqual(report["ambient_defaults"]["codex:config.toml"], "gpt-5.6-terra")
+        self.assertEqual(report["ambient_defaults"]["spawn-defaults:codex"], "gpt-5.6-terra")
+
+    def test_errors_when_policy_file_missing(self):
+        self.assertFalse(self.policy.exists())
+
+        report = server._model_policy_health()
+
+        self.assertEqual(report["status"], "error")
+        self.assertFalse(report["policy_file"]["exists"])
+        self.assertTrue(any("missing" in e for e in report["errors"]))
+
+    def test_errors_when_policy_file_unparseable(self):
+        self.policy.write_text("not valid json")
+
+        report = server._model_policy_health()
+
+        self.assertEqual(report["status"], "error")
+        self.assertFalse(report["policy_file"]["parseable"])
+        self.assertTrue(any("unparseable" in e for e in report["errors"]))
+
+    def test_errors_when_codex_config_toml_model_is_blocked(self):
+        self.block("gpt-6-astra")
+        self.write_codex_config("gpt-6-astra")
+
+        report = server._model_policy_health()
+
+        self.assertEqual(report["status"], "error")
+        self.assertTrue(any("config.toml" in e and "gpt-6-astra" in e for e in report["errors"]))
+
+    def test_errors_when_spawn_defaults_model_is_blocked(self):
+        self.block("gpt-6-astra")
+        self.write_defaults(codex="gpt-6-astra")
+
+        report = server._model_policy_health()
+
+        self.assertEqual(report["status"], "error")
+        self.assertTrue(
+            any("spawn-defaults.json models.codex" in e and "gpt-6-astra" in e for e in report["errors"])
+        )
+
+    def test_included_in_ccc_doctor(self):
+        expected = {"status": "ok", "errors": [], "policy_file": {}, "ambient_defaults": {}}
+        with patch.object(server, "_model_policy_health", return_value=expected):
+            report = server.build_ccc_doctor()
+
+        self.assertEqual(report["model_policy"], expected)
+
+    def test_included_in_healthcheck(self):
+        self.assertFalse(self.policy.exists())  # missing -> error, drives overall
+
+        report = server._build_healthcheck()
+
+        checks = {c["id"]: c for c in report["checks"]}
+        self.assertIn("model_policy", checks)
+        self.assertEqual(checks["model_policy"]["status"], "error")
+        self.assertEqual(report["overall"], "error")
+
+    def test_missing_policy_file_logs_loudly(self):
+        # MEMO-FIX-25(c): a missing policy file must not be silently treated
+        # as "nothing blocked" -- it needs to show up in the server log.
+        with patch("sys.stderr") as mock_stderr:
+            server._model_policy_blocked_models()
+
+        logged = "".join(call.args[0] for call in mock_stderr.write.call_args_list if call.args)
+        self.assertIn(str(self.policy), logged)
+        self.assertIn("missing", logged)
 
 
 if __name__ == "__main__":

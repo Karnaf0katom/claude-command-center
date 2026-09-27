@@ -782,7 +782,11 @@ def cmd_doctor(args):
     _print_github_quota(payload.get("github_quota"))
     instance_warn = _print_server_instances(payload.get("server_instances"))
     memory_warn = _print_memory_health(payload.get("memory"))
-    return 1 if (freshness == "stale" or instance_warn or memory_warn or (args.engine and any_unhealthy)) else 0
+    policy_error = _print_model_policy_health(payload.get("model_policy"))
+    return 1 if (
+        freshness == "stale" or instance_warn or memory_warn or policy_error
+        or (args.engine and any_unhealthy)
+    ) else 0
 
 
 def _print_github_quota(quota):
@@ -874,6 +878,24 @@ def _print_memory_health(report):
     if status == "WARN":
         for warning in report.get("warnings") or []:
             print(f"  WARN: {warning}")
+        return True
+    return False
+
+
+def _print_model_policy_health(report):
+    """Print model-policy deny-list health: the policy file itself, plus
+    every engine's ambient default (codex config.toml, spawn-defaults.json
+    models.*) (MEMO-FIX-25). Returns True on ERROR."""
+    if not isinstance(report, dict):
+        return False
+    status = str(report.get("status") or "unknown").upper()
+    ambient = report.get("ambient_defaults") or {}
+    print(f"\nmodel policy: {status}")
+    if ambient:
+        print("  ambient defaults: " + ", ".join(f"{k}={v}" for k, v in ambient.items()))
+    if status == "ERROR":
+        for error in report.get("errors") or []:
+            print(f"  ERROR: {error}")
         return True
     return False
 
