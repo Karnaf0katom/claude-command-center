@@ -1359,6 +1359,21 @@ def is_shipped(topic: str) -> dict:
     # Locative stems are gated by rule (c); Class A must not re-block them
     required_stems -= locative_stems
 
+    # Class E: corpus-absent terms. A first-clause distinctive stem with df=0
+    # whose synonyms are also unknown to the corpus is the strongest signal the
+    # thing was never built, so it is required like a rare word (the paraphrase
+    # hatch may still forgive it, capped below the spawn-warning bar).
+    absent_stems: set[str] = set()
+    for s, v in df.items():
+        if v > 0 or s in locative_stems:
+            continue
+        syn_stems = {_stem(x) for w in content_terms if _stem(w) == s
+                     for x in SYNONYMS.get(w, [])}
+        if syn_stems and any(v2 > 0 for v2 in _corpus_df(conn, syn_stems).values()):
+            continue
+        absent_stems.add(s)
+    required_stems |= absent_stems
+
     # Class B: multi-clause questions — every clause needs coverage.
     clause_reqs: list[set[str]] = []
     clauses = _split_clauses(first_clause_tokens)
@@ -1381,9 +1396,11 @@ def is_shipped(topic: str) -> dict:
         y_stems = {_stem(w) for w in y_tokens if w not in STOPWORDS} - x_stems
 
     def _coverage_ok(c: dict) -> bool:
-        if c.get("ticket_boost", 0) > 0:
-            return True
+        boosted = c.get("ticket_boost", 0) > 0
         cov = c.get("coverage_stems", c.get("evidence_stems", set()))
+        if boosted:
+            # The linking ticket may spell a rare word the commit does not
+            cov = cov | c.get("ticket_stems", set())
         missing = required_stems - cov
         if missing:
             # Escape hatch: exactly one rare word missing from a commit that
@@ -1394,8 +1411,12 @@ def is_shipped(topic: str) -> dict:
                     and ((n_dist_all >= 3 and c.get("has_phrase_subj"))
                          or n_dist_all >= 4)):
                 c["coverage_hatch"] = True
+                if missing & absent_stems:
+                    c["absent_hatch"] = True
             else:
                 return False
+        if boosted:
+            return True
         for clause_dist in clause_reqs:
             if not (clause_dist & cov):
                 return False
@@ -1482,6 +1503,7 @@ def is_shipped(topic: str) -> dict:
                 "ref": ref, "status": status, "commit_sha": commit_sha or "",
                 "title": title, "title_ratio": title_ratio,
                 "m_title": m_title, "has_phrase_title": has_phrase_title,
+                "title_stems": title_stems, "text_stems": text_stems,
             }
             candidate_tickets.append(t_info)
             if status in ("open", "in_progress", "blocked", "todo"):
@@ -1679,6 +1701,7 @@ def is_shipped(topic: str) -> dict:
             if (ct.get("has_phrase_title") or found_c.get("has_phrase_subj") or ct["title_ratio"] >= 0.60 or found_c["subj_ratio"] >= 0.50):
                 found_c["ticket_boost"] = 15.0
                 found_c["ticket_ref"] = t_ref
+                found_c["ticket_stems"] = ct["title_stems"] | ct["text_stems"]
 
     # 3. Evaluate qualifying commits
     n_stems = len(stemmed_content_terms)
@@ -1875,6 +1898,8 @@ def is_shipped(topic: str) -> dict:
             conf = min(conf, 0.85)
         if top_commit.get("deep_history") or top_commit.get("coverage_hatch"):
             conf = min(conf, 0.85)
+        if top_commit.get("absent_hatch"):
+            conf = min(conf, 0.70)
 
         return {
             "shipped": True,

@@ -499,6 +499,10 @@ def mock_coverage_env(tmp_path, monkeypatch):
     # the one-missing-rare-word hatch rather than the df=0 exclusion.
     sha9 = commit(repo_gamma, "throttle_guide.txt", "9",
                   "chore(site): rename the contributor guide")
+    # 'display' is in the corpus while its SYNONYMS partner 'show' has df=0 —
+    # exercises the synonym escape in the corpus-absent rule.
+    sha10 = commit(repo_gamma, "g10.txt", "10",
+                   "feat(relay): display the beacon uptime chart")
 
     sha6 = commit(repo_delta, "d1.txt", "1",
                   "feat(vault): zircon banner for the hub")
@@ -514,6 +518,19 @@ def mock_coverage_env(tmp_path, monkeypatch):
                 item_json TEXT
             )
         """)
+        # Closed ticket resolving to sha2: shares the "tenant overview" phrase
+        # with sha2's subject, so it ticket-boosts that commit even for
+        # questions asking about something the commit never built.
+        gamma7 = {
+            "title": "Add usage sparkline for the tenant overview",
+            "text": "",
+            "resolution": {"commit": sha2},
+        }
+        wt_conn.execute(
+            """INSERT INTO items (ref, project, number, status, updated_at, item_json)
+               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+            ("GAMMA-7", "GAMMA", 7, "closed", json.dumps(gamma7)),
+        )
         wt_conn.commit()
 
     repos_str = os.pathsep.join([str(repo_gamma), str(repo_delta)])
@@ -538,7 +555,7 @@ def mock_coverage_env(tmp_path, monkeypatch):
         "repo_delta": repo_delta,
         "sha1": sha1, "sha2": sha2, "sha3": sha3,
         "sha4": sha4, "sha5": sha5, "sha6": sha6,
-        "sha7": sha7, "sha8": sha8, "sha9": sha9,
+        "sha7": sha7, "sha8": sha8, "sha9": sha9, "sha10": sha10,
     }
 
 
@@ -560,13 +577,58 @@ def test_distinctive_term_missing_is_not_shipped(mock_coverage_env):
     assert res_iso["shipped"] is True
 
 
-def test_novel_word_not_required(mock_coverage_env):
-    """A df=0 invented word can never be covered and must not block the answer."""
+def test_corpus_absent_word_is_required(mock_coverage_env):
+    """A distinctive word that appears nowhere in the corpus is the strongest
+    signal the thing was never built."""
+    res = ship_graph.is_shipped("Did we add a pin button to the ledger panel with glimmerfade?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+    assert res["confidence"] <= 0.65
+
+    res2 = ship_graph.is_shipped("Did we add a Zorbnet integration to the ledger panel?")
+    assert res2["shipped"] is False
+    assert res2["evidence"] == []
+
+
+def test_absent_word_paraphrase_hatch_caps_confidence(mock_coverage_env):
+    """The one-missing-word paraphrase hatch may forgive a corpus-absent word,
+    but the answer is capped below the spawn-warning bar."""
     env = mock_coverage_env
 
-    res = ship_graph.is_shipped("Did we add a pin button to the ledger panel with glimmerfade?")
+    res = ship_graph.is_shipped(
+        "Did we add offline draft autosave for the compose editor with quibblr?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha7"]
+    assert res["confidence"] <= 0.70
+
+
+def test_inflection_and_synonym_are_not_absent(mock_coverage_env):
+    """Porter inflections share a stem so df>0 counts, and a df=0 word whose
+    synonym IS in the corpus is not treated as absent."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we add pin buttons to the ledger panels?")
     assert res["shipped"] is True
     assert res["evidence"][0]["commit"] == env["sha1"]
+
+    res_syn = ship_graph.is_shipped("Did we show the beacon uptime chart?")
+    assert res_syn["shipped"] is True
+    assert res_syn["evidence"][0]["commit"] == env["sha10"]
+
+
+def test_ticket_boost_does_not_bypass_absent_word(mock_coverage_env):
+    """A closed ticket that merely shares a phrase with a lookalike commit must
+    not let the commit skip the required-stem coverage check."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we add a Fizzlegram alert for the tenant overview?")
+    assert res["shipped"] is False
+    assert res["evidence"] == []
+
+    # The boost still works when nothing required is missing
+    res_ok = ship_graph.is_shipped("Did we add a usage sparkline for the tenant overview?")
+    assert res_ok["shipped"] is True
+    assert res_ok["evidence"][0]["commit"] == env["sha2"]
 
 
 def test_multi_clause_requires_both_clauses(mock_coverage_env):
