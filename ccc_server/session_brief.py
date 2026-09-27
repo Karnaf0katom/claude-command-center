@@ -154,9 +154,23 @@ def _last_reply(report_text: str) -> str:
 
 
 def _ticket_info(conn, refs: list[str]) -> list[dict]:
+    """Ticket refs come from a bare regex scan of transcript text (any
+    'WORD-N' token), so a session that just talks about e.g. an internal doc's
+    own 'ADS-1, ADS-2, ...' numbering scheme produces refs that were never a
+    real WatchTower ticket -- not a queue whose status lookup is failing.
+    Drop refs whose project prefix doesn't match any project WatchTower has
+    ever synced, instead of showing them with an unhelpful '[?]' status."""
     out = []
+    known_projects: set[str] | None = None
     for ref in refs:
         row = conn.execute("SELECT status, title FROM tickets WHERE ref = ?", (ref,)).fetchone()
+        if not row:
+            if known_projects is None:
+                known_projects = {
+                    r[0] for r in conn.execute("SELECT DISTINCT project FROM tickets").fetchall()
+                }
+            if ref.split("-")[0] not in known_projects:
+                continue
         out.append({
             "ref": ref,
             "status": row[0] if row and row[0] else "",

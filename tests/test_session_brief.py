@@ -121,6 +121,25 @@ def mock_brief_env(tmp_path, monkeypatch):
     ]
     session_file.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
 
+    # MEMO-FIX: a doc's own internal numbering ("ADS-1, ADS-2, ...") reads
+    # like a ticket ref to the bare regex extractor but ADS was never a real
+    # WatchTower project -- this session's brief should drop it, not show
+    # "ticket: ADS-1 [?]".
+    false_positive_session = session_dir / "fp-ticket-refs-1.jsonl"
+    false_positive_lines = [
+        {
+            "type": "user", "cwd": str(repo_dir), "timestamp": "2026-09-21T10:00:00Z",
+            "message": {"role": "user", "content": "file ADS-1 and ADS-2 under the ads-workspace doc"},
+        },
+        {
+            "type": "assistant", "cwd": str(repo_dir), "timestamp": "2026-09-21T10:01:00Z",
+            "message": {"role": "assistant", "content": "Noted ADS-1 and ADS-2 in current-sprint.md."},
+        },
+    ]
+    false_positive_session.write_text(
+        "\n".join(json.dumps(x) for x in false_positive_lines) + "\n", encoding="utf-8"
+    )
+
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(ship_db))
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
@@ -163,6 +182,7 @@ def mock_brief_env(tmp_path, monkeypatch):
         "sha_local": sha_local,
         "scratch_artifact": scratch_artifact,
         "sid": "session-brief-1",
+        "false_positive_sid": "fp-ticket-refs-1",
     }
 
 
@@ -205,6 +225,12 @@ def test_brief_ticket_status_from_watchtower(mock_brief_env):
     assert "AUTH-101" in tickets
     assert tickets["AUTH-101"]["status"] == "in_progress"
     assert tickets["AUTH-101"]["title"]
+
+
+def test_brief_drops_ticket_refs_for_unknown_projects(mock_brief_env):
+    res = session_brief.brief(mock_brief_env["false_positive_sid"])
+    assert res["found"] is True
+    assert res["tickets"] == []
 
 
 def test_brief_last_user_asks_excludes_injected_messages(mock_brief_env):
