@@ -223,6 +223,8 @@ def mock_trap_env(tmp_path, monkeypatch):
                     "feat(prefs): add toggle to hide the memory banner in preferences")
     sha_a5 = commit(repo_alpha, "a5.txt", "5",
                     "feat(chat): add emoji reaction picker to huddle replay")
+    sha_a6 = commit(repo_alpha, "a6.txt", "6",
+                    "feat(history): ticket graph for lantern search and ledger")
 
     sha_b1 = commit(repo_beta, "b1.txt", "1",
                     "feat(site): add partner controls to checkout flows")
@@ -254,6 +256,25 @@ def mock_trap_env(tmp_path, monkeypatch):
                 item_json TEXT
             )
         """)
+        zephyr1 = {
+            "title": "Zephyr queue triage sweep",
+            "text": "",
+            "resolution": {"commit": sha_a2},
+        }
+        zephyr2 = {
+            "title": "ZEPHYR-1b: lantern evidence precision",
+            "text": "",
+        }
+        wt_conn.execute(
+            """INSERT INTO items (ref, project, number, status, updated_at, item_json)
+               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+            ("ZEPHYR-1", "ZEPHYR", 1, "closed", json.dumps(zephyr1)),
+        )
+        wt_conn.execute(
+            """INSERT INTO items (ref, project, number, status, updated_at, item_json)
+               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+            ("ZEPHYR-2", "ZEPHYR", 2, "open", json.dumps(zephyr2)),
+        )
         wt_conn.commit()
 
     repos_str = os.pathsep.join([
@@ -280,7 +301,7 @@ def mock_trap_env(tmp_path, monkeypatch):
         "mirror": mirror_dir / "beta-site",
         "db_path": db_path,
         "sha_a1": sha_a1, "sha_a2": sha_a2, "sha_a3": sha_a3, "sha_a4": sha_a4,
-        "sha_a5": sha_a5,
+        "sha_a5": sha_a5, "sha_a6": sha_a6,
         "sha_b1": sha_b1, "sha_b2": sha_b2, "sha_b3": sha_b3, "sha_b4": sha_b4,
     }
 
@@ -388,6 +409,20 @@ def test_identical_subject_prefers_main_commit(mock_trap_env):
     res = ship_graph.is_shipped("Did we make visitor SMS skip crawler visits?")
     assert res["shipped"] is True
     assert res["evidence"][0]["commit"] == env["sha_b4"]
+
+
+def test_ticket_project_identifier_not_treated_as_content(mock_trap_env):
+    """A real WatchTower project/ref token is a routing hint, not content —
+    it must not break matching or let an open project ticket override."""
+    env = mock_trap_env
+
+    res = ship_graph.is_shipped("Did we ship ZEPHYR lantern search?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha_a6"]
+
+    res2 = ship_graph.is_shipped("Did we ship the lantern search for ZEPHYR-2?")
+    assert res2["shipped"] is True
+    assert res2["evidence"][0]["commit"] == env["sha_a6"]
 
 
 def test_question_structure_helper():

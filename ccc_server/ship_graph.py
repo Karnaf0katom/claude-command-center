@@ -1170,6 +1170,29 @@ def is_shipped(topic: str) -> dict:
     roots = discover_repo_roots()
     detected_repo, repo_words = detect_named_repo(t, roots)
 
+    # Ticket-project identifiers in the question ("PROJ", "PROJ-12") are
+    # routing hints, not content words — strip them like repo alias words.
+    ticket_tokens = re.findall(r"\b([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,10})*)\b", t)
+    identifier_words: set[str] = set()
+    for tok in ticket_tokens:
+        if TICKET_STOP.match(tok):
+            continue
+        project = re.sub(r"-\d+$", "", tok)
+        try:
+            row_id = conn.execute(
+                "SELECT 1 FROM tickets WHERE project = ? OR ref = ? LIMIT 1",
+                (project, tok),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row_id = None
+        if row_id:
+            identifier_words.update(re.findall(r"[a-z0-9]+", tok.lower()))
+            # "the PROJ queue" refers to the ticket queue itself, not a
+            # product surface to match — treat it as part of the identifier
+            if re.search(re.escape(tok.lower()) + r"\s+queues?\b", t.lower()):
+                identifier_words.update(("queue", "queues"))
+    repo_words = repo_words | identifier_words
+
     all_terms = extract_terms(t)
     if not all_terms:
         return {"shipped": False, "confidence": 0.0, "evidence": [], "tickets": []}
@@ -1284,7 +1307,6 @@ def is_shipped(topic: str) -> dict:
         for row in cur_t.fetchall():
             process_ticket(*row)
 
-        ticket_tokens = re.findall(r"\b([A-Z][A-Z0-9]{1,11}(?:-[A-Z0-9]{1,10})*)\b", t)
         for tok in ticket_tokens:
             if TICKET_STOP.match(tok):
                 continue
