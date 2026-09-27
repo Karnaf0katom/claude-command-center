@@ -323,17 +323,9 @@ def tool_daily_checkin(path: str = CHECKIN_PATH, include_closed: bool = False, r
     return out
 
 
-# Instinct brief + Hunch graph (read-only; instinct.py is a sibling stdlib file)
+# Instinct brief (read-only; instinct.py is a sibling stdlib file)
 BRIEF_DIR = Path(os.environ.get("CCC_INSTINCT_OUT_DIR",
                                 str(Path.home() / ".claude" / "command-center" / "instinct")))
-
-
-def _instinct():
-    here = str(Path(__file__).resolve().parent)
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import instinct  # noqa: E402  (sibling module; works as a bare script too)
-    return instinct
 
 
 def tool_daily_brief(out_dir: Path | None = None, now: float | None = None) -> dict:
@@ -365,45 +357,6 @@ def tool_daily_brief(out_dir: Path | None = None, now: float | None = None) -> d
         "proposals": props[:10],
         "blind_spots": b.get("blind_spots") or [],
     }
-
-
-def tool_hunch_why(repo: str, files=None, topic: str | None = None, limit: int = 8) -> dict:
-    """Recorded decisions/invariants from a repo's committed .hunch/ graph."""
-    repo = os.path.expanduser(str(repo or ""))
-    if not repo or not os.path.isabs(repo) or not os.path.isdir(repo):
-        return {"ok": False, "error": "repo must be an existing absolute directory"}
-    ins = _instinct()
-    graph = ins.load_hunch(repo)
-    if not graph.get("present"):
-        return {"ok": True, "present": False, "repo": repo, "decisions": [], "constraints": []}
-    if files:
-        files = [str(f) for f in files][:40] if isinstance(files, list) else [str(files)]
-        out = ins.hunch_why(graph, files)
-    else:
-        words = [w for w in re.findall(r"[a-z0-9]{3,}", str(topic or "").lower())][:6]
-        def score(text):
-            t = text.lower()
-            return sum(1 for w in words if w in t)
-        decs = []
-        for d in graph.get("decisions") or []:
-            text = " ".join(str(d.get(k) or "") for k in ("title", "topic", "decision", "rationale"))
-            sc = score(text) if words else 1
-            if sc:
-                decs.append((sc, {"id": d.get("id"), "title": d.get("title") or d.get("topic") or "",
-                                  "decision": str(d.get("decision") or "")[:400],
-                                  "rejected": list(d.get("alternatives_rejected") or [])[:2],
-                                  "date": str(d.get("date") or d.get("valid_from") or "")[:10],
-                                  "status": d.get("status")}))
-        cons = []
-        for c in graph.get("constraints") or []:
-            sc = score(str(c.get("statement") or "")) if words else 1
-            if sc:
-                cons.append((sc, {"id": c.get("id"), "statement": c.get("statement"),
-                                  "severity": c.get("severity"), "scope": c.get("scope")}))
-        out = {"decisions": [d for _, d in sorted(decs, key=lambda x: -x[0])],
-               "constraints": [c for _, c in sorted(cons, key=lambda x: -x[0])]}
-    return {"ok": True, "present": True, "repo": repo,
-            "decisions": out["decisions"][:limit], "constraints": out["constraints"][:limit]}
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +415,6 @@ TOOLS = [
                     "(dry run; nothing filed). Call for 'daily brief', 'what happened overnight', "
                     "'what's stuck', or before filing a brief proposal.",
      "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "hunch_why",
-     "description": "Why code is the way it is: recorded Hunch decisions (with rejected "
-                    "alternatives) and invariants from a repo's committed .hunch/ graph. Pass "
-                    "files (repo-relative) or a topic.",
-     "inputSchema": {"type": "object", "properties": {
-         "repo": {"type": "string", "description": "Absolute repo path."},
-         "files": {"type": "array", "items": {"type": "string"}},
-         "topic": {"type": "string"}}, "required": ["repo"]}},
     {"name": "propose_spawn_session",
      "description": "PROPOSE starting a new agent session. Does not start anything: the user must "
                     "click Confirm in CCC. Returns an action_id to cite as [[action:confirm:ID]].",
@@ -553,8 +498,6 @@ class CccState:
             return tool_daily_checkin(include_closed=bool(args.get("include_closed")))
         if name == "daily_brief":
             return tool_daily_brief()
-        if name == "hunch_why":
-            return tool_hunch_why(args.get("repo"), args.get("files"), args.get("topic"))
         if name in PROPOSE_TOOLS:
             # Proposal only: CCC stores it and keeps the confirm token to itself.
             params = {k: v for k, v in args.items() if k != "reason"}
@@ -646,7 +589,7 @@ You answer questions about the user's past work (across Claude Code, Codex, Kimi
 Tools:
 - claude-index: search_sessions (find which sessions are about X), search (specific facts/strings), session_info (confirm a session, see how it ended), show_message, recent_sessions.
 - ccc-state: fleet_diagnostics (stuck / waiting / burning), list_sessions, live_activity, throughput_window, queue_status, session_detail.
-- ccc-state (brief + why): daily_brief (the proactive morning brief: changes, stuck items, numbered proposed tickets), hunch_why (recorded decisions and invariants for a repo's files or a topic).
+- ccc-state (brief): daily_brief (the proactive morning brief: changes, stuck items, numbered proposed tickets).
 - ccc-state (actions, propose only): propose_spawn_session, propose_inject, propose_wt_add, propose_wt_comment. These never act; the user confirms in CCC.
 
 Method:

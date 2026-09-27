@@ -4,9 +4,7 @@ Instinct watches your repos, CCC sessions, and WatchTower queues, then writes
 one HTML page each morning that answers three questions:
 
 - **What changed.** Commits on local branches since the last brief, grouped by
-  Conventional Commit type. For the files those commits touched, it quotes the
-  [Hunch](https://github.com/davesheffer/hunch) "why": recorded decisions,
-  rejected alternatives, and file-scoped invariants.
+  Conventional Commit type.
 - **What's stuck.** Sessions waiting on you (the same live feed as *Needs Your
   Attention*), tickets blocked on a human answer or product gate, queues that
   stopped moving, and commits nobody pushed.
@@ -16,8 +14,7 @@ one HTML page each morning that answers three questions:
 
 It is read-only and cheap. Each repo costs two `git` subprocesses. CCC costs
 one `GET /api/attention?scope=live`, and WatchTower costs three `wt … --json`
-calls. Hunch's committed `.hunch/` graph is read straight from disk, and no
-model is called. A source it can't reach appears under **Blind spots**, and the
+calls. No model is called. A source it can't reach appears under **Blind spots**, and the
 rest of the brief still renders.
 
 ## Try it
@@ -67,7 +64,6 @@ python3 -m ccc_server.instinct init-config   # writes ~/.claude/command-center/i
 |---|---|
 | ≥ N `fix` commits touched one file | *Fix hotspot*: find the shared root cause and add a regression test |
 | A `revert` commit | *Re-land or close out*: record why it was abandoned |
-| A file that anchors Hunch decisions changed after they were recorded | *Re-verify N Hunch decisions* (one ticket per repo) |
 | A queue has been stalled for days | *Triage the backlog* |
 
 Proposal priorities map to `wt add --priority`: normal is `p2`, low is `p3`.

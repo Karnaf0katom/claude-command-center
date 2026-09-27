@@ -65,8 +65,7 @@ def _repo_rec(label="app", commits=None, **kw):
     r = {"path": f"/work/{label}", "label": label, "source": "config",
          "commits": commits or [], "branch": "main", "upstream": "origin/main",
          "ahead": 0, "behind": 0, "dirty": 0, "oldest_unpushed_ts": None,
-         "error": None, "hunch": {"decisions": [], "constraints": []},
-         "hunch_present": False}
+         "error": None}
     r.update(kw)
     return r
 
@@ -154,54 +153,6 @@ class GitCollectorTests(TmpCase):
         info = instinct.collect_git({"path": str(self.tmp / "nope"), "label": "x"}, NOW - DAY, _cfg())
         self.assertTrue(info["error"])
         self.assertEqual(info["commits"], [])
-
-
-class HunchTests(TmpCase):
-    def write(self, repo, kind, rec):
-        d = repo / ".hunch" / kind
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{rec['id']}.json").write_text(json.dumps(rec))
-
-    def test_why_matches_anchored_decisions_and_scoped_invariants(self):
-        repo = self.tmp / "r"
-        self.write(repo, "decisions", {
-            "id": "dec_a", "title": "Keep server stdlib-only", "status": "accepted",
-            "decision": "No pip deps at runtime.", "related_files": ["server.py"],
-            "alternatives_rejected": ["Use requests"], "valid_from": "2026-09-01T00:00:00Z",
-            "provenance": {"confidence": 0.9}})
-        self.write(repo, "decisions", {
-            "id": "dec_old", "title": "Superseded", "status": "superseded",
-            "decision": "x", "related_files": ["server.py"]})
-        self.write(repo, "decisions", {
-            "id": "dec_closed", "title": "Closed", "status": "accepted", "decision": "x",
-            "related_files": ["server.py"], "valid_to": "2026-09-02T00:00:00Z"})
-        self.write(repo, "constraints", {
-            "id": "con_s", "statement": "Restart both services", "scope": ["server.py"],
-            "severity": "warning", "status": "active"})
-        self.write(repo, "constraints", {
-            "id": "con_g", "statement": "Global rule", "scope": ["**"],
-            "severity": "warning", "status": "active"})
-        graph = instinct.load_hunch(str(repo))
-        why = instinct.hunch_why(graph, ["server.py", "other.py"])
-        self.assertEqual([d["id"] for d in why["decisions"]], ["dec_a"])
-        self.assertEqual(why["decisions"][0]["rejected"], ["Use requests"])
-        self.assertEqual([c["id"] for c in why["constraints"]], ["con_s"])
-
-    def test_boilerplate_decisions_rank_last(self):
-        graph = {"decisions": [
-            {"id": "d1", "title": "auto", "decision": "Changed code in a.js (1 file(s)).",
-             "related_files": ["a.js"]},
-            {"id": "d2", "title": "real", "decision": "Chose X over Y because Z.",
-             "related_files": ["a.js"], "alternatives_rejected": ["Y"]},
-        ], "constraints": []}
-        why = instinct.hunch_why(graph, ["a.js"])
-        self.assertEqual([d["id"] for d in why["decisions"]], ["d2", "d1"])
-        self.assertLess(why["decisions"][1]["weight"], 0)
-
-    def test_repo_without_hunch_is_empty(self):
-        g = instinct.load_hunch(str(self.tmp))
-        self.assertFalse(g["present"])
-        self.assertEqual(instinct.hunch_why(g, ["a"]), {"decisions": [], "constraints": []})
 
 
 class DiscoverReposTests(TmpCase):
@@ -308,25 +259,6 @@ class AnalyzeTests(unittest.TestCase):
         brief = instinct.analyze(_snapshot(repos=[_repo_rec(commits=fixes)]), _cfg())
         self.assertIsNone(brief["proposals"][0]["queue"])
         self.assertIn("-q '<QUEUE>'", brief["proposals"][0]["wt_command"])
-
-    def test_hunch_drift_is_one_proposal_per_repo(self):
-        decisions = [{"id": f"dec_{i}", "title": f"Decision {i}", "decision": "d",
-                      "files": ["ui.js"], "rejected": [], "date": "2026-09-01",
-                      "verified_ts": NOW - 30 * DAY, "weight": 1.0} for i in range(5)]
-        repo = _repo_rec(commits=[_commit_rec("aaaa1111", "feat: x", ["ui.js"])],
-                         hunch={"decisions": decisions, "constraints": []})
-        brief = instinct.analyze(_snapshot(repos=[repo]), _cfg())
-        drift = [p for p in brief["proposals"] if p["key"].startswith("hunch-drift:")]
-        self.assertEqual(len(drift), 1)
-        self.assertIn("Re-verify 5 Hunch decision(s)", drift[0]["title"])
-
-    def test_decision_recorded_after_change_is_not_drift(self):
-        d = {"id": "dec_new", "title": "New", "decision": "d", "files": ["ui.js"],
-             "rejected": [], "date": "", "verified_ts": NOW, "weight": 1.0}
-        repo = _repo_rec(commits=[_commit_rec("aaaa1111", "feat: x", ["ui.js"])],
-                         hunch={"decisions": [d], "constraints": []})
-        brief = instinct.analyze(_snapshot(repos=[repo]), _cfg())
-        self.assertEqual(brief["proposals"], [])
 
     def test_malformed_feed_items_do_not_crash(self):
         sessions = [{"kind": "soft_block", "session_id": None, "mtime": "soon"},

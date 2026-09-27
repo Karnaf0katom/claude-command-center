@@ -79,7 +79,7 @@ class McpProtocolTest(unittest.TestCase):
             names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
         self.assertEqual(names, ["list_sessions", "live_activity", "throughput_window", "queue_status",
                                  "session_detail", "fleet_diagnostics", "daily_checkin", "daily_brief",
-                                 "hunch_why", "propose_spawn_session", "propose_inject",
+                                 "propose_spawn_session", "propose_inject",
                                  "propose_wt_add", "propose_wt_comment"])
 
     def test_tools_call_and_errors(self):

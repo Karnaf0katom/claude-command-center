@@ -6,8 +6,7 @@ Instead of waiting to be asked, Instinct looks at what happened since the last
 brief and writes one self-contained HTML page answering three questions:
 
 * **What changed** -- commits per repo (local branches, since the last run),
-  grouped by Conventional Commit type, with the Hunch "why" (recorded
-  decisions and invariants) for the files those commits touched.
+  grouped by Conventional Commit type.
 * **What's stuck** -- CCC sessions waiting on a human (the same live attention
   feed as "Needs Your Attention"), WatchTower tickets blocked on a human
   answer or product gate, stalled queues, and unpushed commits.
@@ -20,8 +19,6 @@ Sources, all read-only and bounded (no per-session work, no model calls):
 * git: two subprocesses per repo (``log`` + ``status``), capped repo count.
 * CCC: one ``GET /api/attention?scope=live`` against the local dashboard.
 * WatchTower: ``wt status|blocked|gated --json`` -- three subprocesses total.
-* Hunch: the committed ``.hunch/{decisions,constraints}/*.json`` graph in each
-  repo, read directly (no ``npx`` spawn per file).
 
 A source that fails is reported under "Blind spots" instead of aborting the
 brief -- a partial brief that says what it could not see beats no brief.
@@ -324,74 +321,6 @@ def collect_git(repo: dict, since_ts: float, cfg) -> dict:
     return info
 
 
-def load_hunch(repo_path: str) -> dict:
-    """Read a repo's committed Hunch graph. Empty when the repo has none."""
-    root = Path(repo_path) / ".hunch"
-    graph = {"decisions": [], "constraints": [], "present": root.is_dir()}
-    if not graph["present"]:
-        return graph
-    for kind in ("decisions", "constraints"):
-        for f in sorted((root / kind).glob("*.json")):
-            try:
-                rec = json.loads(f.read_text())
-            except (OSError, ValueError):
-                continue
-            if not isinstance(rec, dict) or rec.get("valid_to") or rec.get("superseded_by"):
-                continue
-            if kind == "decisions" and rec.get("status") not in ("accepted", "proposed"):
-                continue
-            if kind == "constraints" and rec.get("status") not in (None, "active"):
-                continue
-            graph[kind].append(rec)
-    return graph
-
-
-def hunch_why(graph: dict, files: list[str]) -> dict:
-    """Decisions anchored to ``files`` and file-scoped invariants over them.
-
-    Repo-wide (``**``) constraints are skipped: they apply to every change and
-    would repeat on every repo every day."""
-    fileset = set(files)
-    decisions, constraints = [], []
-    for d in graph.get("decisions") or []:
-        hit = sorted(fileset.intersection(d.get("related_files") or []))
-        if hit:
-            prov = d.get("provenance") if isinstance(d.get("provenance"), dict) else {}
-            decisions.append({
-                "id": d.get("id"), "title": d.get("title") or d.get("topic") or "",
-                "decision": d.get("decision") or "", "files": hit,
-                "rejected": list(d.get("alternatives_rejected") or [])[:2],
-                "date": (d.get("date") or d.get("valid_from") or "")[:10],
-                "verified_ts": _iso_to_ts(d.get("valid_from") or d.get("date")),
-                "weight": _decision_weight(d, prov),
-            })
-    for c in graph.get("constraints") or []:
-        scopes = c.get("scope") or []
-        if isinstance(scopes, str):
-            scopes = [scopes]
-        scopes = [s for s in scopes if s and s not in ("**", "*")]
-        hit = sorted(f for f in fileset if any(fnmatch.fnmatch(f, s) for s in scopes))
-        if hit:
-            constraints.append({"id": c.get("id"), "statement": c.get("statement") or "",
-                                "severity": c.get("severity") or "advisory", "files": hit})
-    decisions.sort(key=lambda d: (-d["weight"], d["id"] or ""))
-    return {"decisions": decisions, "constraints": constraints}
-
-
-_BOILERPLATE_RE = re.compile(r"^(changed code in|changed \S+:)", re.I)
-
-
-def _decision_weight(d: dict, prov: dict) -> float:
-    """Rank decisions so a recorded trade-off beats an auto-captured diff note."""
-    text = str(d.get("decision") or "")
-    w = _num(prov.get("confidence"), 0.5)
-    w += 1.0 if d.get("alternatives_rejected") else 0.0
-    w += min(len(text), 600) / 600.0
-    if _BOILERPLATE_RE.match(text.strip()):
-        w -= 2.0
-    return round(w, 3)
-
-
 def collect_sessions(cfg) -> tuple[list, str | None]:
     data, err = _http_json(cfg["ccc_url"].rstrip("/") + "/api/attention?scope=live")
     if err:
@@ -462,9 +391,6 @@ def collect(cfg, since_ts: float, *, use_ccc=True, use_wt=True) -> dict:
         g = collect_git(r, since_ts, cfg)
         if g.get("error"):
             snap["blind_spots"].append(f"git {r['label']}: {g['error']}")
-        touched = sorted({f for c in g["commits"] for f in c["files"]})
-        g["hunch"] = hunch_why(load_hunch(r["path"]), touched)
-        g["hunch_present"] = (Path(r["path"]) / ".hunch").is_dir()
         snap["repos"].append(g)
         q = cfg["repo_queues"].get(r["path"])
         if not q and wt_repo_queues:
@@ -535,8 +461,6 @@ def analyze(snap: dict, cfg: dict, memory: dict | None = None) -> dict:
             "groups": [{"type": t, "label": TYPE_LABELS.get(t, "Other"),
                         "commits": groups[t]} for t in order],
             "hot_files": [{"file": f, "commits": n} for f, n in hot],
-            "hunch": r.get("hunch") or {"decisions": [], "constraints": []},
-            "hunch_present": bool(r.get("hunch_present")),
         })
 
     # -- what's stuck: sessions -----------------------------------------
@@ -644,16 +568,10 @@ def analyze(snap: dict, cfg: dict, memory: dict | None = None) -> dict:
         hotspots = [(f, cs) for f, cs in sorted(fixes.items(), key=lambda kv: (-len(kv[1]), kv[0]))
                     if len(cs) >= hot_n]
         for f, cs in hotspots[:MAX_HOTSPOTS_PER_REPO]:
-            hunch = r.get("hunch") or {}
-            inv = [k["statement"] for k in hunch.get("constraints") or [] if f in k["files"]]
-            decs = [d["title"] for d in hunch.get("decisions") or [] if f in d["files"]]
             text = (f"`{f}` in {r['label']} needed {len(cs)} fix commits since the last brief:\n"
                     + "\n".join(f"- {c['short']} {c['subject']}" for c in cs[:6])
                     + "\n\nFind the shared root cause and add a regression test that would "
                       "have caught all of them, instead of another point fix.")
-            if decs or inv:
-                text += "\n\nHunch context: " + "; ".join(
-                    [f"decision '{d}'" for d in decs[:2]] + [f"invariant '{i}'" for i in inv[:2]])
             proposals.append(_proposal(
                 queue, f"Fix hotspot: {f} ({len(cs)} fixes)", text,
                 "Repeated fixes to one file usually mean a missing invariant or test.",
@@ -664,34 +582,9 @@ def analyze(snap: dict, cfg: dict, memory: dict | None = None) -> dict:
                     queue, f"Re-land or close out reverted change ({c['short']})",
                     (f"{r['label']} reverted a change: {c['subject']} ({c['short']}).\n"
                      "Decide whether it should be re-landed with a fix, or record why it "
-                     "was abandoned (Hunch decision) so nobody re-tries it blind."),
+                     "was abandoned so nobody re-tries it blind."),
                     "Reverts without a recorded reason tend to get re-attempted.",
                     [c["short"]], f"revert:{r['path']}:{c['sha']}"))
-        # A decision whose anchored file changed after it was recorded may
-        # have drifted -- the "why" quoted above might no longer be true. One
-        # proposal per repo (not per decision) keeps a busy file from
-        # flooding the brief.
-        drifted = []
-        for d in (r.get("hunch") or {}).get("decisions") or []:
-            vts = d.get("verified_ts") or 0
-            touching = [c for c in r.get("commits") or []
-                        if c["ts"] > vts and set(c["files"]) & set(d["files"])]
-            if touching:
-                drifted.append((d, touching))
-        if drifted:
-            lines = [f"- {d['id']} '{d['title'][:90]}' (recorded {d['date']}; "
-                     f"{', '.join(d['files'][:2])} changed in "
-                     f"{', '.join(c['short'] for c in t[:3])})" for d, t in drifted[:8]]
-            if len(drifted) > 8:
-                lines.append(f"- ...and {len(drifted) - 8} more")
-            shas = sorted({c["short"] for _, t in drifted for c in t})
-            proposals.append(_proposal(
-                queue, f"Re-verify {len(drifted)} Hunch decision(s) in {r['label']}",
-                ("These recorded decisions are anchored to files that changed since they "
-                 "were recorded. Confirm each still holds, or supersede it:\n"
-                 + "\n".join(lines)),
-                "Stale decisions quietly turn into wrong advice for the next agent.",
-                shas[:8], f"hunch-drift:{r['path']}", "low"))
 
     # Mark proposals already shown recently so the brief can say "still open".
     known = _proposal_memory(memory)
@@ -871,23 +764,6 @@ def render_html(brief: dict) -> str:
         if c["hot_files"]:
             w("<div class=\"tag\">Most-touched: " + ", ".join(
                 f"<code>{_e(h['file'])}</code>×{h['commits']}" for h in c["hot_files"]) + "</div>")
-        hunch = c.get("hunch") or {}
-        if any(d.get("weight", 0) >= 0 for d in hunch.get("decisions") or []) or hunch.get("constraints"):
-            w("<details open><summary>Why it's built this way (Hunch)</summary>")
-            # Negative weight = an auto-captured diff note, not a recorded why.
-            for d in [d for d in hunch.get("decisions", []) if d.get("weight", 0) >= 0][:4]:
-                w(f"<div class=\"why\"><b>{_e(d['title'])}</b> <span class=\"muted\">"
-                  f"({_e(d['date'])} · {_e(', '.join(d['files'][:3]))})</span><br>{_e(d['decision'][:400])}")
-                if d.get("rejected"):
-                    w("<br><span class=\"muted\">Rejected: " + _e("; ".join(str(x)[:140] for x in d["rejected"])) + "</span>")
-                w("</div>")
-            for k in hunch.get("constraints", [])[:4]:
-                w(f"<div class=\"why\"><span class=\"sev sev-{'high' if k['severity'] in ('error', 'block') else 'medium'}\">"
-                  f"invariant</span> {_e(k['statement'][:300])} <span class=\"muted\">"
-                  f"({_e(', '.join(k['files'][:3]))})</span></div>")
-            w("</details>")
-        elif not c.get("hunch_present"):
-            w("<div class=\"tag\">No Hunch graph in this repo, so no recorded \"why\".</div>")
         w("</div>")
 
     w("<h2>Proposed tickets <span class=\"muted\">(dry run, nothing filed)</span></h2>")

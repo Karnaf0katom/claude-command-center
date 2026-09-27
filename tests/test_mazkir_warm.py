@@ -264,18 +264,5 @@ class BriefToolTest(unittest.TestCase):
         self.assertEqual((b["headline"], b["age_h"]), ("3 commits", 2.0))
         self.assertEqual(b["proposals"][0]["n"], 1)
 
-    def test_hunch_why_by_topic(self):
-        repo = Path(tempfile.mkdtemp())
-        (repo / ".hunch" / "decisions").mkdir(parents=True)
-        (repo / ".hunch" / "constraints").mkdir(parents=True)
-        (repo / ".hunch" / "decisions" / "d1.json").write_text(json.dumps(
-            {"id": "d1", "title": "Warm process for Ask", "decision": "keep one warm", "status": "accepted"}))
-        (repo / ".hunch" / "decisions" / "d2.json").write_text(json.dumps(
-            {"id": "d2", "title": "Unrelated", "decision": "x", "status": "accepted"}))
-        out = mazkir.tool_hunch_why(str(repo), topic="warm ask process")
-        self.assertEqual([d["id"] for d in out["decisions"]], ["d1"])
-        self.assertFalse(mazkir.tool_hunch_why("relative/path")["ok"])
-
-
 if __name__ == "__main__":
     unittest.main()
