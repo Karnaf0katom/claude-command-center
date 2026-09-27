@@ -1610,7 +1610,7 @@ def _inject_text_into_session_router(
             "mode": mode,
             "force_queue": bool(force_queue),
         })
-    # Total Recall may return a Claude child transcript's bare ``agent-*``
+    # Session search can surface a Claude child transcript's bare ``agent-*``
     # id. It is searchable, but Claude cannot resume it independently; route
     # the message through the parent session that owns the child transcript.
     session_id = _core._claude_subagent_parent_session_id(session_id) or session_id

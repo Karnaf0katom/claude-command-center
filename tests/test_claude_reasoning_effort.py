@@ -277,9 +277,6 @@ def test_usage_prefers_the_observed_effort_over_a_stale_override(tmp_path, monke
     for probe in ("_is_codex_session", "_is_gemini_session", "_is_cursor_session",
                   "_is_antigravity_session", "_is_hermes_session", "_is_kimi_session"):
         monkeypatch.setattr(_core, probe, lambda _sid: False)
-    monkeypatch.setattr(
-        morning_launch, "_with_token_optimizer_quality", lambda payload, _sid: payload,
-    )
 
     usage = morning_launch.extract_session_usage("sid-1")
 

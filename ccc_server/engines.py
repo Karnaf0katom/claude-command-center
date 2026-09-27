@@ -7811,7 +7811,7 @@ def _retire_idle_headless_for_session(session_id, *, reason="", defer_if_busy=Fa
             return {"retired": False, "reason": "pending_prompt", "deferred": True}
         return {"retired": False, "reason": "pending_prompt"}
     # Startup grace period: a freshly spawned headless runs SessionStart hooks
-    # (Total Recall, Token Optimizer, Superpowers, etc.) before it produces any
+    # (third-party memory/cost/agent plugins, Superpowers, etc.) before it produces any
     # stream output.  Hook processes are NOT tool children (they're skipped by
     # _spawn_entry_active_tool_child), so during this window the spawn looks
     # "idle" even though it's actively initializing.  Without this guard the

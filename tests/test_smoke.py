@@ -233,16 +233,6 @@ class TestSpawnStreamBackoff(unittest.TestCase):
         self.assertEqual(server._spawn_stream_idle_sleep_s(10_000), 0.25)
 
 
-class TestKimiRecallBridge(unittest.TestCase):
-    def test_kimi_recall_bridge_is_documented(self):
-        root = pathlib.Path(PROJECT_ROOT)
-        self.assertTrue((root / "scripts" / "kimi-recall-bridge.py").is_file())
-        self.assertIn(
-            "## Kimi Knowledge Bridge",
-            (root / "README.md").read_text(encoding="utf-8"),
-        )
-
-
 class TestWebuiPaneRegressionGuards(unittest.TestCase):
     """Regression guards for the kimi/codex webui-pane bug fixes."""
 
@@ -1593,9 +1583,10 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(1, kill_res["blocked"])
         self.assertIn(os.getpid(), kill_res["blocked"])
 
-    def test_total_recall_search_ui_wires_sidebar_augmentation(self):
-        """Conversation search calls the Recall session endpoint and labels
-        Recall-backed sidebar hits without turning the field into doc search."""
+    def test_recall_search_ui_wires_sidebar_augmentation(self):
+        """Conversation search calls the recall-session endpoint (CCC's own
+        in-process scan, no third-party dependency) and labels its sidebar
+        hits without turning the field into doc search."""
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
         self.assertIn("const params = new URLSearchParams({ q, limit: '50', since: '90d' });", app_js)
@@ -1605,7 +1596,6 @@ class TestServerImports(unittest.TestCase):
         )
         self.assertIn("/api/search-recall-sessions", app_js)
         self.assertIn("c._historySource === 'recall'", app_js)
-        self.assertIn("_historyBadgeLabel = _historyIsRecall ? 'TR'", app_js)
         self.assertIn("const recallParams = new URLSearchParams({ q, limit: '50' });", app_js)
         self.assertIn("fetch('/api/search-recall-sessions?' + recallParams.toString())", app_js)
         self.assertIn("const recallDone = recallReq.then((recallData) => {", app_js)
@@ -1613,7 +1603,7 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("const historyDone = historyReq.then((data) => {", app_js)
         self.assertIn("_mergeHistoryResults(qLower, (data && data.results) || []);", app_js)
         self.assertIn("return Promise.all([historyDone, recallDone, repoDone]).then(() => {", app_js)
-        self.assertIn("Total Recall", app_js)
+        self.assertNotIn("Total Recall", app_js)
         self.assertIn("is-recall", app_js)
         self.assertIn(".conv-history-badge.is-recall", app_css)
 
@@ -5634,27 +5624,6 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("postCompactSession", app_js)
         self.assertIn("/api/session/compact", app_js)
         self.assertIn(".conv-pct-badge.is-actionable", app_css)
-
-    def test_conversation_row_quality_badge_precedes_context_percent(self):
-        """Rows with Token Optimizer quality data should show Q/C before the
-        context percent badge."""
-        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
-        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
-
-        self.assertIn("function _convRowQualityBadge(c)", app_js)
-        self.assertIn("quality_score: c.quality_score", app_js)
-        self.assertIn("const qcBadgeHtml = pctBadgeHtml ? _convRowQualityBadge(c) : '';", app_js)
-        row_quality = app_js[
-            app_js.index("function _convRowQualityBadge(c)"):
-            app_js.index("function _formatTokenOptimizerQuality", app_js.index("function _convRowQualityBadge(c)"))
-        ]
-        self.assertIn("const label = (grade ? grade + ' ' : '') + rounded;", row_quality)
-        self.assertNotIn("const label = 'Q ' +", row_quality)
-        self.assertLess(app_js.index("+ (qcBadgeHtml || '')"), app_js.index("+ (pctBadgeHtml || '')"))
-        self.assertIn(".conv-qc-badge", app_css)
-        self.assertIn(".conv-qc-badge.is-good", app_css)
-        self.assertIn(".conv-qc-badge.is-warn", app_css)
-        self.assertIn(".conv-qc-badge.is-bad", app_css)
 
     def test_codex_slash_commands_are_wired_as_codex_commands(self):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
@@ -16332,93 +16301,6 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None, reasoning_effort=\"\", parent_session_id=None):", engines_py)
         self.assertIn('cmd.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])', engines_py)
 
-    def test_context_footer_renders_token_optimizer_quality_score(self):
-        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
-        css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text()
-        self.assertIn("function _formatTokenOptimizerQuality", js)
-        self.assertIn("wp-quality-pill", js)
-        footer_quality = js[
-            js.index("function _formatTokenOptimizerQuality"):
-            js.index("function renderSessionUsageIntoStrip", js.index("function _formatTokenOptimizerQuality"))
-        ]
-        self.assertIn("const label = (grade ? grade + ' ' : '') + rounded;", footer_quality)
-        self.assertNotIn("const label = 'Q ' +", footer_quality)
-        self.assertLess(js.index("qualityPill + '<span class=\"' + cls"), js.index("+ sourceLabelPill + _formatTokens(displayTokens)"))
-        self.assertIn(".conv-input-context .wp-quality-pill", css)
-
-    def test_server_starts_token_optimizer_index_refresher_in_background(self):
-        server_py = pathlib.Path(PROJECT_ROOT, "server.py").read_text()
-        main_source = server_py[server_py.index("def main():"):]
-        self.assertIn("_start_token_optimizer_quality_index_refresher()", main_source)
-
-    def test_extract_session_usage_includes_token_optimizer_quality_score(self):
-        for mod in ("server",):
-            sys.modules.pop(mod, None)
-        import server
-        sid = "11111111-2222-4333-8444-999999999999"
-        assistant = {
-            "type": "assistant",
-            "timestamp": "2026-05-26T19:52:30.316Z",
-            "sessionId": sid,
-            "message": {
-                "id": "msg-quality-1",
-                "role": "assistant",
-                "model": "claude-sonnet-4-6",
-                "content": [{"type": "text", "text": "done"}],
-                "usage": {
-                    "input_tokens": 12_000,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 3_000,
-                    "output_tokens": 500,
-                },
-            },
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            home = root / "home"
-            quality_dir = home / ".claude" / "token-optimizer"
-            quality_dir.mkdir(parents=True)
-            (quality_dir / "quality-index.json").write_text(
-                json.dumps({
-                    "version": 1,
-                    "records": {
-                        sid: {
-                            "score": 79.2,
-                            "grade": "B",
-                            "timestamp": "2026-06-25T19:53:10.896627+00:00",
-                            "summary": "45% fill, peak zone; 1 stale file read",
-                            "source_mtime": 10.0,
-                            "transcript_mtime": 9.0,
-                        },
-                    },
-                }),
-                encoding="utf-8",
-            )
-            project = root / "projects" / "-tmp-project-quality"
-            project.mkdir(parents=True)
-            (project / f"{sid}.jsonl").write_text(json.dumps(assistant) + "\n", encoding="utf-8")
-            orig_root = server.PROJECTS_ROOT
-            server.PROJECTS_ROOT = root / "projects"
-            try:
-                with mock.patch.object(server.Path, "home", return_value=home), \
-                     mock.patch.object(server, "_TOKEN_OPTIMIZER_QUALITY_RUNTIME_STATE", {}), \
-                     mock.patch.object(server, "_TOKEN_OPTIMIZER_QUALITY_INDEX", {}), \
-                     mock.patch.object(server, "_is_codex_session", return_value=False), \
-                     mock.patch.object(server, "_is_gemini_session", return_value=False), \
-                     mock.patch.object(server, "_is_cursor_session", return_value=False), \
-                     mock.patch.object(server, "_is_antigravity_session", return_value=False), \
-                     mock.patch.object(server, "_is_kilo_session", return_value=False), \
-                     mock.patch.object(server, "_load_desktop_app_metadata", return_value={}):
-                    server._refresh_token_optimizer_quality_index()
-                    usage = server.extract_session_usage(sid)
-            finally:
-                server.PROJECTS_ROOT = orig_root
-
-        self.assertEqual(usage["quality_score"], 79.2)
-        self.assertEqual(usage["quality_grade"], "B")
-        self.assertEqual(usage["quality_timestamp"], "2026-06-25T19:53:10.896627+00:00")
-        self.assertIn("45% fill, peak zone", usage["quality_summary"])
-
     def test_truncate_session_name_clamps_long_pastes(self):
         """A row title that's a full annotation context blob would stretch
         the sidebar and bloat /api/sessions responses; clamp it instead."""
@@ -19000,8 +18882,8 @@ class TestQuestionRelay(unittest.TestCase):
 
     def test_codex_hook_installer_adds_post_compact_without_touching_other_tools(self):
         """MEMO-FIX-16: ensure_codex_hooks_installed must be additive-only —
-        other tools (token-optimizer, orca, total-recall) already own entries
-        in ~/.codex/hooks.json and must survive untouched."""
+        other third-party tools already own entries in ~/.codex/hooks.json
+        and must survive untouched."""
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
             hooks_path = home / ".codex" / "hooks.json"

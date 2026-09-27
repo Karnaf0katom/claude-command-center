@@ -99,16 +99,8 @@
     // One request for both consumers below; the boot already competes
     // with the archive list for the browser's six connection slots.
     const featuresJson = fetch('/api/features').then(r => r.json());
-    // Settings-menu dashboard launchers for optional plugins. Each link is
-    // hidden by default in the HTML; reveal only when installed.
     featuresJson.then(f => {
       if (!f) return;
-      const show = (id, on) => {
-        const el = document.getElementById(id);
-        if (el && on) el.style.display = '';
-      };
-      show('openTotalRecallBtn', f.total_recall);
-      show('openTokenOptimizerBtn', f.token_optimizer);
       // Preview flags: stash resolved state + registry so ff() and the
       // Settings Experimental section can read them. `?ff=name` in the URL
       // force-enables a flag for this page load without persisting.
@@ -1709,16 +1701,12 @@
                     </svg>
                     <span>Continue in new session</span>
                   </button>
-                  <!-- CCC-923: auto-compact size + token-sitter toggle, only
-                       meaningful before a session exists yet. -->
+                  <!-- CCC-923: auto-compact size, only meaningful before a
+                       session exists yet. -->
                   <div class="conv-send-menu-item new-session-only" id="convSendAutoCompactRow" role="menuitem">
                     <label for="convSendAutoCompactK">Auto-compact size (K tokens)</label>
                     <input type="number" id="convSendAutoCompactK" min="10" max="990" step="10" placeholder="250">
                   </div>
-                  <label class="conv-send-menu-item new-session-only" id="convSendTokenSitterRow" for="convSendTokenSitter">
-                    <input type="checkbox" id="convSendTokenSitter">
-                    <span>token-sitter auto-snapshot</span>
-                  </label>
                 </div>
               </span>
             </div>
@@ -2419,8 +2407,8 @@
        IDs load-bearing for existing JS (verbatim, moved from the old
        popover, do not rename): runOnboardingBtn, takeTourBtn,
        networkAccessBtn, federationPeersBtn,
-       fleetViewBtn, carModeMenuBtn, restartServerBtn/restartServerLabel,
-       openTotalRecallBtn, openTokenOptimizerBtn. `#appearancePopover` is
+       fleetViewBtn, carModeMenuBtn, restartServerBtn/restartServerLabel.
+       `#appearancePopover` is
        kept as the Appearance section's container id for the same reason
        (existing `$appearancePopover.querySelectorAll(...)` lookups). -->
   <div id="settingsModal" class="settings-modal-overlay" hidden role="dialog" aria-modal="true" aria-label="Settings">
@@ -2922,25 +2910,6 @@
               </div>
             </div>
 
-            <a class="settings-row settings-row-link" id="openTotalRecallBtn" href="http://localhost:24824/total-recall" target="_blank" rel="noopener" style="display:none;" data-keywords="total recall dashboard memory sessions">
-              <div class="settings-row-main">
-                <div class="settings-row-label">Total Recall dashboard</div>
-                <div class="settings-row-desc">Open the Total Recall memory dashboard in a new tab.</div>
-              </div>
-              <div class="settings-row-control">
-                <span class="settings-launcher-btn">Open&nbsp;<span class="settings-launcher-arrow" aria-hidden="true">&#8599;</span></span>
-              </div>
-            </a>
-
-            <a class="settings-row settings-row-link" id="openTokenOptimizerBtn" href="http://localhost:24842/token-optimizer" target="_blank" rel="noopener" style="display:none;" data-keywords="token optimizer dashboard usage context">
-              <div class="settings-row-main">
-                <div class="settings-row-label">Token Optimizer dashboard</div>
-                <div class="settings-row-desc">Open the Token Optimizer dashboard in a new tab.</div>
-              </div>
-              <div class="settings-row-control">
-                <span class="settings-launcher-btn">Open&nbsp;<span class="settings-launcher-arrow" aria-hidden="true">&#8599;</span></span>
-              </div>
-            </a>
           </section>
 
           <section class="settings-section" id="settingsSection-sessions" data-section-id="sessions" role="tabpanel" aria-labelledby="settingsRailTab-sessions">

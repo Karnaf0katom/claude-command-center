@@ -3,11 +3,12 @@
 """Fast recent-session content search across every agent harness.
 
 Powers the sidebar conversation search (/api/search-recall-sessions). The
-previous implementation shelled out to the Total Recall CLI per keystroke —
-an 8s-timeout subprocess that only indexed claude-code/codex. This replaces
-it with an in-process scan of transcript files modified within the last N
-days (default 2), covering Claude Code, Codex, Kimi Code, Gemini and Cursor
-uniformly: if the bytes are on disk and recent, the session is findable.
+previous implementation shelled out to a third-party memory CLI per
+keystroke — an 8s-timeout subprocess that only indexed claude-code/codex.
+This replaces it with an in-process scan of transcript files modified within
+the last N days (default 2), covering Claude Code, Codex, Kimi Code, Gemini
+and Cursor uniformly: if the bytes are on disk and recent, the session is
+findable.
 
 Design notes:
 - Newest-first, stop at `limit` hits: for "find my recent session about X"
@@ -16,8 +17,8 @@ Design notes:
 - Oversized transcripts are searched head+tail instead of a full read, so a
   single 200MB session can't blow the per-query budget.
 - Result shape (session_id, cwd, ts_unix, snippet, _source) matches what the
-  now-removed Total Recall subprocess path used to return, so the sidebar
-  augmentation consumes it unchanged.
+  now-removed subprocess path used to return, so the sidebar augmentation
+  consumes it unchanged.
 """
 
 from __future__ import annotations

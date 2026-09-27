@@ -82,7 +82,7 @@ class TestSearchUiStatic(unittest.TestCase):
         self.assertIn("modified: _historyTsSeconds(hit.ts),", app_js)
 
     def test_archive_search_keeps_name_matches_above_recall_results(self):
-        """A late Total Recall repaint must preserve the search-result bands."""
+        """A late recall-search repaint must preserve the search-result bands."""
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         start = app_js.index("function renderArchiveList(filter, opts) {")
         end = app_js.index("async function setArchiveMode", start)

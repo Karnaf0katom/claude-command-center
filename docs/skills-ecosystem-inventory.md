@@ -85,9 +85,10 @@ Cross-session, cross-agent persistent memory. `brain search --query ... --deep`,
 `brain remember "<fact>"`, `total-recall ingest <path>`, and a local dashboard at
 `localhost:24824`. Indexes many sessions and cross-agent context by design.
 
-- **How CCC interacts today:** CCC already queries Total Recall for the sidebar
-  session search (`/api/search-recall-sessions`) and detects its state dir to
-  offer a dashboard launcher.
+- **How CCC interacts today:** it doesn't. CCC's sidebar session search
+  (`/api/search-recall-sessions`) used to shell out to Total Recall; it now
+  does its own in-process scan (`ccc_server/recent_search.py`), and CCC no
+  longer offers a Total Recall dashboard launcher. Use `ccc recall` instead.
 - **Fleet fit:** the shared-memory backbone. If every lane writes its outcome with
   `brain remember` tagged by queue/ticket, siblings can recall what was already
   tried. This is real but **not yet systematized** in CCC — it is on the roadmap,

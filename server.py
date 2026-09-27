@@ -6116,40 +6116,14 @@ def extract_session_slash_commands(session_id):
     return result
 
 
-_TOKEN_SITTER_CHECKPOINT_DIR = Path.home() / ".claude" / "token-optimizer" / "checkpoints"
-
-
 def extract_session_token_sitter_checkpoint(session_id):
-    """Does token-sitter have a durable checkpoint written for this session?
+    """Stub kept for API-contract stability (F2 cold composer once called this).
 
-    Checkpoint files are named ``<session-uuid>-<timestamp>-<label>.md`` under
-    ``_TOKEN_SITTER_CHECKPOINT_DIR`` (token-sitter/token-optimizer skill, not a
-    CCC feature — CCC only reads what it already wrote). Used by the F2 cold
-    composer to show a "checkpoint ready" affordance so continuing needs no
-    typed prompt (CCC-926).
+    Used to read a checkpoint file written by a third-party context-management
+    skill (token-sitter); that integration was removed, so this now always
+    reports no checkpoint rather than touching that tool's files.
     """
-    result = {"ok": True, "session_id": session_id, "exists": False}
-    if not session_id or not re.match(r"^[a-zA-Z0-9_-]+$", session_id):
-        return result
-    try:
-        matches = sorted(
-            _TOKEN_SITTER_CHECKPOINT_DIR.glob(session_id + "-*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return result
-    if not matches:
-        return result
-    latest = matches[0]
-    try:
-        mtime = latest.stat().st_mtime
-    except OSError:
-        mtime = 0
-    result["exists"] = True
-    result["path"] = str(latest)
-    result["mtime"] = mtime
-    return result
+    return {"ok": True, "session_id": session_id, "exists": False}
 
 
 # Per-session engine cache. A session's engine is immutable, but the detection
@@ -12545,7 +12519,6 @@ def _claude_task_agent_row(
         "live_context_limit": tail_meta.get("live_context_limit") or 0,
         "live_context_percent": tail_meta.get("live_context_percent") or 0,
         "context_limit": ctx_limit,
-        **_token_optimizer_quality_for_session(agent_id),
         "sidecar_status": None,
         "sidecar_has_writes": False,
         "sidecar_tool": None,
@@ -13190,7 +13163,6 @@ def find_all_conversations(
                 "live_context_limit": tail_meta.get("live_context_limit") or 0,
                 "live_context_percent": tail_meta.get("live_context_percent") or 0,
                 "context_limit": ctx_limit,
-                **_token_optimizer_quality_for_session(session_id),
                 # Sidecar overlay — only meaningful when is_live; cold
                 # rows get safe defaults that suppress the live pill.
                 **sidecar_fields,
@@ -14924,7 +14896,6 @@ def _archive_overlay_acp_sessions(rows):
                 "spawn_pid": sid if is_live else None,
                 "state": "working" if is_live else "idle",
                 "ended_blocked": False,
-                **_token_optimizer_quality_for_session(sid),
             }
             row["spawned_via"] = _infer_session_spawned_via(row, sid=sid, markers=spawn_markers)
             out.append(row)
@@ -21041,7 +21012,6 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "live_context_limit": tail_meta.get("live_context_limit") or 0,
             "live_context_percent": tail_meta.get("live_context_percent") or 0,
             "context_limit": limit,
-            **_token_optimizer_quality_for_session(sid),
             "spawn_named": spawn_named,
             "name_overridden": name_overridden,
             "auto_titled": sid in _auto_titled_session_ids(),
@@ -25062,11 +25032,6 @@ _adopt_ccc_module("byok")
 
 _adopt_ccc_module("github_issues")
 
-# Test-patched globals kept here; ccc_server/morning_launch.py reads and
-# rebinds them via _core.
-_TOKEN_OPTIMIZER_QUALITY_INDEX = {}
-_TOKEN_OPTIMIZER_QUALITY_RUNTIME_STATE = {}
-
 _adopt_ccc_module("morning_launch")
 # Conversation history search — extracted to ccc_server/history_search.py.
 # Test-patched globals kept here; ccc_server/history_search.py reads them via
@@ -25081,7 +25046,7 @@ _RESET_EVENTS_FILE = COMMAND_CENTER_STATE_DIR / "usage" / "reset-events.jsonl"
 
 _adopt_ccc_module("recall_usage")
 # Recent-session content search (all harnesses) — powers the sidebar search
-# via /api/search-recall-sessions, replacing the Total Recall subprocess.
+# via /api/search-recall-sessions, replacing a third-party memory-CLI subprocess.
 _adopt_ccc_module("recent_search")
 
 # Ask tab — retrieval + one cheap-LLM call (/api/assistant/ask).
@@ -27928,11 +27893,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({
                 "version": __version__,
                 "morning": MORNING_ENABLED,
-                # Third-party Claude Code plugins that ship their own local
-                # dashboard server. Detected by their state-dir marker so the
-                # settings menu only offers a launcher when installed.
-                "total_recall": (Path.home() / ".claude" / "total-recall").is_dir(),
-                "token_optimizer": (Path.home() / ".claude" / "token-optimizer").is_dir(),
                 # Preview flags: {name: bool} resolved state for UI gating, plus
                 # `preview_meta` (label/desc/default) so Settings renders its
                 # Experimental toggles from the server registry.
@@ -28106,8 +28066,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 ))
         elif path == "/api/search-recall-sessions":
             # Sidebar conversation search augmentation. Despite the legacy
-            # endpoint name this no longer shells out to the Total Recall CLI
-            # (8s-timeout subprocess per keystroke, claude-code/codex only);
+            # endpoint name this no longer shells out to a third-party memory
+            # CLI (8s-timeout subprocess per keystroke, claude-code/codex only);
             # it scans recent transcripts across ALL harnesses in-process —
             # sub-second warm, and Kimi/Gemini/Cursor sessions are findable.
             qs = urllib.parse.parse_qs(parsed.query)
@@ -39126,8 +39086,8 @@ def ensure_codex_hooks_installed():
     with ensure_hooks_installed's Claude Code PostCompact hook) is registered
     in ~/.codex/hooks.json.
 
-    Idempotent and additive only: other tools already own entries in this
-    file (token-optimizer, orca, total-recall) and must be left untouched.
+    Idempotent and additive only: other third-party tools already own entries
+    in this file and must be left untouched.
     Codex's hook subsystem also gates a *new* command entry behind a one-time
     interactive trust prompt on next `codex` launch (hook commands are
     "Untrusted" until the user approves the hash) — this function cannot and
@@ -39311,9 +39271,6 @@ def main():
         daemon=True,
         name="ccc-cursor-sidebar-backfill",
     ).start()
-    # Token Optimizer quality is advisory UI metadata. Hydrate it in the
-    # background; every request only reads the published in-memory map.
-    _start_token_optimizer_quality_index_refresher()
     # WatchTower's ticket list is GitHub-backed and its cache is in-process,
     # so it is cold at exactly the moment the dashboard boot burst hits it.
     # Measured on a restart: four concurrent /api/queue/* + /api/watchtower/*

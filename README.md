@@ -167,7 +167,7 @@ See the [engine support matrix](#engine-support) below for what each engine does
 
 ## What you get
 
-**See your whole fleet, past one session.** The way you build faster is a session per workstream: one on the feature, one on its go-to-market, one on the next feature, one on research. CCC puts every model and engine on one board, every row enriched so you read status without clicking in: a needs-you signal, live context left, a cost tier, and, with the Token Optimizer plugin, a quality score. Pin strategy sessions, nest workers under them, group by project, or lay the whole fleet out on a canvas.
+**See your whole fleet, past one session.** The way you build faster is a session per workstream: one on the feature, one on its go-to-market, one on the next feature, one on research. CCC puts every model and engine on one board, every row enriched so you read status without clicking in: a needs-you signal, live context left, and a cost tier. Pin strategy sessions, nest workers under them, group by project, or lay the whole fleet out on a canvas.
 
 **Stop wasting tokens, keep quality where it matters.** Your best model leads; execution fans out to cheaper models, or another platform entirely, through spawns, queues, and workers you point at any engine. CCC shows your pace against your plan's limits before you hit the wall, attributes a spend spike to the exact session or automation that caused it, and flags sessions running on a tier they don't need.
 
@@ -700,39 +700,6 @@ stores (read-only) into a local SQLite database — one row per session with
 tokens, cache usage, model and message counts — and `throughput summary`,
 `runrate` and `breakeven` compare what each provider costs at API list price.
 See [docs/usage-db.md](docs/usage-db.md).
-
-## Kimi Knowledge Bridge
-
-Kimi Code sessions can become searchable in [Total Recall](https://github.com/alexgreensh/total-recall)
-without copying them into another agent's session format or writing Total
-Recall's database. CCC exports one privacy-filtered Markdown brief for each
-Kimi session, then connects that folder through Total Recall's dashboard API.
-
-From a CCC checkout, export the current Kimi sessions:
-
-```bash
-python3 scripts/kimi-recall-bridge.py sync
-```
-
-Connect the generated folder to Total Recall once (this runs the supported
-`total-recall ingest <folder>` command):
-
-```bash
-python3 scripts/kimi-recall-bridge.py connect
-```
-
-To keep it current on macOS, explicitly install the opt-in five-minute
-LaunchAgent:
-
-```bash
-python3 scripts/kimi-recall-bridge.py install-launchd
-```
-
-The bridge writes to `~/.ccc/total-recall/kimi-code` by default. It retains
-Kimi's session ID, project, model, and timestamps, but intentionally excludes
-system prompts, thinking blocks, and tool input/output. These are knowledge
-documents rather than native Total Recall session rows; native Kimi ingestion
-is tracked upstream in [Total Recall issue #18](https://github.com/alexgreensh/total-recall/issues/18).
 
 ## Orchestration skill
 

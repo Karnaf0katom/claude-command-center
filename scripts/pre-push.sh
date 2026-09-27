@@ -31,6 +31,26 @@ if git ls-files --error-unmatch .hunch >/dev/null 2>&1 || \
   exit 1
 fi
 
+# Total Recall / Token Optimizer wiring was removed on purpose. This checks
+# for reintroduced plumbing (state-dir paths, the old subprocess/API names),
+# not mere prose mentions of the tools -- docs/skills-ecosystem* and the
+# /api/skills catalog in server.py are allowed to still name them as
+# third-party packs in the ecosystem.
+tr_to_hits="$(git grep -n -I -E 'total-recall/|brain\.dist|/api/brain/|alexgreensh-token-optimizer|token-optimizer@' \
+  -- . \
+  ':(exclude)CHANGELOG.md' \
+  ':(exclude)changelog.d/**' \
+  ':(exclude)docs/release-notes/**' \
+  ':(exclude)docs/product-story/**' \
+  ':(exclude)scripts/pre-push.sh' \
+  2>/dev/null | grep -v -E 'assertNotIn|assertFalse' || true)"
+if [ -n "$tr_to_hits" ]; then
+  echo "pre-push: reintroduced Total Recall / Token Optimizer wiring:"
+  echo "$tr_to_hits"
+  echo "That integration was removed; use CCC's own ccc recall instead."
+  exit 1
+fi
+
 if [ ! -f tests/test_perf_budget.py ]; then
   exit 0  # nothing to gate on this checkout
 fi

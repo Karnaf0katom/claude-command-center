@@ -4376,39 +4376,6 @@
       + '</div>';
   }
 
-  // CCC-926: a token-sitter checkpoint means this session's state was
-  // already durably saved — the "Continue" route needs no typed prompt to
-  // pick that up, so flag it with a small badge instead of making the user
-  // guess whether resuming will lose anything.
-  const _tokenSitterCheckpointCache = new Map();
-  async function f2TokenSitterCheckpointExists(sid) {
-    if (!sid) return false;
-    if (_tokenSitterCheckpointCache.has(sid)) return _tokenSitterCheckpointCache.get(sid);
-    let exists = false;
-    try {
-      const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/token-sitter-checkpoint', { cache: 'no-store', signal: convScopeSignal() });
-      const data = await res.json().catch(() => ({}));
-      exists = !!(res.ok && data && data.exists);
-    } catch (e) {
-      if (e && e.name === 'AbortError') return false;  // conversation switched; do not cache
-    }
-    _tokenSitterCheckpointCache.set(sid, exists);
-    return exists;
-  }
-  function f2PaintTokenSitterBadge(panel, sid) {
-    f2TokenSitterCheckpointExists(sid).then((exists) => {
-      if (!exists || !panel || !panel.isConnected) return;
-      const nameEl = panel.querySelector('.route.is-recommended .route-name');
-      if (!nameEl || nameEl.querySelector('.f2-checkpoint-badge')) return;
-      const badge = document.createElement('span');
-      badge.className = 'f2-checkpoint-badge';
-      badge.setAttribute('aria-hidden', 'true');
-      badge.title = 'token-sitter checkpoint ready — continuing needs no typed prompt';
-      badge.textContent = ' ✅🪑';
-      nameEl.appendChild(badge);
-    }).catch(() => {});
-  }
-
   // Paint (or clear) the cold-session composer for a pane. Called from
   // updateInputBar — i.e. as soon as a session is focused, before any text
   // exists — and again from the composer's input handler so the ranking can
@@ -4521,7 +4488,6 @@
         ? 'Idle ' + ageLabel + '. Start fresh with just the context you need.'
         : 'Resuming here reloads ~' + tokensLabel + ' tokens on ' + modelLabel + '.');
     panel.innerHTML = '<div class="routes">' + f2RoutesHtml(st, verdictText) + '</div>';
-    f2PaintTokenSitterBadge(panel, ctx.sid);
   }
 
   // ── route action ───────────────────────────────────────────────────────
@@ -34529,9 +34495,9 @@
       const _historyIsSemantic = c._historySource === 'vec' || c._historySource === 'fused';
       const _historyIsRecall = c._historySource === 'recall';
       const _historyBadgeClass = _historyIsSemantic ? ' is-semantic' : (_historyIsRecall ? ' is-recall' : '');
-      const _historyBadgeLabel = _historyIsRecall ? 'TR' : (_historyIsSemantic ? 'semantic history' : 'history');
+      const _historyBadgeLabel = _historyIsSemantic ? 'semantic history' : 'history';
       const _historyBadgeTitle = _historyIsRecall
-        ? 'Matched by Total Recall'
+        ? 'Matched by recent-session search'
         : 'Matched in conversation history' + (_historyIsSemantic ? ' (semantic)' : '');
       const historyBadgeHtml = c._historyMatch
         ? '<span class="conv-history-badge' + _historyBadgeClass + '" title="' + escapeAttr(_historyBadgeTitle) + '">' + _historyBadgeLabel + '</span>'
@@ -34607,7 +34573,7 @@
       const _ctxLevelClass = ctxPct
         ? (ctxPct.pct > 60 ? ' ctx-high' : (ctxPct.pct > 30 ? ' ctx-mid' : ' ctx-low'))
         : '';
-      const qcBadgeHtml = pctBadgeHtml ? _convRowQualityBadge(c) : '';
+      const qcBadgeHtml = '';
       // Context-utilized % is rendered in the always-visible main row, just left
       // of the elapsed-time slot (see pctBadgeHtml placement below) — it's too
       // important to hide in the hover row or bury in the branch slot. (CCC-294)
@@ -53751,53 +53717,6 @@
     return { pct, displayTokens, limit, source };
   }
 
-  function _convRowQualityBadge(c) {
-    const rawScore = c && c.quality_score;
-    if (rawScore === undefined || rawScore === null || rawScore === '') return '';
-    const score = Number(rawScore);
-    if (!Number.isFinite(score)) return '';
-    const grade = String((c && c.quality_grade) || '').trim();
-    const rounded = Math.round(score);
-    let cls = 'conv-qc-badge';
-    if (score >= 80) cls += ' is-good';
-    else if (score >= 60) cls += ' is-warn';
-    else cls += ' is-bad';
-    const summary = String((c && c.quality_summary) || '').trim();
-    const title = 'Token Optimizer session quality: '
-      + (grade ? grade + ' · ' : '')
-      + score + '/100'
-      + (summary ? '\n' + summary : '')
-      + ((c && c.quality_timestamp) ? '\nRecorded: ' + c.quality_timestamp : '');
-    const label = (grade ? grade + ' ' : '') + rounded;
-    return '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
-      + escapeHtml(label)
-      + '</span>';
-  }
-
-  function _formatTokenOptimizerQuality(u) {
-    const rawScore = u && u.quality_score;
-    if (rawScore === undefined || rawScore === null || rawScore === '') return '';
-    const score = Number(rawScore);
-    if (!Number.isFinite(score)) return '';
-    const grade = String((u && u.quality_grade) || '').trim();
-    const rounded = Math.round(score);
-    let cls = 'wp-quality-pill';
-    if (score >= 80) cls += ' wp-quality-good';
-    else if (score >= 60) cls += ' wp-quality-fair';
-    else if (score >= 40) cls += ' wp-quality-warn';
-    else cls += ' wp-quality-poor';
-    const summary = String((u && u.quality_summary) || '').trim();
-    const title = 'Token Optimizer session quality: '
-      + (grade ? grade + ' · ' : '')
-      + score + '/100'
-      + (summary ? '\n' + summary : '')
-      + ((u && u.quality_timestamp) ? '\nRecorded: ' + u.quality_timestamp : '');
-    const label = (grade ? grade + ' ' : '') + rounded;
-    return '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
-      + escapeHtml(label)
-      + '</span>';
-  }
-
   function renderSessionUsageIntoStrip(paneId) {
     // No paneId → repaint every pane that has usage data (split mode).
     if (!paneId) {
@@ -53937,7 +53856,7 @@
     const override = canToggleContextLimit ? _getCtxLimitOverride() : 0;
     const limit = override || (hasLiveContext ? liveContextLimit : 0) || u.context_limit || 200000;
     const displayTokens = transcriptLatest || (hasLiveContext ? liveContextTokens : 0);
-    const qualityPill = _formatTokenOptimizerQuality(u);
+    const qualityPill = '';
     if (!displayTokens && !peak) {
       if (!modelPill && !qualityPill) {
         uSlot.innerHTML = '';
@@ -61386,8 +61305,8 @@
     // All three augmentations land in _historyState as they resolve, but the
     // repaint happens ONCE after all settle. Repainting per fetch (recall,
     // then history, then repo) rebuilt the whole sidebar DOM three times per
-    // keystroke — with the old 8s Total Recall timeout that meant the list
-    // visibly morphed for seconds after typing stopped.
+    // keystroke — with the old 8s third-party-subprocess timeout that meant
+    // the list visibly morphed for seconds after typing stopped.
     const recallDone = recallReq.then((recallData) => {
       if (seq !== _historyFetchSeq) return;
       _mergeHistoryResults(qLower, (recallData && recallData.results) || []);
@@ -78523,11 +78442,7 @@
   async function spawnFromInlineInput(body) {
     const spawnAskedAt = Date.now();
     const subject = spawnFirstSentence(body);
-    const $tokenSitterToggle = document.getElementById('convSendTokenSitter');
-    const wantsTokenSitter = !!($tokenSitterToggle && $tokenSitterToggle.checked);
-    const prompt = wantsTokenSitter
-      ? 'turn on token-sitter auto snapshot on\n\n' + body
-      : body;
+    const prompt = body;
     const $autoCompactInput = document.getElementById('convSendAutoCompactK');
     const autoCompactK = $autoCompactInput ? parseInt($autoCompactInput.value, 10) : NaN;
     const engine = getSpawnEngine();

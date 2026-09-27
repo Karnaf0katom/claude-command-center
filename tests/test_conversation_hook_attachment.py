@@ -15,8 +15,8 @@ def test_hook_success_attachment_surfaces_stdout_and_event():
             "hookName": "SessionStart:resume",
             "toolUseID": "ba37710a-5e72-404f-8d75-7d2d45a094b1",
             "hookEvent": "SessionStart",
-            "content": "[Token Optimizer] A recent checkpoint is available",
-            "stdout": "[Token Optimizer] A recent checkpoint is available (prior work on chuck-realtor-web · branch main) at /path/to/checkpoint.md. Load it only if it matches what you are working on now.\n",
+            "content": "[SessionHook] A recent checkpoint is available",
+            "stdout": "[SessionHook] A recent checkpoint is available (prior work on chuck-realtor-web · branch main) at /path/to/checkpoint.md. Load it only if it matches what you are working on now.\n",
             "stderr": "",
             "exitCode": 0,
             "durationMs": 360,
@@ -32,7 +32,7 @@ def test_hook_success_attachment_surfaces_stdout_and_event():
     assert parsed["ts"] == "2026-08-22T20:41:47.500Z"
     assert parsed["hook_event"] == "SessionStart"
     assert parsed["hook_name"] == "SessionStart:resume"
-    assert "[Token Optimizer] A recent checkpoint is available" in parsed["text"]
+    assert "[SessionHook] A recent checkpoint is available" in parsed["text"]
     assert parsed["duration_ms"] == 360
     assert parsed["exit_code"] == 0
 
@@ -47,7 +47,7 @@ def test_async_hook_response_surfaces_stderr():
             "hookName": "SessionStart:startup",
             "hookEvent": "SessionStart",
             "stdout": "",
-            "stderr": "[Token Optimizer] hook budget exceeded; skipping ensure-health tick to keep session responsive\n",
+            "stderr": "[SessionHook] hook budget exceeded; skipping ensure-health tick to keep session responsive\n",
             "exitCode": 0,
         },
     }

@@ -1938,186 +1938,6 @@ def _local_command_context_usage(ev):
     }
 
 
-def _token_optimizer_quality_grade(score):
-    if score >= 90:
-        return "S"
-    if score >= 80:
-        return "A"
-    if score >= 70:
-        return "B"
-    if score >= 55:
-        return "C"
-    if score >= 40:
-        return "D"
-    return "F"
-
-
-# _TOKEN_OPTIMIZER_QUALITY_INDEX / _RUNTIME_STATE live in server.py (tests
-# patch them through the server module); read and rebound via _core.
-_TOKEN_OPTIMIZER_QUALITY_INDEX_LOCK = threading.Lock()
-_TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_S = 60.0
-_TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_STARTED = False
-
-
-def _token_optimizer_quality_index_paths():
-    """The two producer-owned files; callers must not enumerate their dirs."""
-    home = Path.home()
-    return (
-        ("claude", home / ".claude" / "token-optimizer" / "quality-index.json"),
-        ("codex", home / ".codex" / "token-optimizer" / "quality-index.json"),
-    )
-
-
-def _token_optimizer_quality_safe_sid(value):
-    sid = str(value or "").strip()
-    if not sid or re.fullmatch(r"[A-Za-z0-9_-]+", sid) is None:
-        return ""
-    return sid
-
-
-def _token_optimizer_quality_index_records(raw):
-    """Validate a complete producer index and return its usable records."""
-    if not isinstance(raw, dict) or raw.get("version") != 1:
-        return None
-    source = raw.get("records")
-    if not isinstance(source, dict):
-        return None
-    records = {}
-    for session_id, data in source.items():
-        sid = _token_optimizer_quality_safe_sid(session_id)
-        if not sid or not isinstance(data, dict):
-            continue
-        try:
-            score = float(data.get("score"))
-            source_mtime = float(data.get("source_mtime"))
-            transcript_mtime = float(data.get("transcript_mtime"))
-        except (TypeError, ValueError):
-            continue
-        if (
-            not math.isfinite(score)
-            or not math.isfinite(source_mtime)
-            or not math.isfinite(transcript_mtime)
-            or not 0 <= score <= 100
-            or source_mtime < 0
-            or transcript_mtime < 0
-        ):
-            continue
-        rounded = round(score, 1)
-        if rounded.is_integer():
-            rounded = int(rounded)
-        records[sid] = {
-            "source_mtime": source_mtime,
-            "value": {
-                "quality_score": rounded,
-                "quality_grade": str(
-                    data.get("grade") or _token_optimizer_quality_grade(score)
-                ).strip(),
-                "quality_timestamp": str(data.get("timestamp") or ""),
-                "quality_summary": str(data.get("summary") or ""),
-                "quality_source": "token-optimizer-index",
-            },
-        }
-    return records
-
-
-def _refresh_token_optimizer_quality_index():
-    """Refresh changed producer indexes; this is the only TO filesystem reader."""
-    previous = _core._TOKEN_OPTIMIZER_QUALITY_RUNTIME_STATE
-    next_state = dict(previous)
-    changed = False
-    for runtime, index_path in _token_optimizer_quality_index_paths():
-        prior = previous.get(runtime) or {"stamp": None, "records": {}}
-        try:
-            stat = index_path.stat()
-        except FileNotFoundError:
-            if prior.get("stamp") is not None or prior.get("records"):
-                next_state[runtime] = {"stamp": None, "records": {}}
-                changed = True
-            continue
-        except OSError:
-            # A temporarily unreadable index is not a reason to drop pills.
-            continue
-        stamp = (stat.st_mtime_ns, stat.st_size)
-        if prior.get("stamp") == stamp:
-            continue
-        try:
-            raw = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            # Preserve the last good runtime map until the next interval.
-            continue
-        records = _token_optimizer_quality_index_records(raw)
-        if records is None:
-            continue
-        next_state[runtime] = {"stamp": stamp, "records": records}
-        changed = True
-
-    if not changed:
-        return False
-    merged = {}
-    # Equal source mtimes use runtime then path order so duplicate pills do not
-    # flicker. `codex` sorts after `claude`, therefore wins an exact tie.
-    for runtime, index_path in _token_optimizer_quality_index_paths():
-        records = (next_state.get(runtime) or {}).get("records") or {}
-        for sid, record in records.items():
-            candidate_key = (record["source_mtime"], runtime, str(index_path))
-            previous_record = merged.get(sid)
-            if previous_record is None or candidate_key > previous_record[0]:
-                merged[sid] = (candidate_key, record["value"])
-    complete_map = {sid: value for sid, (_key, value) in merged.items()}
-    with _TOKEN_OPTIMIZER_QUALITY_INDEX_LOCK:
-        _core._TOKEN_OPTIMIZER_QUALITY_RUNTIME_STATE = next_state
-        _core._TOKEN_OPTIMIZER_QUALITY_INDEX = complete_map
-    return True
-
-
-# New identity per module (re)load. A refresher thread born under an older
-# load must not keep writing the live index through _core after the test
-# suite re-imports server (which reloads this module): it captures this token
-# at birth and exits when a reload replaces it.
-_TOKEN_OPTIMIZER_REFRESH_GENERATION = object()
-
-
-def _token_optimizer_quality_index_loop():
-    birth = _TOKEN_OPTIMIZER_REFRESH_GENERATION
-    while True:
-        if _TOKEN_OPTIMIZER_REFRESH_GENERATION is not birth:
-            return
-        try:
-            _core._refresh_token_optimizer_quality_index()
-        except Exception:
-            # Advisory metadata must not destabilize CCC's background work.
-            pass
-        time.sleep(_TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_S)
-
-
-def _start_token_optimizer_quality_index_refresher():
-    global _TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_STARTED
-    with _TOKEN_OPTIMIZER_QUALITY_INDEX_LOCK:
-        if _TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_STARTED:
-            return
-        _TOKEN_OPTIMIZER_QUALITY_INDEX_REFRESH_STARTED = True
-    threading.Thread(
-        target=_token_optimizer_quality_index_loop,
-        daemon=True,
-        name="ccc-token-optimizer-quality-index",
-    ).start()
-
-
-def _token_optimizer_quality_for_session(session_id):
-    """Pure request-time lookup of the most recently published quality map."""
-    sid = _token_optimizer_quality_safe_sid(session_id)
-    return dict(_core._TOKEN_OPTIMIZER_QUALITY_INDEX.get(sid) or {})
-
-
-def _with_token_optimizer_quality(payload, session_id):
-    if not isinstance(payload, dict):
-        return payload
-    quality = _core._token_optimizer_quality_for_session(session_id)
-    if quality:
-        return {**payload, **quality}
-    return payload
-
-
 def _extract_kimi_usage(session_id):
     """Usage stats for a kimi session, read from its wire.jsonl.
 
@@ -2272,32 +2092,32 @@ def extract_session_usage(session_id):
     if _core._is_codex_session(session_id):
         result = _core._extract_codex_usage(session_id)
         result.setdefault("engine", "codex")
-        return _with_token_optimizer_quality(result, session_id)
+        return result
     if _core._is_gemini_session(session_id):
         result = _core._extract_gemini_usage(session_id)
         result.setdefault("engine", "gemini")
-        return _with_token_optimizer_quality(result, session_id)
+        return result
     if _core._is_cursor_session(session_id):
         result = _core._extract_cursor_usage(session_id)
         result.setdefault("engine", "cursor")
-        return _with_token_optimizer_quality(result, session_id)
+        return result
     if _core._is_antigravity_session(session_id):
         result = _core._extract_antigravity_usage(session_id)
         result.setdefault("engine", "antigravity")
-        return _with_token_optimizer_quality(result, session_id)
+        return result
     if _core._is_hermes_session(session_id):
-        return _with_token_optimizer_quality(_core._extract_hermes_usage(session_id), session_id)
+        return _core._extract_hermes_usage(session_id)
     if _core._is_kimi_session(session_id):
-        return _with_token_optimizer_quality(_extract_kimi_usage(session_id), session_id)
+        return _extract_kimi_usage(session_id)
     if _core._is_grok_session(session_id):
-        return _with_token_optimizer_quality(_core._extract_grok_usage(session_id), session_id)
+        return _core._extract_grok_usage(session_id)
     if _core._is_devin_cli_session(session_id):
         result = _core._extract_devin_cli_usage(session_id)
         result.setdefault("engine", "devin")
-        return _with_token_optimizer_quality(result, session_id)
+        return result
     desktop_meta = _core._load_desktop_app_metadata().get(session_id) or {}
     if not _core.PROJECTS_ROOT.is_dir():
-        return _with_token_optimizer_quality({**empty, "model": desktop_meta.get("model") or ""}, session_id)
+        return {**empty, "model": desktop_meta.get("model") or ""}
     jsonl = None
     for pd in _core.PROJECTS_ROOT.iterdir():
         if not pd.is_dir():
@@ -2307,7 +2127,7 @@ def extract_session_usage(session_id):
             jsonl = cand
             break
     if not jsonl:
-        return _with_token_optimizer_quality({**empty, "model": desktop_meta.get("model") or ""}, session_id)
+        return {**empty, "model": desktop_meta.get("model") or ""}
 
     latest = 0
     peak = 0
@@ -2434,7 +2254,7 @@ def extract_session_usage(session_id):
                         "tokens_out": tout if isinstance(tout, int) else 0,
                     })
     except OSError:
-        return _with_token_optimizer_quality({**empty, "model": model}, session_id)
+        return {**empty, "model": model}
 
     if not latest and diagnostic_latest:
         latest = diagnostic_latest
@@ -2460,7 +2280,7 @@ def extract_session_usage(session_id):
     cost_out = total_out * rate_out / 1_000_000
     cost_total = cost_in + cost_cw + cost_cr + cost_out
 
-    return _with_token_optimizer_quality({
+    return {
         # Top-level effort, matching _extract_codex_usage's shape so a client
         # reads one key for every engine. Transcript-first for the same reason
         # the model pill is live-first: the assistant record states what the
@@ -2491,4 +2311,4 @@ def extract_session_usage(session_id):
             "cache_read": round(cost_cr, 4),
             "output": round(cost_out, 4),
         },
-    }, session_id)
+    }

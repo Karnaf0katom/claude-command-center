@@ -125,7 +125,6 @@ def test_archive_overlay_acp_sessions_infers_spawned_via(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_load_verified_conversations", lambda: [])
     monkeypatch.setattr(server, "_acp_transcript_path", lambda harness, session_id: tmp_path / "missing.jsonl")
     monkeypatch.setattr(server, "_acp_transcript_first_prompt", lambda harness, session_id: "")
-    monkeypatch.setattr(server, "_token_optimizer_quality_for_session", lambda session_id: {})
 
     rows = server._archive_overlay_acp_sessions([])
     assert len(rows) == 1
