@@ -481,7 +481,9 @@ def cmd_recall(args):
         return 0
     for r in results:
         meta = " | ".join(x for x in (r.get("title"), r.get("repo"), r.get("date")) if x)
-        print(f"{r.get('session_id') or '?':<38} {meta}")
+        collapsed = r.get("chain_collapsed") or 0
+        suffix = f"  (+{collapsed} earlier)" if collapsed else ""
+        print(f"{r.get('session_id') or '?':<38} {meta}{suffix}")
         if r.get("snippet"):
             print(f"  {r['snippet']}")
         m = r.get("match")
@@ -526,6 +528,15 @@ def cmd_brief(args):
                                   payload.get("start_date"), payload.get("end_date")) if x)
     if meta:
         print(f"  {meta}")
+    parent = payload.get("parent") or ""
+    latest = payload.get("latest") or ""
+    if parent or latest:
+        bits = []
+        if parent:
+            bits.append(f"parent: {parent}")
+        if latest:
+            bits.append(f"latest: {latest}")
+        print(f"  {', '.join(bits)}")
     for t in payload.get("tickets") or []:
         title = f" — {t['title']}" if t.get("title") else ""
         print(f"  ticket: {t['ref']} [{t.get('status') or '?'}]{title}")

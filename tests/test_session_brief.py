@@ -9,6 +9,8 @@ import subprocess
 
 import pytest
 
+import ccc_server.lineage as lineage
+import ccc_server.report_routes as report_routes
 import ccc_server.session_brief as session_brief
 import ccc_server.session_fts as session_fts
 import ccc_server.ship_graph as ship_graph
@@ -121,6 +123,28 @@ def mock_brief_env(tmp_path, monkeypatch):
     ]
     session_file.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
 
+    # A second session that continued from session-brief-1 (MEMO-FIX-lineage):
+    # exercises chain_summary()'s continuation-ancestor/latest-successor walk
+    # through session_brief.brief() end to end.
+    continuation_file = session_dir / "cont-session-2.jsonl"
+    continuation_lines = [
+        {
+            "type": "user", "cwd": str(repo_dir), "timestamp": "2026-09-20T11:00:00Z",
+            "message": {"role": "user", "content": (
+                "You are continuing a task from an earlier session.\n\n"
+                "Origin session id: session-brief-1\n"
+                "Task: Continue the work from where it left off."
+            )},
+        },
+        {
+            "type": "assistant", "cwd": str(repo_dir), "timestamp": "2026-09-20T11:01:00Z",
+            "message": {"role": "assistant", "content": "Pushed the local-only tweak to origin."},
+        },
+    ]
+    continuation_file.write_text(
+        "\n".join(json.dumps(x) for x in continuation_lines) + "\n", encoding="utf-8"
+    )
+
     monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(ship_db))
     monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
     monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
@@ -157,12 +181,22 @@ def mock_brief_env(tmp_path, monkeypatch):
     session_fts._vec_cache["vecs"] = []
     ship_graph._base_search_sessions = None
 
+    # lineage.py and report_routes.py both resolve to a fixed per-pid temp
+    # path under test isolation (matching report_routes._default_path()'s own
+    # test-isolation branch), not this fixture's per-test tmp_path -- reset
+    # both to empty so a prior test's edges/routes never leak into this one.
+    with open(lineage._session_graph_path(), "w", encoding="utf-8") as f:
+        json.dump({"edges": []}, f)
+    with open(report_routes._default_path(), "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
     return {
         "repo_dir": repo_dir,
         "sha_pushed": sha_pushed,
         "sha_local": sha_local,
         "scratch_artifact": scratch_artifact,
         "sid": "session-brief-1",
+        "sid2": "cont-session-2",
     }
 
 
@@ -255,3 +289,29 @@ def test_brief_resume_command_for_claude_engine(mock_brief_env):
 
 def test_resolve_session_empty_query(mock_brief_env):
     assert session_brief.resolve_session("") == {"session_id": None, "alternates": []}
+
+
+def test_brief_latest_points_at_continuation_successor(mock_brief_env):
+    res = session_brief.brief(mock_brief_env["sid"])
+    assert res["latest"] == mock_brief_env["sid2"]
+    assert res["continuation_ancestors"] == []
+
+
+def test_brief_continuation_ancestors_of_successor(mock_brief_env):
+    res = session_brief.brief(mock_brief_env["sid2"])
+    assert res["continuation_ancestors"] == [mock_brief_env["sid"]]
+    assert res["latest"] == ""
+
+
+def test_brief_parent_from_spawn_edge_on_chain_root(mock_brief_env):
+    graph_path = lineage._session_graph_path()
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"edges": [{
+            "parent": "dispatcher-1", "child": mock_brief_env["sid"],
+            "source": "test", "engine": "claude", "resumable": True, "name": "", "model": "",
+        }]}, f)
+    # The parent is resolved from the CHAIN'S ROOT (session-brief-1), even
+    # when asking about its successor (cont-session-2) -- the successor was
+    # auto-resumed, not freshly spawned by a dispatcher of its own.
+    res = session_brief.brief(mock_brief_env["sid2"])
+    assert res["parent"] == "dispatcher-1"

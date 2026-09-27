@@ -116,11 +116,12 @@ def main():
         asks = state["asks"][-3:]
         ticket_ref = state["ticket_ref"]
         ticket_title = state["ticket_title"]
+        continued_from = state["continued_from"]
 
-        if not asks and not ticket_ref:
+        if not asks and not ticket_ref and not continued_from:
             return
 
-        print(build_block(asks, ticket_ref, ticket_title))
+        print(build_block(asks, ticket_ref, ticket_title, continued_from))
 
     except Exception:
         pass
