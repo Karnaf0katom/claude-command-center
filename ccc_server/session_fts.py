@@ -1174,6 +1174,64 @@ def section_matches(query: str, sids: list[str]) -> dict[str, dict]:
     return out
 
 
+def _embed_model_dir() -> Path:
+    override = os.environ.get("OLLAMA_MODELS")
+    return Path(override) if override else (Path.home() / ".ollama" / "models")
+
+
+def _embed_model_dir_status() -> dict:
+    """MEMO-FIX-24: catches the OPS-1251 shape (the embedding model directory
+    living on a share that can silently unmount, taking semantic search down
+    with it) before it degrades search again. Stat-only, no subprocess."""
+    raw = _embed_model_dir()
+    try:
+        resolved = raw.resolve(strict=True)
+    except OSError:
+        return {"path": str(raw), "resolved": None, "reachable": False, "on_volumes": None}
+    return {
+        "path": str(raw),
+        "resolved": str(resolved),
+        "reachable": True,
+        "on_volumes": str(resolved).startswith("/Volumes/"),
+    }
+
+
+def _ollama_model_present() -> bool | None:
+    """Whether EMB_MODEL shows up in `ollama list`. None if the daemon can't
+    be asked (distinct from a confirmed-absent model)."""
+    try:
+        req = urllib.request.Request(f"{_ollama_base()}/api/tags")
+        with urllib.request.urlopen(req, timeout=_OLLAMA_PROBE_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return None
+    names = [m.get("name", "") for m in (data.get("models") or []) if isinstance(m, dict)]
+    prefix = EMB_MODEL.split(":")[0]
+    return any(name.split(":")[0] == prefix for name in names)
+
+
+def index_health() -> dict:
+    """Cheap read-only snapshot of session-index and embeddings health for
+    `ccc doctor` (MEMO-FIX-24). COUNT(*) queries plus the existing cached
+    Ollama liveness probe only -- never triggers a sync, never spawns a
+    subprocess, safe to poll on every doctor invocation."""
+    conn = _get_connection()
+    _init_db(conn)
+    sdoc_rows = conn.execute("SELECT COUNT(*) FROM sdoc").fetchone()[0]
+    semb_sids = conn.execute("SELECT COUNT(DISTINCT sid) FROM semb").fetchone()[0]
+    semb_pending = conn.execute("SELECT COUNT(*) FROM semb_pending").fetchone()[0]
+    ollama_ok = _ollama_available()
+    return {
+        "sdoc_rows": sdoc_rows,
+        "semb_sids": semb_sids,
+        "semb_pending": semb_pending,
+        "last_sync_ts": _last_sync_ts or None,
+        "ollama_reachable": ollama_ok,
+        "embed_model_present": _ollama_model_present() if ollama_ok else None,
+        "embed_model_dir": _embed_model_dir_status(),
+    }
+
+
 def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) -> list[dict]:
     """Search indexed sessions with BM25.
 

@@ -1,0 +1,1 @@
+`ccc doctor` now reports memory-subsystem health: session index size, embeddings coverage, whether Ollama and its embedding model are reachable, embedding-model directory risk (unmounted share), ship-graph freshness, and decision-extraction last-run — so a silent semantic-search outage (e.g. an unmounted model directory) shows up instead of going unnoticed.

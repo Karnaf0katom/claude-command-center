@@ -781,7 +781,8 @@ def cmd_doctor(args):
     print("\n'?' = no CLI-based probe implemented for that check yet (not a failure).")
     _print_github_quota(payload.get("github_quota"))
     instance_warn = _print_server_instances(payload.get("server_instances"))
-    return 1 if (freshness == "stale" or instance_warn or (args.engine and any_unhealthy)) else 0
+    memory_warn = _print_memory_health(payload.get("memory"))
+    return 1 if (freshness == "stale" or instance_warn or memory_warn or (args.engine and any_unhealthy)) else 0
 
 
 def _print_github_quota(quota):
@@ -841,6 +842,38 @@ def _print_server_instances(report):
         fix = report.get("fix")
         if fix:
             print(f"  fix: {fix}")
+        return True
+    return False
+
+
+def _print_memory_health(report):
+    """Print session-index/embeddings/ship-graph/decision-extraction health
+    (MEMO-FIX-24). Returns True on WARN."""
+    if not isinstance(report, dict):
+        return False
+    status = str(report.get("status") or "unknown").upper()
+    index = report.get("session_index") or {}
+    graph = report.get("ship_graph") or {}
+    decisions = report.get("decision_extraction") or {}
+    print(f"\nmemory: {status}")
+    if "error" not in index:
+        coverage = index.get("embed_coverage_pct")
+        coverage_str = f"{coverage}%" if coverage is not None else "?"
+        print(
+            f"  session index: {index.get('sdoc_rows', '?')} sessions, "
+            f"embeddings {index.get('semb_sids', '?')} ({coverage_str}), "
+            f"{index.get('semb_pending', '?')} pending, "
+            f"ollama {'up' if index.get('ollama_reachable') else 'down'}"
+        )
+    if "error" not in graph:
+        print(
+            f"  ship graph: {graph.get('transcripts_rows', '?')} transcripts, "
+            f"{graph.get('commits_rows', '?')} commits"
+        )
+    print(f"  decision extraction: last run {decisions.get('last_run_at') or 'never'}")
+    if status == "WARN":
+        for warning in report.get("warnings") or []:
+            print(f"  WARN: {warning}")
         return True
     return False
 

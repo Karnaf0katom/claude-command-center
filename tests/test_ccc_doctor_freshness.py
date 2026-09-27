@@ -149,6 +149,86 @@ class DoctorReportsStaleCodeTests(unittest.TestCase):
         self.assertIn("manual", text)
         self.assertIn(f"fix: {fix}", text)
 
+    def test_memory_warning_exits_nonzero_and_prints_reason(self):
+        """MEMO-FIX-24: a memory-subsystem warning (e.g. Ollama down, low
+        embedding coverage) must fail the run the same way a stale-code or
+        duplicate-instance warning does -- not just print and exit 0."""
+        ccc = self.ccc
+
+        class Args:
+            server = "http://127.0.0.1:8099"
+            engine = None
+            json = False
+
+        payload = {
+            "engines": {"claude": {"cli_present": True, "auth_present": True}},
+            "memory": {
+                "status": "warn",
+                "warnings": ["Ollama unreachable — semantic search is running FTS-only"],
+                "session_index": {
+                    "sdoc_rows": 2779, "semb_sids": 1, "semb_pending": 0,
+                    "ollama_reachable": False, "embed_coverage_pct": 0.0,
+                },
+                "ship_graph": {"transcripts_rows": 50, "commits_rows": 20},
+                "decision_extraction": {"last_run_at": "2026-09-27T10:00:00Z"},
+            },
+        }
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_get_json") as get_json, \
+             mock.patch.object(ccc, "_local_head_rev", return_value="abc123"), \
+             redirect_stdout(io.StringIO()) as out:
+            def fake_get_json(base, path, timeout=10):
+                if path == "/api/engines/doctor":
+                    return payload
+                if path == "/api/version":
+                    return {"code_rev": "abc123"}
+                raise AssertionError(f"unexpected path {path!r}")
+            get_json.side_effect = fake_get_json
+            rc = ccc.cmd_doctor(Args())
+
+        text = out.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn("memory: WARN", text)
+        self.assertIn("Ollama unreachable", text)
+        self.assertIn("2779 sessions", text)
+
+    def test_healthy_memory_does_not_fail_the_run(self):
+        ccc = self.ccc
+
+        class Args:
+            server = "http://127.0.0.1:8099"
+            engine = None
+            json = False
+
+        payload = {
+            "engines": {"claude": {"cli_present": True, "auth_present": True}},
+            "memory": {
+                "status": "ok",
+                "warnings": [],
+                "session_index": {
+                    "sdoc_rows": 100, "semb_sids": 98, "semb_pending": 2,
+                    "ollama_reachable": True, "embed_coverage_pct": 98.0,
+                },
+                "ship_graph": {"transcripts_rows": 50, "commits_rows": 20},
+                "decision_extraction": {"last_run_at": "2026-09-27T10:00:00Z"},
+            },
+        }
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_get_json") as get_json, \
+             mock.patch.object(ccc, "_local_head_rev", return_value="abc123"):
+            def fake_get_json(base, path, timeout=10):
+                if path == "/api/engines/doctor":
+                    return payload
+                if path == "/api/version":
+                    return {"code_rev": "abc123"}
+                raise AssertionError(f"unexpected path {path!r}")
+            get_json.side_effect = fake_get_json
+            rc = ccc.cmd_doctor(Args())
+
+        self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

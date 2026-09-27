@@ -16145,7 +16145,23 @@ def _restart_worker_process(worker=None, *, was=None, now=None):
     own copy of that module state).
 
     Prefers launchd; falls back to kill + detached respawn for install paths
-    with no worker service (Homebrew's single service, the DMG app spawn).
+    with no worker service (Homebrew's single service, the DMG app spawn) --
+    and for a kickstart that reported success but never actually replaced the
+    process. `launchctl kickstart -k` only replaces the process launchd
+    itself currently tracks under this label: a pid serving worker.sock
+    without being that tracked process (a foreground ./run.sh leftover, a
+    duplicate-repo dev worker, ...) can survive kickstart untouched, with
+    `returncode == 0` still reading as success -- a freshly kickstarted
+    worker then can't bind the already-held socket and crash-loops "already
+    running" forever (MEMO-FIX-24: seen after relaunching the Mac app, which
+    restarts the dashboard but -- since the dashboard was already the thing
+    serving the port -- never runs run.sh's own boot-time worker-staleness
+    check; this function is the backstop, run from every dashboard's hourly
+    maintenance tick regardless of what started that dashboard). So once
+    kickstart claims success, confirm the known-stale pid actually died
+    before trusting it -- if it's still alive, fall through and kill that
+    exact pid ourselves, the same pid this function always confirmed launchd
+    would not touch, never a different real launchd-owned worker.
     """
     if worker is None:
         try:
@@ -16154,8 +16170,9 @@ def _restart_worker_process(worker=None, *, was=None, now=None):
             health = {}
         worker = health.get("worker") if isinstance(health, dict) and isinstance(health.get("worker"), dict) else {}
     target = f"gui/{os.getuid()}/{_WORKER_LAUNCHD_LABEL}"
+    pid = worker.get("pid")
     kicked = False
-    if _launchd_restart_targets_pid(_WORKER_LAUNCHD_LABEL, worker.get("pid")):
+    if _launchd_restart_targets_pid(_WORKER_LAUNCHD_LABEL, pid):
         try:
             proc = subprocess.run(
                 ["launchctl", "kickstart", "-k", target],
@@ -16166,13 +16183,28 @@ def _restart_worker_process(worker=None, *, was=None, now=None):
             kicked = False
     outcome = {"restarted": True, "was": was, "now": now}
     if kicked:
-        outcome["via"] = "launchd"
-        return outcome
-    # No launchd worker service on this install path (Homebrew's single
-    # service, DMG app spawn): kill + respawn detached, mirroring run.sh,
-    # or the dashboard runs workerless until the next launch.
+        if not pid:
+            outcome["via"] = "launchd"
+            return outcome
+        still_alive = True
+        for _ in range(20):
+            try:
+                os.kill(int(pid), 0)
+            except OSError:
+                still_alive = False
+                break
+            time.sleep(0.1)
+        if not still_alive:
+            outcome["via"] = "launchd"
+            return outcome
+        # kickstart reported success but the pid we already knew about is
+        # still alive -- an orphan launchd never actually reached. Fall
+        # through and kill it ourselves.
+    # No launchd worker service on this install path, an unsafe/failed
+    # kickstart, or one that silently didn't replace the process (above):
+    # kill + respawn detached, mirroring run.sh, or the dashboard runs
+    # workerless until the next launch.
     outcome["via"] = "respawn"
-    pid = worker.get("pid")
     try:
         if pid:
             os.kill(int(pid), signal.SIGTERM)
@@ -38353,6 +38385,95 @@ def build_doctor_instances():
     }
 
 
+def build_memory_doctor():
+    """Memory-subsystem health for `ccc doctor` (MEMO-FIX-24): session index
+    coverage, embeddings coverage + the local Ollama daemon/model behind
+    them, ship-graph freshness, and decision-extraction last-run. Existed to
+    catch a real incident silently: Ollama's model directory sat on an
+    unmounted SMB share for hours and only 1/2779 sessions ever got a
+    semantic embedding, with nothing surfacing it. Read-only, COUNT(*)-only
+    queries -- safe to poll on every doctor invocation.
+    """
+    from ccc_server import session_fts as _session_fts
+    from ccc_server import ship_graph as _ship_graph
+    from ccc_server import decision_extraction as _decision_extraction
+
+    warnings = []
+
+    try:
+        index = _session_fts.index_health()
+    except Exception as e:
+        index = {"error": str(e)}
+        warnings.append(f"session index health check failed: {e}")
+    else:
+        model_dir = index.get("embed_model_dir") or {}
+        if not index.get("ollama_reachable"):
+            warnings.append("Ollama unreachable — semantic search is running FTS-only")
+        elif index.get("embed_model_present") is False:
+            warnings.append(f"Ollama is up but {_session_fts.EMB_MODEL!r} is not pulled")
+        if model_dir.get("reachable") is False:
+            warnings.append(
+                f"embedding model directory unreachable: {model_dir.get('path')} "
+                "(unmounted share? see OPS-1251)"
+            )
+        elif model_dir.get("on_volumes"):
+            warnings.append(
+                f"embedding model directory is on a mounted volume ({model_dir.get('resolved')}) "
+                "— an unmount silently breaks embeddings (OPS-1251)"
+            )
+        sdoc_rows = index.get("sdoc_rows") or 0
+        semb_sids = index.get("semb_sids") or 0
+        if sdoc_rows > 0:
+            coverage = semb_sids / sdoc_rows
+            index["embed_coverage_pct"] = round(coverage * 100, 1)
+            if coverage < 0.9:
+                warnings.append(
+                    f"only {index['embed_coverage_pct']}% of indexed sessions have embeddings "
+                    f"({semb_sids}/{sdoc_rows}, {index.get('semb_pending') or 0} pending)"
+                )
+
+    try:
+        graph = _ship_graph.graph_health()
+    except Exception as e:
+        graph = {"error": str(e)}
+        warnings.append(f"ship graph health check failed: {e}")
+    else:
+        if not graph.get("indexing") and not graph.get("transcripts_rows") and not graph.get("commits_rows"):
+            warnings.append("ship graph is empty — no sync has completed yet")
+
+    try:
+        decisions_last_run = _decision_extraction.last_run_at()
+        decisions_cfg = _decision_extraction.load_config()
+    except Exception as e:
+        decisions_last_run = None
+        decisions_cfg = {}
+        warnings.append(f"decision extraction health check failed: {e}")
+    else:
+        if decisions_cfg.get("enabled", True):
+            if not decisions_last_run:
+                warnings.append("decision extraction has never run")
+            else:
+                due_s = float(decisions_cfg.get("run_every_s") or 20 * 3600)
+                try:
+                    dt = datetime.fromisoformat(str(decisions_last_run).replace("Z", "+00:00"))
+                    age_s = (datetime.now(timezone.utc) - dt).total_seconds()
+                except ValueError:
+                    age_s = None
+                if age_s is not None and age_s > due_s * 1.5:
+                    warnings.append(
+                        f"decision extraction last ran {int(age_s // 3600)}h ago "
+                        f"(expected every {int(due_s // 3600)}h)"
+                    )
+
+    return {
+        "status": "warn" if warnings else "ok",
+        "warnings": warnings,
+        "session_index": index,
+        "ship_graph": graph,
+        "decision_extraction": {"last_run_at": decisions_last_run},
+    }
+
+
 def build_ccc_doctor():
     """Per-engine: CLI present, auth present (where checkable), BYOK profile
     present, a dry-run smoke check, and dashboard instance diagnostics.
@@ -38397,6 +38518,7 @@ def build_ccc_doctor():
         # not count against the limit -- measured), so doctor stays cheap.
         "github_quota": read_graphql_quota(),
         "server_instances": build_doctor_instances(),
+        "memory": build_memory_doctor(),
     }
 
 

@@ -180,6 +180,45 @@ class RestartWorkerProcessTests(unittest.TestCase):
             out = server._restart_worker_process({"pid": 1})
         self.assertEqual(out["via"], "respawn")
 
+    def test_kickstart_success_is_not_trusted_when_the_known_pid_survives(self):
+        """MEMO-FIX-24: a stale-code orphan not managed by launchd (a
+        foreground ./run.sh leftover, started outside any service) can still
+        answer our health check and be reported as `pid`, with nothing else
+        running under the launchd label -- `_launchd_restart_targets_pid`
+        reads that as safe and `launchctl kickstart` returns 0, but the
+        orphan never dies because launchd was never tracking it. Trusting
+        that alone leaves the orphan holding worker.sock forever while
+        launchd's freshly kickstarted worker crash-loops "already running".
+        Once the known pid is confirmed still alive after kickstart, this
+        must fall through and kill + respawn it directly."""
+        server = self.server
+        with mock.patch.object(server, "_launchd_job_pid", return_value=None), \
+             mock.patch.object(server.subprocess, "run") as run, \
+             mock.patch.object(server.subprocess, "Popen") as popen, \
+             mock.patch.object(server.os, "kill") as kill, \
+             mock.patch.object(server.time, "sleep"), \
+             mock.patch("builtins.open", mock.mock_open()):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            kill.return_value = None  # os.kill(pid, 0) never raises -- pid stays alive
+            out = server._restart_worker_process({"pid": 4242})
+        self.assertEqual(out["via"], "respawn")
+        kill.assert_any_call(4242, server.signal.SIGTERM)
+        popen.assert_called_once()
+
+    def test_kickstart_success_is_trusted_once_the_known_pid_is_confirmed_dead(self):
+        """The healthy case: kickstart actually replaced the tracked pid, so
+        no separate kill/respawn should happen."""
+        server = self.server
+        with mock.patch.object(server, "_launchd_job_pid", return_value=None), \
+             mock.patch.object(server.subprocess, "run") as run, \
+             mock.patch.object(server.subprocess, "Popen") as popen, \
+             mock.patch.object(server.os, "kill", side_effect=OSError("no such process")), \
+             mock.patch.object(server.time, "sleep"):
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            out = server._restart_worker_process({"pid": 4242})
+        self.assertEqual(out["via"], "launchd")
+        popen.assert_not_called()
+
     def test_stale_worker_check_still_skips_a_current_worker(self):
         """The update path must not restart a worker that is already current."""
         server = self.server

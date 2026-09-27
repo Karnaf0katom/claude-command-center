@@ -813,4 +813,24 @@ def test_polarity_instead_of(mock_coverage_env):
     assert res_ok["evidence"][0]["commit"] == env["sha3"]
 
 
+def test_graph_health_reports_row_counts_after_a_sync(mock_graph_env):
+    """MEMO-FIX-24: `ccc doctor`'s ship-graph freshness signal -- counts must
+    reflect what a real sync indexed, not stay at zero forever."""
+    # is_shipped() triggers a sync as a side effect via _get_base_search_sessions
+    # / _sync_all; call it once so the graph is populated before reading health.
+    ship_graph.is_shipped("webauthn login")
+    health = ship_graph.graph_health()
+    assert health["transcripts_rows"] >= 1
+    assert health["commits_rows"] >= 1
+    assert health["last_sync_ts"] is not None
+    assert health["indexing"] is False
+
+
+def test_graph_health_before_any_sync_is_still_a_valid_shape(mock_graph_env):
+    """Doctor must never crash on a graph that has never synced (fresh install)."""
+    health = ship_graph.graph_health()
+    assert isinstance(health["transcripts_rows"], int)
+    assert isinstance(health["commits_rows"], int)
+
+
 

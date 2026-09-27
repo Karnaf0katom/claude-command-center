@@ -1256,6 +1256,21 @@ def warm_start() -> None:
     _start_background_sync()
 
 
+def graph_health() -> dict:
+    """Cheap read-only snapshot of ship-graph freshness for `ccc doctor`
+    (MEMO-FIX-24). COUNT(*) queries only -- never triggers a sync."""
+    conn = _get_connection()
+    _init_db(conn)
+    transcripts_rows = conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
+    commits_rows = conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+    return {
+        "transcripts_rows": transcripts_rows,
+        "commits_rows": commits_rows,
+        "last_sync_ts": _last_sync_ts or None,
+        "indexing": is_indexing(),
+    }
+
+
 def rrf(lists: list[list[str]], k: int = 60, weights: list[float] | None = None) -> list[str]:
     """Reciprocal Rank Fusion."""
     sc: dict[str, float] = defaultdict(float)
