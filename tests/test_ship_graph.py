@@ -494,6 +494,11 @@ def mock_coverage_env(tmp_path, monkeypatch):
     # 'quorum' appears ONLY in the files column, never in subject/body
     sha8 = commit(repo_gamma, "quorum_ledger.txt", "8",
                   "fix(store): reconcile the ledger after restart")
+    # Gives 'renam' a nonzero df so the class-A trap word is required; the file
+    # name also gives 'throttl' a nonzero df so the paraphrase test exercises
+    # the one-missing-rare-word hatch rather than the df=0 exclusion.
+    sha9 = commit(repo_gamma, "throttle_guide.txt", "9",
+                  "chore(site): rename the contributor guide")
 
     sha6 = commit(repo_delta, "d1.txt", "1",
                   "feat(vault): zircon banner for the hub")
@@ -533,7 +538,7 @@ def mock_coverage_env(tmp_path, monkeypatch):
         "repo_delta": repo_delta,
         "sha1": sha1, "sha2": sha2, "sha3": sha3,
         "sha4": sha4, "sha5": sha5, "sha6": sha6,
-        "sha7": sha7, "sha8": sha8,
+        "sha7": sha7, "sha8": sha8, "sha9": sha9,
     }
 
 
@@ -541,7 +546,7 @@ def test_distinctive_term_missing_is_not_shipped(mock_coverage_env):
     """The rarest distinctive first-clause term must be covered by the evidence."""
     env = mock_coverage_env
 
-    res = ship_graph.is_shipped("Did we add a rename button to the ledger panel?")
+    res = ship_graph.is_shipped("Did we add a rename button to the ledger history panel?")
     assert res["shipped"] is False
     assert res["evidence"] == []
     assert res["confidence"] <= 0.65
@@ -549,6 +554,19 @@ def test_distinctive_term_missing_is_not_shipped(mock_coverage_env):
     res_ok = ship_graph.is_shipped("Did we add a pin button to the ledger panel?")
     assert res_ok["shipped"] is True
     assert res_ok["evidence"][0]["commit"] == env["sha1"]
+
+    # Same shape with the rare word present — isolates class A
+    res_iso = ship_graph.is_shipped("Did we add a pin button to the ledger history panel?")
+    assert res_iso["shipped"] is True
+
+
+def test_novel_word_not_required(mock_coverage_env):
+    """A df=0 invented word can never be covered and must not block the answer."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we add a pin button to the ledger panel with glimmerfade?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha1"]
 
 
 def test_multi_clause_requires_both_clauses(mock_coverage_env):
@@ -560,7 +578,10 @@ def test_multi_clause_requires_both_clauses(mock_coverage_env):
     assert res["evidence"] == []
     assert res["confidence"] <= 0.65
 
-    res_and = ship_graph.is_shipped("Did we add a usage sparkline and email a weekly digest?")
+    # 'and also' is a strong joiner; the bare 'and' variant does not split here
+    # ('email' is not VERBISH) and df=0 words are no longer required, so a plain
+    # "and email" question legitimately resolves to the sparkline commit.
+    res_and = ship_graph.is_shipped("Did we add a usage sparkline and also email a weekly digest?")
     assert res_and["shipped"] is False
     assert res_and["evidence"] == []
 

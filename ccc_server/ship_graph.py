@@ -1349,11 +1349,15 @@ def is_shipped(topic: str) -> dict:
     # first-clause distinctive stems (plus anything nearly as rare) as required.
     fc_dist = {_stem(w) for w in first_clause_tokens if w not in STOPWORDS} & distinguishing_stems
     df = _corpus_df(conn, fc_dist)
-    if not fc_dist or all(v == 0 for v in df.values()):
+    # df=0 stems can never be covered and cannot discriminate a lookalike
+    pos = {s: v for s, v in df.items() if v > 0}
+    if not fc_dist or not pos:
         required_stems: set[str] = set()
     else:
-        min_df = min(df.values())
-        required_stems = {s for s in fc_dist if df[s] <= 2 * min_df + 1}
+        min_df = min(pos.values())
+        required_stems = {s for s, v in pos.items() if v <= 2 * min_df + 1}
+    # Locative stems are gated by rule (c); Class A must not re-block them
+    required_stems -= locative_stems
 
     # Class B: multi-clause questions — every clause needs coverage.
     clause_reqs: list[set[str]] = []
@@ -1385,9 +1389,10 @@ def is_shipped(topic: str) -> dict:
             # Escape hatch: exactly one rare word missing from a commit that
             # already covers 3+ distinctive terms with an adjacent phrase is a
             # paraphrase, not a lookalike.
+            n_dist_all = len(c.get("matched_dist_all", set()))
             if (len(missing) == 1
-                    and len(c.get("matched_dist_all", set())) >= 3
-                    and c.get("has_phrase_subj")):
+                    and ((n_dist_all >= 3 and c.get("has_phrase_subj"))
+                         or n_dist_all >= 4)):
                 c["coverage_hatch"] = True
             else:
                 return False
