@@ -28,7 +28,11 @@ import uuid
 from pathlib import Path
 
 from ccc_server import core as _core
-from ccc_server import memory_api as _memory_api
+
+try:
+    from ccc_server import memory_api as _memory_api
+except ImportError:  # loaded standalone (bench harnesses stub ccc_server with only core)
+    _memory_api = None
 
 _ASK_HIT_CAP = 12
 _ASK_HISTORY_TURNS = 4
@@ -740,7 +744,7 @@ def handle_assistant_ask(payload, runner=None):
     # Matching memory_recall session ids get merged into `hits` (deduped)
     # so the model can cite them as [[session:ID]] like any other hit.
     shipped_context = None
-    if looks_like_shipped_question(question):
+    if _memory_api is not None and looks_like_shipped_question(question):
         topic = query or question
         try:
             shipped_context = _memory_api.shipped(topic)
