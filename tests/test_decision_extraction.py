@@ -118,6 +118,42 @@ def test_match_decision_rejects_explicitly_undecided():
     assert dex.match_decision("I decided NOT to add this to the nav.") is not None
 
 
+def test_match_decision_rejects_explicitly_not_approved():
+    assert dex.match_decision("The user has NOT approved the spec or the defaults.") is None
+    assert dex.match_decision('The callout reads "Verdict: not approved for launch".') is None
+    assert dex.match_decision("Approved, ship it.") is not None
+
+
+def test_match_decision_rejects_decision_described_as_pending():
+    assert dex.match_decision("Use wt block when a human decision is genuinely required.") is None
+    assert dex.match_decision("If a ticket needs a human decision, do not guess.") is None
+    assert dex.match_decision("Decision: she is NOT a switching prospect.") is not None
+
+
+def test_match_decision_rejects_surfaced_for_decision_template():
+    assert dex.match_decision("Surface for Amir's decision: two blocked design tickets awaiting go/no-go.") is None
+
+
+def test_match_decision_rejects_object_literal_with_decision_key():
+    assert dex.match_decision("decision: {") is None
+    assert dex.match_decision(
+        "returns { ruleCode: '3d', autoResolved: false, decision: { title: 'Help me match this payment' } }"
+    ) is None
+
+
+def test_match_decision_rejects_not_yet_reported_final_answer():
+    assert dex.match_decision("Discovered real damage, not yet reported in a final answer.") is None
+
+
+def test_match_decision_rejects_decision_described_as_open_or_pending():
+    assert dex.match_decision("This decision is still open going into the next step.") is None
+    assert dex.match_decision("Anchor the pending decision here for later.") is None
+    assert dex.match_decision(
+        "If a ticket cannot be resolved without a human decision, wt block it."
+    ) is None
+    assert dex.match_decision("Decision: she is NOT a switching prospect.") is not None
+
+
 # ── genuine user text filtering ──────────────────────────────────────────────
 
 def test_genuine_user_text_skips_tool_result_lines():

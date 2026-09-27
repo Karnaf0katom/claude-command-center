@@ -263,21 +263,52 @@ _WEAK_MAX_LEN = 200
 # a human ruling even when a trigger phrase appears inside one field's text.
 _JSON_FIELD_RE = re.compile(r'"[a-zA-Z_]+"\s*:\s*"')
 _SUBREDDIT_RE = re.compile(r"\br/[A-Za-z]\w+\b")
+# A JS-style object literal (unquoted or single-quoted keys, e.g. a logged
+# `{ ruleCode: '3d', decision: { title: ... } }`) is source code pasted into
+# a message, not prose -- "decision:" as a dict key is not a ruling.
+_CODE_LITERAL_RE = re.compile(r"\w+\s*:\s*[\{'\"]")
+# "decision: {" / "decision: [" on its own line (pretty-printed JSON/JS,
+# split into a one-line "sentence" by the newline splitter below) is always
+# a dict key, never prose -- no length-of-2 threshold needed for this one.
+_DECISION_AS_CODE_KEY_RE = re.compile(r"\bdecision\s*:\s*[\{\[]", re.I)
 
 
 def _looks_like_pasted_blob(s: str) -> bool:
-    return len(_JSON_FIELD_RE.findall(s)) >= 2 or bool(_SUBREDDIT_RE.search(s))
+    return (
+        len(_JSON_FIELD_RE.findall(s)) >= 2
+        or bool(_SUBREDDIT_RE.search(s))
+        or len(_CODE_LITERAL_RE.findall(s)) >= 2
+        or bool(_DECISION_AS_CODE_KEY_RE.search(s))
+    )
 
 
-# A sentence describing a decision that has explicitly NOT been made yet
-# ("no user decision", "nor had I decided", "still awaiting a decision") is
-# the opposite of a ruling -- caught on precision validation, where these
-# outnumbered every other single false-positive cause.
-_UNDECIDED_RE = re.compile(r"\b(?:no|not|n't|nor)\b[^.!?]{0,20}\bdeci", re.I)
+# A sentence describing a decision or approval that was explicitly NOT made
+# ("no user decision", "nor had I decided", "NOT approved the spec", "not
+# approved for launch") is the opposite of a ruling -- caught on precision
+# validation, where these outnumbered every other single false-positive
+# cause across three independent hand-checked samples.
+_UNDECIDED_RE = re.compile(r"\b(?:no|not|n't|nor)\b[^.!?]{0,20}\b(?:deci|approv|final)", re.I)
+
+# A sentence describing a decision as a future contingency ("if a human
+# decision is genuinely required", "needs a human decision") is describing
+# a decision that has NOT happened -- a distinct, equally common
+# false-positive class from the negated-decision one above (both point the
+# same way: describing a decision's absence, not its outcome).
+_PENDING_DECISION_RE = re.compile(
+    r"\b(?:decision|approval)\b[^.!?]{0,25}\b(?:is|are)?\s*(?:needed|required|necessary"
+    r"|(?:still\s+)?open|pending|unresolved|outstanding)\b"
+    r"|\b(?:needs?|requires?|requiring|pending|open|unresolved|outstanding)\b[^.!?]{0,25}\bdecision\b"
+    r"|\bwithout\s+a\b[^.!?]{0,15}\bdecision\b"
+    # This user's own Becky/BYM escalation workflow logs a specific template
+    # phrase, "Surface for <name>'s decision: ...", when a ticket is
+    # escalated for a human ruling that has NOT happened yet.
+    r"|\bsurface(?:d)? for\b[^.!?]{0,40}\bdecision\b",
+    re.I,
+)
 
 
 def _looks_undecided(s: str) -> bool:
-    return bool(_UNDECIDED_RE.search(s))
+    return bool(_UNDECIDED_RE.search(s)) or bool(_PENDING_DECISION_RE.search(s))
 
 
 _SYSTEM_BLOCK_RE = re.compile(
