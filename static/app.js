@@ -2634,6 +2634,11 @@
     return [m[1].trim(), m[2].trim()];
   }
 
+  // (+) on the Original ask (sticky, rail and in-stream bubble): opens the
+  // full ask in a large-font reading modal. Click is delegated (CCC-1206).
+  const ORIGINAL_ASK_EXPAND_BTN = '<button type="button" class="original-ask-expand" data-role="original-ask-expand"'
+    + ' title="Open the original ask in a larger, easier-to-read view" aria-label="Open original ask in a reading view">+</button>';
+
   function originalAskTextForEvent(ev, paneId) {
     const conv = convRowForPane(paneId) || {};
     const canonical = (conv && (conv.original_ask || conv.first_message)) || '';
@@ -40647,6 +40652,20 @@
     return false;
   }
 
+  // Original ask (+) — opens the ask in a large-font reading modal
+  // (CCC-1206). Delegated so it survives sticky/bubble re-renders; the
+  // text comes from the nearest .user-msg's data-raw-text.
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest && ev.target.closest('[data-role="original-ask-expand"]');
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const host = btn.closest('.csh-ask-original, .event.user_text');
+    const msg = host && host.querySelector('.user-msg[data-raw-text]');
+    const text = msg ? msg.getAttribute('data-raw-text') : '';
+    if (text) _uxqOpenNoteModal('Original ask', text, 'is-original-ask');
+  });
+
   // Breadcrumb pop-out button — delegated so it survives every
   // updatePaneHeader innerHTML rewrite. Pops out whatever conversation
   // the active pane is currently showing (same target as the
@@ -46755,13 +46774,13 @@
   // Focused, larger-font readout for a single caveat/follow-up/unresolved
   // note — the inline chip crams long prose into one wrapped line, which is
   // fine for a short note but unreadable for a multi-sentence one (CCC-1023).
-  function _uxqOpenNoteModal(label, text) {
+  function _uxqOpenNoteModal(label, text, extraClass) {
     _uxqCloseNoteModal();
     const overlay = document.createElement('div');
     // Opened from inside the ticket-detail modal (.uxq-td-overlay, z-index
     // 100000) — needs a higher stacking context or it renders invisibly
     // behind it (CCC-1023).
-    overlay.className = 'settings-modal-overlay uxq-note-overlay open';
+    overlay.className = 'settings-modal-overlay uxq-note-overlay open' + (extraClass ? ' ' + extraClass : '');
     const body = window.CCCTicketProse ? window.CCCTicketProse.render(text) : ('<p class="tp-p">' + escapeHtml(String(text)) + '</p>');
     overlay.innerHTML = '<div class="settings-modal-backdrop"></div>'
       + '<div class="uxq-note-modal" role="dialog" aria-modal="true" aria-label="' + escapeAttr(label) + '">'
@@ -59375,9 +59394,9 @@
                         // task template (e.g. a WatchTower worker prompt) —
                         // put the answer right next to it, not buried in a
                         // sidebar hover chip.
-                        let h = '<div class="csh-ask-original"><div class="label">Original ask</div>';
+                        let h = '<div class="csh-ask-original"><div class="label">Original ask' + ORIGINAL_ASK_EXPAND_BTN + '</div>';
                         h += breadcrumbSpawnedByChipHtml(conv);
-                        h += '<div class="user-msg" dir="auto">';
+                        h += '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(mobileOriginalAskText) + '">';
                         h += '<span class="ask-first">' + linkifyPastedImages(escapeHtml(parts[0])) + '</span>';
                         h += '<span class="ask-rest"' + (parts[1] ? '' : ' style="display:none"') + '>' + linkifyPastedImages(escapeHtml(parts[1] || '')) + '</span>';
                         h += imagesHtml;
@@ -59946,6 +59965,7 @@
             const _parts = splitFirstSentence(cleanedText);
             const _imagesHtml = renderImageDescriptors(ev.images);
             textHtml = '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(cleanedText) + '">'
+              + ORIGINAL_ASK_EXPAND_BTN
               + bridgeSenderHtml
               + '<span class="ask-first">' + (_codexPane ? renderCodexUserText(_parts[0]) : linkifyPastedImages(escapeHtml(_parts[0]))) + '</span>'
               + (_parts[1] ? '<span class="ask-rest">' + (_codexPane ? renderCodexUserText(_parts[1]) : linkifyPastedImages(escapeHtml(_parts[1]))) + '</span>' : '')

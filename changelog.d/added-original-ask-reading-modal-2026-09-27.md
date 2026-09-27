@@ -1,0 +1,1 @@
+- The "Original ask" panel and its in-conversation bubble now have a (+) button that opens the full ask in a large-font reading modal.

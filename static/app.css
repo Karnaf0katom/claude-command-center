@@ -29565,3 +29565,33 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   font-weight: 600;
   overflow-wrap: anywhere;
 }
+
+/* CCC-1206: (+) on the Original ask opens it in a large-font reading modal. */
+.original-ask-expand {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  margin-left: 8px;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--surface-2); color: var(--text-muted);
+  font: 600 14px/1 var(--font-ui);
+  cursor: pointer; vertical-align: middle;
+  transition: background 0.12s ease-out, color 0.12s ease-out, border-color 0.12s ease-out;
+}
+.original-ask-expand:hover,
+.original-ask-expand:focus-visible { background: var(--accent); border-color: var(--accent); color: #fff; }
+.conversations-view .event.user_text.is-pinned-in-sticky .user-msg > .original-ask-expand {
+  float: right; margin: 0 0 6px 10px;
+}
+.uxq-note-overlay.is-original-ask .uxq-note-modal {
+  width: min(900px, calc(100vw - 40px));
+  max-height: calc(100vh - 64px);
+}
+.uxq-note-overlay.is-original-ask .uxq-note-modal-body {
+  padding: 22px 28px 28px;
+  font-size: 20px;
+  line-height: 1.75;
+}
+.uxq-note-overlay.is-original-ask .uxq-note-modal-body .tp-body {
+  font-size: inherit; line-height: inherit; max-width: none; max-height: none;
+}
+.uxq-note-overlay.is-original-ask .uxq-note-modal-body .tp-body code { font-size: 0.85em; }
