@@ -1355,22 +1355,14 @@ def is_shipped(topic: str) -> dict:
         min_df = min(df.values())
         required_stems = {s for s in fc_dist if df[s] <= 2 * min_df + 1}
 
-    # Class B: multi-clause questions — every clause needs coverage, including
-    # its own rarest stems.
-    clause_reqs: list[tuple[set[str], set[str]]] = []
+    # Class B: multi-clause questions — every clause needs coverage.
+    clause_reqs: list[set[str]] = []
     clauses = _split_clauses(first_clause_tokens)
     if len(clauses) >= 2:
         for clause in clauses:
             clause_dist = {_stem(w) for w in clause if w not in STOPWORDS} & distinguishing_stems
-            if not clause_dist:
-                continue
-            clause_dfs = {s: df.get(s, 0) for s in clause_dist}
-            if all(v == 0 for v in clause_dfs.values()):
-                clause_rare: set[str] = set()
-            else:
-                c_min = min(clause_dfs.values())
-                clause_rare = {s for s in clause_dist if clause_dfs[s] <= 2 * c_min + 1}
-            clause_reqs.append((clause_dist, clause_rare))
+            if clause_dist:
+                clause_reqs.append(clause_dist)
 
     # Class D: polarity — 'X instead/rather (of|than) Y' records the Y stems so
     # commits that did 'Y instead of X' can be dropped.
@@ -1387,13 +1379,20 @@ def is_shipped(topic: str) -> dict:
     def _coverage_ok(c: dict) -> bool:
         if c.get("ticket_boost", 0) > 0:
             return True
-        ev = c.get("evidence_stems", set())
-        if required_stems and (required_stems - ev):
-            return False
-        for clause_dist, clause_rare in clause_reqs:
-            if not (clause_dist & ev):
+        cov = c.get("coverage_stems", c.get("evidence_stems", set()))
+        missing = required_stems - cov
+        if missing:
+            # Escape hatch: exactly one rare word missing from a commit that
+            # already covers 3+ distinctive terms with an adjacent phrase is a
+            # paraphrase, not a lookalike.
+            if (len(missing) == 1
+                    and len(c.get("matched_dist_all", set())) >= 3
+                    and c.get("has_phrase_subj")):
+                c["coverage_hatch"] = True
+            else:
                 return False
-            if clause_rare and (clause_rare - ev):
+        for clause_dist in clause_reqs:
+            if not (clause_dist & cov):
                 return False
         if y_stems:
             toks = c.get("clean_subj_stem_tokens") or []
@@ -1603,6 +1602,11 @@ def is_shipped(topic: str) -> dict:
             "subj_stems": subj_stems,
             "scope_stems": scope_stems,
             "evidence_stems": subj_stems | scope_stems | body_stems,
+            # File-path stems count for coverage gates only — not scoring/rules
+            "coverage_stems": subj_stems | scope_stems | body_stems | {
+                _stem(w) for w in re.findall(r"[a-z0-9]+", (files or "").lower())
+                if w not in STOPWORDS
+            },
             "n_matched_subj": len(matched_subj),
             "n_matched_all": len(matched_all),
             "has_phrase": has_phrase_subj or has_phrase_body,
@@ -1864,7 +1868,7 @@ def is_shipped(topic: str) -> dict:
             conf = min(conf, 0.85)
         if not top_commit.get("locative_in_subject", True):
             conf = min(conf, 0.85)
-        if top_commit.get("deep_history"):
+        if top_commit.get("deep_history") or top_commit.get("coverage_hatch"):
             conf = min(conf, 0.85)
 
         return {

@@ -489,6 +489,11 @@ def mock_coverage_env(tmp_path, monkeypatch):
                   "feat(export): send parquet snapshots instead of csv bundles")
     sha4 = commit(repo_gamma, "g4.txt", "4",
                   "fix(relay): dedupe the beacon heartbeats")
+    sha7 = commit(repo_gamma, "sync.txt", "7",
+                  "feat(sync): add offline draft autosave for the compose editor")
+    # 'quorum' appears ONLY in the files column, never in subject/body
+    sha8 = commit(repo_gamma, "quorum_ledger.txt", "8",
+                  "fix(store): reconcile the ledger after restart")
 
     sha6 = commit(repo_delta, "d1.txt", "1",
                   "feat(vault): zircon banner for the hub")
@@ -528,6 +533,7 @@ def mock_coverage_env(tmp_path, monkeypatch):
         "repo_delta": repo_delta,
         "sha1": sha1, "sha2": sha2, "sha3": sha3,
         "sha4": sha4, "sha5": sha5, "sha6": sha6,
+        "sha7": sha7, "sha8": sha8,
     }
 
 
@@ -626,6 +632,32 @@ def test_named_repo_falls_back_to_deep_history(mock_coverage_env):
     res_delta = ship_graph.is_shipped("Did delta-hub add zircon key rotation for the vault?")
     assert res_delta["shipped"] is False
     assert res_delta["evidence"] == []
+
+
+def test_paraphrase_rare_word_escape_hatch(mock_coverage_env):
+    """One missing rare word is forgiven when 3+ distinctive terms + phrase match."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped(
+        "Did we add offline draft autosave for the compose editor with throttling?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha7"]
+    assert res["confidence"] <= 0.85
+
+    # The hatch must not fire for a real lookalike (one rare word missing but
+    # too little distinctive coverage overall)
+    res_trap = ship_graph.is_shipped("Did we add a rename button to the ledger panel?")
+    assert res_trap["shipped"] is False
+    assert res_trap["evidence"] == []
+
+
+def test_file_path_tokens_count_as_coverage(mock_coverage_env):
+    """A term that only appears in the commit's files still counts as coverage."""
+    env = mock_coverage_env
+
+    res = ship_graph.is_shipped("Did we reconcile the quorum ledger after restart?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == env["sha8"]
 
 
 def test_polarity_instead_of(mock_coverage_env):
