@@ -54223,6 +54223,7 @@
       { id: 'swe-2',           label: 'SWE-2' },
     ],
     grok: [
+      { id: 'grok-4.7', label: 'Grok 4.7' },
       { id: 'grok-4.6', label: 'Grok 4.6' },
       { id: 'grok-4.5', label: 'Grok 4.5' },
     ],
@@ -54232,6 +54233,7 @@
       { id: 'claude-sonnet-5',  label: 'Claude Sonnet 5' },
       { id: 'gpt-5.4',          label: 'GPT-5.4' },
       { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+      { id: 'grok-4.7',         label: 'Grok 4.7' },
       { id: 'grok-4.5',         label: 'Grok 4.5' },
       { id: 'glm-5.2',          label: 'GLM 5.2' },
       { id: 'deepseek-v4-pro',  label: 'DeepSeek V4 Pro' },
@@ -62053,6 +62055,7 @@
     { id: 'opus-5-5',      engine: 'claude',      model: 'opus-5-5',              label: 'Opus 5.5',       vendor: 'Claude',      family: 'anthropic' },
     { id: 'opus-5',        engine: 'claude',      model: 'opus-5',                label: 'Opus 5',         vendor: 'Claude',      family: 'anthropic' },
     { id: 'gpt-5.6-terra', engine: 'codex',       model: 'gpt-5.6-terra',         label: '5.6 Terra',      vendor: 'Codex',       family: 'openai' },
+    { id: 'grok-4.7',      engine: 'grok',        model: 'grok-4.7',              label: 'Grok 4.7',       vendor: 'Grok',        family: 'xai' },
     { id: 'grok-4.6',      engine: 'grok',        model: 'grok-4.6',              label: 'Grok 4.6',       vendor: 'Grok',        family: 'xai' },
     { id: 'glm-5.2',       engine: 'devin',       model: 'glm-5.2',               label: 'GLM 5.2',        vendor: 'Devin',       family: 'zhipu', via: true },
     { id: 'gemini-3.5',    engine: 'antigravity', model: 'Gemini 3.5 Pro (High)', label: 'Gemini 3.5 Pro', vendor: 'Antigravity', family: 'google' },
@@ -62141,7 +62144,7 @@
       : ORCH_EXECUTORS.find(e => e.id === 'sonnet-5');
   }
   function orchCritics(executor) {
-    const pool = ['gpt-6-astra', 'sonnet-5', 'gemini-3.5', 'grok-4.6']
+    const pool = ['gpt-6-astra', 'sonnet-5', 'gemini-3.5', 'grok-4.7']
       .map(id => ORCH_EXECUTORS.find(e => e.id === id))
       .filter(e => e && e.family !== executor.family);
     return pool.slice(0, 2);
@@ -69044,7 +69047,7 @@
     try { return normalizeSpawnDefaultEngine(localStorage.getItem('ccc.spawnEngine')); }
     catch (_) { return 'claude'; }
   }
-  let _defaultModelsByEngine = { claude: '', codex: 'gpt-5.6-terra', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free', hermes: 'auto', kimi: 'kimi-code/k3', opencode: 'openrouter/anthropic/claude-sonnet-4.5', grok: 'grok-4.6' };
+  let _defaultModelsByEngine = { claude: '', codex: 'gpt-5.6-terra', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free', hermes: 'auto', kimi: 'kimi-code/k3', opencode: 'openrouter/anthropic/claude-sonnet-4.5', grok: 'grok-4.7' };
   let _spawnDefaultsLoaded = false;
   let spawnDefaultsState = {
     engine: readLegacySpawnEnginePref(),

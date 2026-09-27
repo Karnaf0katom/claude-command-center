@@ -7158,7 +7158,7 @@ def _spawn_fallback_model_for_engine(engine):
     if engine == "kimi":
         return os.environ.get("CCC_KIMI_MODEL", "kimi-code/k3")
     if engine == "grok":
-        return os.environ.get("CCC_GROK_MODEL", "grok-4.6")
+        return os.environ.get("CCC_GROK_MODEL", "grok-4.7")
     if engine == "devin":
         return os.environ.get("CCC_DEVIN_MODEL", "adaptive")
     if engine == "droid":
@@ -7241,6 +7241,7 @@ _ENGINE_CURATED_MODELS = {
         {"id": "kimi-code/kimi-for-coding-highspeed", "label": "K2.7 Coding Highspeed"},
     ),
     "grok": (
+        {"id": "grok-4.7", "label": "Grok 4.7"},
         {"id": "grok-4.6", "label": "Grok 4.6"},
         {"id": "grok-4.5", "label": "Grok 4.5"},
     ),
@@ -7250,6 +7251,7 @@ _ENGINE_CURATED_MODELS = {
         {"id": "claude-sonnet-5", "label": "Claude Sonnet 5"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash"},
+        {"id": "grok-4.7", "label": "Grok 4.7"},
         {"id": "grok-4.5", "label": "Grok 4.5"},
         {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro"},

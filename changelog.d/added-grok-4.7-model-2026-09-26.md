@@ -1,0 +1,1 @@
+Added Grok 4.7 as the default and top-listed model for the Grok engine (spawn defaults, model picker, orchestration executor/critic pools, Droid's Grok sub-model, and the OpenRouter BYOK catalog). Grok 4.6 and 4.5 remain selectable.

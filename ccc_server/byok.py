@@ -74,6 +74,7 @@ BYOK_MODEL_CATALOG = (
     {"id": "openrouter/anthropic/claude-opus-5", "label": "Claude Opus 5 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 15.0, "cost_out_per_1m": 75.0},
     {"id": "openrouter/anthropic/claude-haiku-4.5", "label": "Claude Haiku 4.5 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 1.0, "cost_out_per_1m": 5.0},
     {"id": "openrouter/openai/gpt-5.4", "label": "GPT-5.4 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 2.5, "cost_out_per_1m": 10.0},
+    {"id": "openrouter/x-ai/grok-4.7", "label": "Grok 4.7 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 3.0, "cost_out_per_1m": 15.0},
     {"id": "openrouter/x-ai/grok-4.6", "label": "Grok 4.6 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 3.0, "cost_out_per_1m": 15.0},
     {"id": "openrouter/moonshotai/kimi-k3", "label": "Kimi K3 (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 0.6, "cost_out_per_1m": 2.5},
     {"id": "openrouter/google/gemini-3-flash-preview", "label": "Gemini 3 Flash (OpenRouter)", "provider": "openrouter", "cost_in_per_1m": 0.3, "cost_out_per_1m": 1.2},

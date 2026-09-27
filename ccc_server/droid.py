@@ -53,6 +53,7 @@ _DROID_FACTORY_MODELS = (
     {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "multiplier": 0.6, "droid_core": False, "reasoning_efforts": ("minimal", "low", "medium", "high"), "default_reasoning_effort": "high"},
     {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "multiplier": 0.6, "droid_core": False, "reasoning_efforts": ("minimal", "low", "medium", "high"), "default_reasoning_effort": "high"},
     {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "multiplier": 0.2, "droid_core": False, "reasoning_efforts": ("minimal", "low", "medium", "high"), "default_reasoning_effort": "high"},
+    {"id": "grok-4.7", "label": "Grok 4.7", "multiplier": 0.8, "droid_core": False, "reasoning_efforts": ("low", "medium", "high", "xhigh"), "default_reasoning_effort": "high"},
     {"id": "grok-4.6", "label": "Grok 4.6", "multiplier": 0.8, "droid_core": False, "reasoning_efforts": ("low", "medium", "high", "xhigh"), "default_reasoning_effort": "high"},
     {"id": "grok-4.5", "label": "Grok 4.5", "multiplier": 0.8, "droid_core": False, "reasoning_efforts": ("low", "medium", "high"), "default_reasoning_effort": "high"},
     {"id": "inkling", "label": "Inkling", "multiplier": 0.4, "droid_core": True, "reasoning_efforts": ("off", "minimal", "low", "medium", "high", "xhigh", "max"), "default_reasoning_effort": "high"},
