@@ -11,6 +11,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Hunch was removed on purpose (twice). Sessions kept re-adding it after seeing
+# leftovers, so block any push that brings it back.
+if git ls-files --error-unmatch .hunch >/dev/null 2>&1 || \
+   grep -qs 'HUNCH:START' CLAUDE.md AGENTS.md || \
+   grep -qs '"hunch"' .mcp.json; then
+  echo "pre-push: Hunch is permanently removed from this repo; do not re-add .hunch/, its CLAUDE.md/AGENTS.md block, or a .mcp.json entry."
+  exit 1
+fi
+
 if [ ! -f tests/test_perf_budget.py ]; then
   exit 0  # nothing to gate on this checkout
 fi
