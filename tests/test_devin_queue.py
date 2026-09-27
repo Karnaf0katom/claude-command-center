@@ -344,6 +344,79 @@ class DevinQueueTests(unittest.TestCase):
         self.assertFalse(server._devin_cli_pid_alive(proc.pid))
         proc.returncode = 0  # already reaped; keep Popen from warning
 
+    def test_force_restart_devin_stale_lock_removed_and_pump_called(self):
+        """A dead pid's leftover lock is cleared and the queue pump fires."""
+        server = importlib.import_module("server")
+        import ccc_server.devin as devin_mod
+        from pathlib import Path
+
+        lock_dir = tempfile.mkdtemp(prefix="devin-locks-")
+        self.addCleanup(lambda: shutil.rmtree(lock_dir, ignore_errors=True))
+        lock_path = os.path.join(lock_dir, "restart-stale.lock")
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fh.write("999999999\n")
+
+        with mock.patch.object(devin_mod, "DEVIN_CLI_LOCKS_DIR", Path(lock_dir)), \
+                mock.patch.object(
+                    server, "_pump_devin_resume_queue",
+                    return_value={"ok": True, "empty": True},
+                ) as pump_mock:
+            result = server._force_restart_devin_session("devincli-restart-stale")
+
+        self.assertEqual(result, {"ok": True, "restarted": True, "redelivered": False})
+        self.assertFalse(os.path.exists(lock_path), "stale lock should be removed")
+        self.assertEqual(pump_mock.call_count, 1)
+
+    def test_force_restart_devin_refuses_live_non_ccc_owner(self):
+        """A live pid CCC does not own must be refused, untouched, unkilled."""
+        server = importlib.import_module("server")
+        import ccc_server.devin as devin_mod
+        from pathlib import Path
+
+        lock_dir = tempfile.mkdtemp(prefix="devin-locks-")
+        self.addCleanup(lambda: shutil.rmtree(lock_dir, ignore_errors=True))
+        lock_path = os.path.join(lock_dir, "restart-live.lock")
+        other_pid = os.getpid()  # guaranteed alive for the duration of the test
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fh.write("%s\n" % other_pid)
+
+        with mock.patch.object(devin_mod, "DEVIN_CLI_LOCKS_DIR", Path(lock_dir)), \
+                mock.patch.object(
+                    server, "_devin_cli_lock_pid_owner",
+                    return_value={
+                        "owned": False, "via": None, "spawn": None,
+                        "cmd": "devin acp --other-client",
+                    },
+                ), \
+                mock.patch.object(
+                    server, "_pump_devin_resume_queue",
+                    return_value={"ok": True, "empty": True},
+                ) as pump_mock:
+            result = server._force_restart_devin_session("devincli-restart-live")
+
+        self.assertFalse(result.get("ok"))
+        self.assertIn("another client", result.get("error", ""))
+        self.assertIn(str(other_pid), result.get("error", ""))
+        with open(lock_path, "r", encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), str(other_pid))
+        pump_mock.assert_not_called()
+
+    def test_force_restart_claude_sid_uses_old_path(self):
+        """A non-devincli sid must never be routed through the Devin path."""
+        server = importlib.import_module("server")
+
+        with mock.patch.object(
+            server, "_force_restart_devin_session",
+        ) as devin_restart_mock:
+            result = server._force_restart_session("claude-some-plain-sid")
+
+        devin_restart_mock.assert_not_called()
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(
+            result.get("error"),
+            "no live CCC-owned Claude process for this session",
+        )
+
     def test_devin_list_attaches_spawn_pid(self):
         """Durable Devin CLI rows must carry spawn_pid so the UI placeholder swaps."""
         server = importlib.import_module("server")

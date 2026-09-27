@@ -1,0 +1,1 @@
+Restart session now works for Devin CLI sessions, unsticking a message parked behind a dead or zombie lock file without touching a session another client (Devin Desktop, a `devin` TUI, another CCC instance) still has open.

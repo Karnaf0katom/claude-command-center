@@ -6007,7 +6007,9 @@
           .filter(p => p && p.sid === _fetchedFor && !p.delivered && p.entry)
           .forEach(p => markPendingSendQueued(p,
             "Queued - this Devin session is open in another client "
-            + "(e.g. Devin Desktop); it'll deliver when that client lets go."));
+            + "(e.g. Devin Desktop); it'll deliver when that client lets go. "
+            + "If nothing else has it open, use Restart session from the "
+            + "⋯ menu."));
       }
       // A pending devin-browser sign-in (or other ACP attach failure) gets
       // the same annotation — the backend reason string already says what

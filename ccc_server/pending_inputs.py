@@ -5020,6 +5020,8 @@ def _force_restart_session(sid):
     child and, if a message is queued for it, re-deliver that via resume.
     A human asked, so the auto-recovery budget is reset (`inject_stuck`
     cleared). Never touches sessions CCC does not own."""
+    if _core._is_devin_cli_session(sid):
+        return _force_restart_devin_session(sid)
     from ccc_server import inject_recovery as ir
     spawn = _live_claude_spawn_for_recovery(sid)
     if spawn is None:
@@ -5048,6 +5050,140 @@ def _force_restart_session(sid):
     _inject_receipts.close_receipt(sid, text=text)
     _core._complete_pending_input_handoff(text)
     return {"ok": True, "restarted": True, "redelivered": True}
+
+
+def _devin_cli_lock_pid_owner(sid, raw_id, pid):
+    """Decide whether CCC owns the process recorded in a Devin CLI session
+    lock file, so a manual restart never touches another client's session.
+
+    Checked, in order, all without a subprocess: does ``pid`` match CCC's own
+    `devin acp` connection transport (multiplexes many sessions — the lock
+    holds one of its own child pids, not the transport pid itself, per
+    ``_pump_devin_resume_queue``'s ownership comment), or a live CCC spawn
+    entry for this session (a one-shot ``devin --resume -p``). If neither
+    matches directly, one ``ps`` call resolves ``pid``'s parent — a human
+    clicked a button, this is not a list/poll path. Owned when that parent is
+    the ACP transport, the spawn entry, or this process directly.
+    """
+    with _core._ACP_LOCK:
+        conn = _core._ACP_CONNS.get("devin") or {}
+        acp_proc = conn.get("proc")
+    acp_pid = getattr(acp_proc, "pid", None) if acp_proc is not None else None
+    spawn = _core._find_live_spawn_entry_for_session(sid)
+    spawn_pid = spawn.get("pid") if isinstance(spawn, dict) else None
+    if pid == acp_pid:
+        return {"owned": True, "via": "acp", "spawn": spawn, "cmd": ""}
+    if pid == spawn_pid:
+        return {"owned": True, "via": "spawn", "spawn": spawn, "cmd": ""}
+    ppid, cmd = None, ""
+    try:
+        proc = subprocess.run(
+            ["/bin/ps", "-o", "ppid=,command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        )
+        lines = (proc.stdout or "").strip().splitlines()
+        if proc.returncode == 0 and lines:
+            parts = lines[0].strip().split(None, 1)
+            ppid = int(parts[0])
+            cmd = parts[1].strip() if len(parts) > 1 else ""
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    if ppid is not None and ppid == acp_pid:
+        return {"owned": True, "via": "acp", "spawn": spawn, "cmd": cmd}
+    if ppid is not None and ppid == spawn_pid:
+        return {"owned": True, "via": "spawn", "spawn": spawn, "cmd": cmd}
+    if ppid is not None and ppid == os.getpid():
+        return {"owned": True, "via": "direct", "spawn": spawn, "cmd": cmd}
+    return {"owned": False, "via": None, "spawn": spawn, "cmd": cmd}
+
+
+def _force_restart_devin_session(sid):
+    """Manual "Restart session" for a devin-cli sid.
+
+    Retires CCC's own stuck Devin owner — either the shared `devin acp`
+    connection or a one-shot `devin --resume -p` spawn — clears a stale
+    session lock left by a process that has since died, and re-arms the
+    durable queue pump so anything parked with ``waiting: "external-owner"``
+    gets a chance to drain. Refuses outright, and never kills anything, when
+    a live *other* client (Devin Desktop, a `devin` TUI, another CCC
+    instance) still holds the session lock, or when CCC's own owner is
+    mid-turn (interrupting a turn is what Stop is for)."""
+    raw_id = _core._devin_cli_raw_id(sid)
+    pid = _core._devin_cli_lock_pid(raw_id)
+    action = "none"
+    if pid and _core._devin_cli_pid_alive(pid):
+        owner = _devin_cli_lock_pid_owner(sid, raw_id, pid)
+        if not owner["owned"]:
+            short_cmd = (owner.get("cmd") or "?")[:80]
+            return {
+                "ok": False,
+                "error": (
+                    f"This Devin session is open in another client "
+                    f"(pid {pid}: {short_cmd}). Close it there, then retry."
+                ),
+            }
+        snap = _core._acp_session_snapshot("devin", raw_id) or {}
+        if snap.get("status") == "active":
+            return {"ok": False, "error": "Devin is mid-turn; use Stop first"}
+        if owner["via"] == "spawn" and owner.get("spawn") is not None:
+            _core._retire_unresponsive_spawn_entry(
+                owner["spawn"], terminate=True, reason="force_restart",
+                caller="api-force-restart-devin",
+            )
+            action = "retired_spawn"
+        else:
+            with _core._ACP_LOCK:
+                conn = _core._ACP_CONNS.get("devin")
+                transport = (conn or {}).get("transport") if conn else None
+            if transport is not None:
+                transport.close()
+                action = "retired_acp_conn"
+            try:
+                if _core._devin_cli_pid_alive(pid):
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError, ValueError):
+                pass
+            if action == "none":
+                action = "killed_pid"
+        # Give the kill a brief, bounded window to land before deciding
+        # whether the lock is stale enough to remove below — a fresh
+        # SIGTERM often hasn't been reaped yet on the very next line.
+        deadline = time.time() + 0.5
+        while time.time() < deadline and _core._devin_cli_pid_alive(pid):
+            time.sleep(0.05)
+
+    # Clean up a now-stale lock file. Re-read right before unlinking so a
+    # new owner that grabbed the lock in the meantime is never clobbered.
+    for locks_dir in _core._devin_cli_locks_dirs():
+        lock_path = locks_dir / f"{raw_id}.lock"
+        try:
+            text = lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        try:
+            lock_pid = int(text.split()[0])
+        except ValueError:
+            continue
+        if lock_pid == pid and not _core._devin_cli_pid_alive(lock_pid):
+            lock_path.unlink(missing_ok=True)
+
+    _core._pending_resume_retry_after.pop(sid, None)
+    with _core._pending_resume_lock:
+        had_queued = bool(_core._pending_resume_queue.get(sid)) or bool(
+            _core._pending_devin_steers.get(sid)
+        )
+    result = _core._pump_devin_resume_queue(sid)
+    _core._log_activity(
+        "inject", "FORCE_RESTART",
+        f"session={sid} engine=devin lock_pid={pid} action={action} "
+        "— manual restart requested from the UI",
+    )
+    redelivered = bool(
+        had_queued and isinstance(result, dict) and result.get("started")
+    )
+    return {"ok": True, "restarted": True, "redelivered": redelivered}
 
 
 def _terminal_queue_hold_or_expire(sid, reason):
