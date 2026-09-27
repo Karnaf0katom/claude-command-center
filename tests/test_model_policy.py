@@ -267,5 +267,49 @@ class TestModelPolicyHealth(_PolicyFixture):
         self.assertIn("missing", logged)
 
 
+class AstraGuardrailPromptTests(_PolicyFixture):
+    """A blocked model spawned with confirm_blocked_model=true must not rely
+    on the model choosing to load the astra-guardrail skill on its own -- the
+    guardrail's own SKILL.md gets pushed into the prompt instead."""
+
+    def setUp(self):
+        super().setUp()
+        self.block("gpt-6-astra")
+        self._skill_tmp = tempfile.TemporaryDirectory()
+        self.skill_file = pathlib.Path(self._skill_tmp.name) / "SKILL.md"
+        self.skill_file.write_text("# Astra guardrail\n\nDo the thing.\n")
+        self._skill_patch = patch.object(server, "ASTRA_GUARDRAIL_SKILL_FILE", self.skill_file)
+        self._skill_patch.start()
+        server._ASTRA_GUARDRAIL_CACHE["sig"] = None
+
+    def tearDown(self):
+        self._skill_patch.stop()
+        server._ASTRA_GUARDRAIL_CACHE["sig"] = None
+        self._skill_tmp.cleanup()
+        super().tearDown()
+
+    def test_injects_for_confirmed_blocked_codex_model(self):
+        prefix = server._astra_guardrail_prompt_prefix("codex", "gpt-6-astra", True)
+        self.assertIn("Do the thing.", prefix)
+        self.assertIn("astra-guardrail", prefix)
+
+    def test_no_injection_without_confirm(self):
+        self.assertEqual(server._astra_guardrail_prompt_prefix("codex", "gpt-6-astra", False), "")
+
+    def test_no_injection_for_allowed_model(self):
+        self.assertEqual(server._astra_guardrail_prompt_prefix("codex", "gpt-5.6-terra", True), "")
+
+    def test_no_injection_for_other_engines(self):
+        self.assertEqual(server._astra_guardrail_prompt_prefix("claude", "gpt-6-astra", True), "")
+
+    def test_rereads_after_skill_file_changes(self):
+        first = server._astra_guardrail_prompt_prefix("codex", "gpt-6-astra", True)
+        self.assertIn("Do the thing.", first)
+        self.skill_file.write_text("# Astra guardrail\n\nDo the new thing.\n")
+        second = server._astra_guardrail_prompt_prefix("codex", "gpt-6-astra", True)
+        self.assertIn("Do the new thing.", second)
+        self.assertNotIn("Do the thing.", second)
+
+
 if __name__ == "__main__":
     unittest.main()

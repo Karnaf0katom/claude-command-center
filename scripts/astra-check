@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# One-liner cost/behavior check for a Codex session, live or finished.
+#
+# Wraps `throughput analyze` (github.com/amirfish1/agent-throughput), which
+# re-reads the session's own rollout file before analyzing -- so pointing
+# this at a session id that is still running gets the same score/fixes
+# breakdown as a finished one, just smaller. See:
+#   ~/.claude/skills/astra-guardrail/SKILL.md
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: $(basename "$0") <session-id-or-prefix> [throughput analyze flags...]" >&2
+    echo "  e.g.: $(basename "$0") 01a0c969" >&2
+    exit 2
+fi
+
+sid="$1"
+shift
+
+if ! command -v throughput >/dev/null 2>&1; then
+    exec uvx --from git+https://github.com/amirfish1/agent-throughput throughput analyze "$sid" --engine codex "$@"
+fi
+
+exec throughput analyze "$sid" --engine codex "$@"

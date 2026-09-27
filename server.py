@@ -7486,6 +7486,48 @@ def _model_policy_error(model):
     )
 
 
+ASTRA_GUARDRAIL_SKILL_FILE = Path.home() / ".claude" / "skills" / "astra-guardrail" / "SKILL.md"
+_ASTRA_GUARDRAIL_CACHE = {"sig": None, "text": ""}
+
+
+def _astra_guardrail_prompt_prefix(engine, model, confirm_blocked_model):
+    """Guardrail text to prepend to a spawn prompt, or "" if not applicable.
+
+    A skill only fires if the model decides to load it -- the 2026-09-05 and
+    2026-09-27 astra incidents both involved a session that never did. When a
+    spawn deliberately opts a blocked model in (confirm_blocked_model=true,
+    the only way an astra spawn reaches this far), push the guardrail's own
+    SKILL.md into the prompt instead of hoping it gets picked up on its own.
+    Codex-only: astra is a Codex model, and this is read fresh (mtime/size
+    cached) so editing the skill doesn't need a server restart.
+    """
+    if engine != "codex" or not confirm_blocked_model or not _model_policy_blocks(model):
+        return ""
+    path = ASTRA_GUARDRAIL_SKILL_FILE
+    try:
+        st = path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ""
+    cache = _ASTRA_GUARDRAIL_CACHE
+    if cache["sig"] != sig:
+        try:
+            cache["text"] = path.read_text()
+        except OSError:
+            return ""
+        cache["sig"] = sig
+    if not cache["text"]:
+        return ""
+    return (
+        "<astra-guardrail>\n"
+        "You are running as a deny-listed model (gpt-6-astra) that was "
+        "explicitly confirmed for this one task. Follow this guardrail for "
+        "the whole session -- it is not optional reading:\n\n"
+        f"{cache['text']}\n"
+        "</astra-guardrail>\n\n"
+    )
+
+
 def _model_policy_health():
     """Model-policy deny-list health for `ccc doctor` and /api/healthcheck
     (MEMO-FIX-25). The deny-list gate (_model_policy_blocks) only catches an
@@ -32621,6 +32663,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     prompt = _wrap_prompt_with_return_address(
                         prompt, report_to, engine=engine, route_id=report_route,
                     )
+                    prompt = _astra_guardrail_prompt_prefix(
+                        engine, model, confirm_blocked_model
+                    ) + prompt
                     spawn_cwd = str(cwd_resolved) if cwd_resolved else None
                     _set_control_plane_action_id(payload.get("idempotency_key"))
                     if engine == "codex":
@@ -32958,6 +33003,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     _set_control_plane_action_id(payload.get("idempotency_key"))
                     spawned_via = self._extract_spawned_via()
+                    prompt = _astra_guardrail_prompt_prefix(
+                        "codex", model, confirm_blocked_model
+                    ) + prompt
                     result = spawn_session_codex(
                         prompt,
                         name=name,
