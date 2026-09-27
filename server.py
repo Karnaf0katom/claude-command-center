@@ -32450,6 +32450,25 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             report_route = _report_routes.create(report_to)
                         except Exception as e:
                             _log_activity("spawn", "REPORT_ROUTE_ERR", f"error={e}")
+                    # MEMO-FIX-6: pre-spawn "already shipped?" check. WARN-only
+                    # -- capped at 1.5s inside check_shipped_for_spawn, never
+                    # delays or blocks the spawn. goal is the session name if
+                    # given, else the prompt's first line.
+                    from ccc_server import shipped_check as _shipped_check
+                    goal_text = name or (prompt.splitlines()[0][:200] if prompt else "")
+                    try:
+                        shipped_info = _shipped_check.check_shipped_for_spawn(goal_text)
+                    except Exception:
+                        shipped_info = None
+                    if shipped_info:
+                        _log_activity(
+                            "spawn", "SHIPPED_WARNING",
+                            f"goal=\"{_activity_log_preview(goal_text)}\" "
+                            f"repo={shipped_info.get('repo')} "
+                            f"commit={(shipped_info.get('commit') or '')[:8]} "
+                            f"confidence={shipped_info.get('confidence')}",
+                        )
+                        prompt = _shipped_check.shipped_warning_line(shipped_info) + prompt
                     prompt = _wrap_prompt_with_return_address(
                         prompt, report_to, engine=engine, route_id=report_route,
                     )
@@ -32651,6 +32670,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             reasoning_effort=reasoning_effort,
                         )
                     result.setdefault("engine", engine)
+                    if shipped_info and isinstance(result, dict):
+                        result["already_shipped"] = shipped_info
                     if report_to and isinstance(result, dict):
                         result["report_to"] = report_to
                         if report_route:
