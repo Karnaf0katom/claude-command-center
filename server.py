@@ -108,6 +108,9 @@ import ccc_peer_uds
 # between wire-format helpers (here) and registry/routing (server.py below).
 import ccc_peer_inbound
 from ccc_server import test_isolation_active, register as _ccc_core_register
+# Rebindable report_to routes (CCC-1202). Imported as a namespace, not
+# adopted, so its short function names don't land on server globals.
+from ccc_server import report_routes as _report_routes
 from ccc_server.events import DashboardEventHub
 
 # Pure helpers and path constants moved to leaf modules (slice 3)
@@ -26750,6 +26753,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "missing session_id"}, 400)
             else:
                 self.send_json(build_codex_wake_status(sid))
+        elif path == "/api/report-routes":
+            # CCC-1202: list rebindable report_to routes, optionally filtered
+            # by current dispatcher (report_to) or by the spawned child.
+            qs = urllib.parse.parse_qs(parsed.query)
+            routes = _report_routes.list_routes(
+                report_to=qs.get("report_to", [""])[0] or None,
+                child_session_id=qs.get("child_session_id", [""])[0] or None,
+            )
+            self.send_json({"ok": True, "routes": routes})
         elif path == "/api/session-status":
             qs = urllib.parse.parse_qs(parsed.query)
             sid = qs.get("session_id", [""])[0]
@@ -32359,7 +32371,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     # Return address: spawned session reports back to its
                     # dispatcher on completion. No-op when report_to is unset.
-                    prompt = _wrap_prompt_with_return_address(prompt, report_to, engine=engine)
+                    # CCC-1202: the footer addresses a route id that CCC
+                    # resolves at delivery time, so the dispatcher can be
+                    # rebound mid-run. If the store is unwritable, fall back
+                    # to the static sid footer rather than failing the spawn.
+                    report_route = None
+                    if report_to:
+                        try:
+                            report_route = _report_routes.create(report_to)
+                        except Exception as e:
+                            _log_activity("spawn", "REPORT_ROUTE_ERR", f"error={e}")
+                    prompt = _wrap_prompt_with_return_address(
+                        prompt, report_to, engine=engine, route_id=report_route,
+                    )
                     spawn_cwd = str(cwd_resolved) if cwd_resolved else None
                     _set_control_plane_action_id(payload.get("idempotency_key"))
                     if engine == "codex":
@@ -32560,6 +32584,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     result.setdefault("engine", engine)
                     if report_to and isinstance(result, dict):
                         result["report_to"] = report_to
+                        if report_route:
+                            result["report_route"] = report_route
+                            try:
+                                _report_routes.set_child(
+                                    report_route, result.get("session_id") or "",
+                                )
+                            except Exception:
+                                pass
                     if parent_session_id and isinstance(result, dict):
                         result["parent_session_id"] = parent_session_id
                     # Persist spawned_via onto the registry entry too (not just
@@ -34999,6 +35031,40 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         "session_id": sid,
                         "cancelled_queued": result.get("cancelled_queued", 0),
                     })
+        elif path == "/api/report-routes/rebind":
+            # CCC-1202: repoint spawned children's return address. Selectors
+            # (route_id / child_session_id / from_report_to) AND together;
+            # from_report_to alone moves every child of one dispatcher.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            new_to, new_to_error = _normalize_return_address(
+                {"report_to": payload.get("report_to")}
+            )
+            selectors = {
+                k: str(payload.get(k) or "").strip() or None
+                for k in ("route_id", "child_session_id", "from_report_to")
+            }
+            if new_to_error or not new_to:
+                self.send_json({"ok": False, "error": new_to_error or "missing report_to"}, 400)
+            elif not any(selectors.values()):
+                self.send_json({
+                    "ok": False,
+                    "error": "need route_id, child_session_id or from_report_to",
+                }, 400)
+            else:
+                moved = _report_routes.rebind(new_to, **selectors)
+                _log_activity(
+                    "spawn", "REPORT_REBIND",
+                    f"to={new_to} n={len(moved)} "
+                    + " ".join(f"{k}={v}" for k, v in selectors.items() if v),
+                )
+                self.send_json({"ok": True, "report_to": new_to, "rebound": moved})
         elif path == "/api/inject-input":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
@@ -35007,6 +35073,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             sid = payload.get("session_id", "")
+            # CCC-1202: a spawned child's report addresses its route id;
+            # deliver to whoever owns that return address right now.
+            if _report_routes.is_route_id(sid):
+                route_sid = _report_routes.resolve(sid)
+                if route_sid != sid:
+                    _log_activity("inject", "REPORT_ROUTE", f"route={sid} -> {route_sid}")
+                sid = route_sid
             # Accept the Claude bridge id (bare ULID, session_<ULID>, or a
             # claude.ai/code/session_<ULID> URL) as an alias for the local
             # session UUID — that's the id users see in the TUI and commit

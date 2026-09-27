@@ -5262,7 +5262,8 @@ def _wrap_injected_text_with_announced_from(text, announced_from):
     return f"Announced from: {label}\n\n{text}"
 
 
-def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claude"):
+def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claude",
+                                      route_id=None):
     """Append a 'report back when done' footer addressed to `report_to`.
 
     Engine-agnostic by default: plain prompt text instructing the spawned
@@ -5280,12 +5281,25 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
     but CCC's own listener didn't start) keeps the curl footer byte-for-byte,
     so this is a strict opt-in with automatic fallback, not a behavior
     change for anyone not on the flag.
+
+    `route_id` (CCC-1202): when set, the report is addressed to that route id
+    instead of the dispatcher's sid, and CCC resolves it to the route's
+    *current* report_to at delivery time, so the dispatcher can be rebound
+    mid-run. The "(id `<sid>`)" line keeps naming the dispatcher either way;
+    spawn-hierarchy recovery parses it.
     """
     rid = (report_to or "").strip()
     if not rid:
         return prompt
+    addr = (route_id or "").strip() or rid
+    route_note = (
+        f"Address the report to `{addr}` exactly as written below, not to the "
+        "id above: CCC forwards it to whichever session currently owns your "
+        "return address, which may have changed since you started.\n\n"
+        if addr != rid else ""
+    )
     envelope = json.dumps({
-        "session_id": rid, "mode": "steer",
+        "session_id": addr, "mode": "steer",
         "announced_from": "<your session name or id>", "text": "<your report>",
     })
     use_sendmessage = (
@@ -5306,6 +5320,7 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
             "addressed by their registered peer name only, and anything else fails "
             "with \"No agent named ... is reachable\". The dispatcher's session id "
             "belongs INSIDE the message JSON below, not in the address.\n\n"
+            f"{route_note}"
             "The message's ENTIRE content must be exactly this JSON (fill in your "
             "own values, keep it valid JSON, escape quotes/newlines in \"text\"):\n\n"
             f"```\n{envelope}\n```\n\n"
@@ -5327,10 +5342,11 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
         "task is fully complete — whether it SUCCEEDED or FAILED — send exactly "
         "ONE completion report back to that session via CCC's inject-input API. "
         "Run the curl with the network sandbox disabled (localhost IPC):\n\n"
+        f"{route_note}"
         "```bash\n"
         f"curl -s --max-time 30 -X POST \"http://127.0.0.1:{p}/api/inject-input\" \\\n"
         "  -H \"Content-Type: application/json\" \\\n"
-        f"  -d '{{\"session_id\": \"{rid}\", \"mode\": \"steer\", \"announced_from\": \"<your session name or id>\", \"text\": \"<your report>\"}}'\n"
+        f"  -d '{{\"session_id\": \"{addr}\", \"mode\": \"steer\", \"announced_from\": \"<your session name or id>\", \"text\": \"<your report>\"}}'\n"
         "```\n\n"
         "Use `\"mode\": \"steer\"` exactly as shown — without it the report "
         "queues behind whatever the dispatching session is doing and can sit "

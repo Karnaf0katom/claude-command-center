@@ -47,7 +47,8 @@ from datetime import datetime, timezone
 
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
-SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota")
+SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
+               "rebind-report-to")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -827,6 +828,57 @@ def cmd_spawn(args):
     return 0
 
 
+def cmd_rebind_report_to(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    new_sid, err = _resolve_target(base, args.new_report_to)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    payload = {"report_to": new_sid}
+    if args.from_report_to:
+        old_sid, err = _resolve_target(base, args.from_report_to)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        payload["from_report_to"] = old_sid
+    if args.child:
+        if args.child.startswith("rr_"):
+            payload["route_id"] = args.child
+        else:
+            child_sid, err = _resolve_target(base, args.child)
+            if err:
+                print(err, file=sys.stderr)
+                return 1
+            payload["child_session_id"] = child_sid
+    if len(payload) == 1:
+        print("ccc rebind-report-to: pass --child and/or --from", file=sys.stderr)
+        return 2
+    try:
+        status, result = _post_json(base, "/api/report-routes/rebind", payload)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        print(f"ccc: rebind failed: {result.get('error') or f'HTTP {status}'}", file=sys.stderr)
+        return 1
+    moved = result.get("rebound") or []
+    print(f"rebound {len(moved)} child report route(s) to {new_sid}")
+    if not moved:
+        print("  (children spawned before rebindable routes report to their "
+              "original sid; message them with `ccc send` instead)")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # `ccc` is also the Homebrew launcher's name (foreground server /
@@ -958,6 +1010,23 @@ def main(argv=None):
     )
     p.add_argument("--json", action="store_true", help="raw /api/usage/current JSON")
     p.set_defaults(func=cmd_quota)
+
+    p = sub.add_parser(
+        "rebind-report-to",
+        help="redirect spawned children's completion reports to another session",
+        description="Repoint the return address of children spawned with "
+                    "--report-to. Resolved server-side at send time, so it "
+                    "takes effect even for a child that is mid-run. "
+                    "--from moves every child of one dispatcher; --child moves one.",
+    )
+    p.add_argument("new_report_to", metavar="NEW_SESSION",
+                   help="session id, id prefix, or name fragment to report to now")
+    p.add_argument("--from", dest="from_report_to", metavar="OLD_SESSION",
+                   help="move every child currently reporting to this session")
+    p.add_argument("--child", metavar="CHILD",
+                   help="only this child (session id/prefix/name, or its rr_ route id)")
+    p.add_argument("--json", action="store_true", help="raw rebind result JSON")
+    p.set_defaults(func=cmd_rebind_report_to)
 
     args = parser.parse_args(argv)
     return args.func(args)

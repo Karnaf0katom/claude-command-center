@@ -533,6 +533,8 @@ def _ccc_peer_route_report(envelope, from_addr):
     text = str(envelope.get("text") or "")
     if not sid or not text:
         return
+    # CCC-1202: a route id resolves to the child's current dispatcher.
+    sid = _core._report_routes.resolve(sid)
     mode = str(envelope.get("mode") or "steer")
     announced_from = str(envelope.get("announced_from") or "").strip()
     from_sid = _ccc_sid_for_socket_addr(from_addr)
