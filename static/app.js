@@ -61688,6 +61688,17 @@
       headline = 'Restarted an unresponsive session to deliver a waiting message';
       origin = 'To ' + (sessionTail() || '?') + (held ? ' · message waited ' + held : '');
       level = 'warning';
+    } else if (verb === 'STALE?' && category === 'worker') {
+      // Post-restart worker code check. old_stale is the check CCC acts on;
+      // new_stale is a shadow fingerprint kept for data only. "Current" is
+      // not news, so it stays in the raw file but out of the readable log.
+      const flag = (name) => (metadata.match(new RegExp('(?:^|\\s)' + name + '=(True|False)')) || [])[1] === 'True';
+      const oldStale = flag('old_stale'), newStale = flag('new_stale');
+      if (!oldStale && !newStale) return { level: 'info', headline: 'Worker code is current', key: JSON.stringify([category, verb]), verb, category, origin: '', hidden: true };
+      headline = oldStale ? 'Worker is running older code than what is on disk'
+        : 'Experimental check thinks the worker may be on older code';
+      origin = oldStale ? 'CCC restarts it once no work is running' : 'The check CCC acts on says it is current; nothing restarted';
+      level = oldStale ? 'warning' : 'info';
     } else if (verb === 'LATE') {
       const late = (detail.match(/reply arrived ([\d.]+s) after/) || [])[1];
       headline = subject + ' response arrived' + (late ? ' ' + late : '') + ' late';
@@ -61741,6 +61752,7 @@
     const groups = [];
     (events || []).slice().reverse().forEach(ev => {
       const presentation = _readableLogPresentation(ev);
+      if (presentation.hidden) return;
       const previous = groups[groups.length - 1];
       const gap = previous ? _readableLogEpoch(previous.events[previous.events.length - 1].ts) - _readableLogEpoch(ev.ts) : NaN;
       // A spawn request is preserved for rejected-launch diagnostics, but a
@@ -61772,7 +61784,11 @@
       + '<span class="activity-log-origin"' + (p.origin ? ' title="' + escapeAttr((p.category || 'Activity') + ' · ' + p.verb) + '"' : '') + '>'
       + escapeHtml(p.origin || ((p.category || 'Activity') + ' · ' + p.verb)) + '<span class="activity-log-disclosure">Details ▾</span></span></summary>'
       + '<div class="activity-log-occurrences">' + group.events.map(ev => '<div class="activity-log-occurrence">'
-        + '<div class="activity-log-occurrence-time">' + escapeHtml(_activityLogTimestampLocal(ev.ts)) + '</div>'
+        + '<div class="activity-log-occurrence-time"><span>' + escapeHtml(_activityLogTimestampLocal(ev.ts)) + '</span>'
+        + '<button type="button" class="activity-log-copy" title="Copy this event" aria-label="Copy this event" data-copy-text="'
+        + escapeAttr([ev.ts, ev.category, ev.verb, ev.detail].filter(Boolean).join('  ')) + '">'
+        + '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10.5V3.8C3 3.1 3.6 2.5 4.3 2.5H10.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
+        + '</button></div>'
         + '<pre class="activity-log-raw">' + escapeHtml(ev.detail || '(No additional details)') + '</pre></div>').join('') + '</div></details>';
   }
   function _renderReadableActivityLog(body, events) {
@@ -61807,6 +61823,18 @@
   let _railLogShowHeartbeats = false;
   let _railLogShowInjects = true;
   let _railLogOnlyAttention = false;
+
+  // Per-event copy button in the readable activity log (rail + modal).
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest && e.target.closest('.activity-log-copy');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = await copyTextValue(btn.getAttribute('data-copy-text') || '');
+    btn.classList.toggle('is-copied', ok);
+    btn.title = ok ? 'Copied' : 'Copy failed';
+    setTimeout(() => { btn.classList.remove('is-copied'); btn.title = 'Copy this event'; }, 1200);
+  });
 
   function _isSuccessfulHeartbeat(ev) {
     return String(ev.verb || '').toUpperCase() === 'BEAT'

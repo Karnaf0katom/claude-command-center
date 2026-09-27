@@ -1,0 +1,1 @@
+Activity log: each expanded event has a small copy button that copies its timestamp, category, verb and raw detail. The post-restart worker code check no longer shows up when the worker is current; when it is stale, it says so in plain words.

@@ -91,3 +91,20 @@ test('an app-server that dies at startup reads as a crash with its stderr',()=>{
  assert.equal(p.level,'error');
  assert.match(p.origin,/errno -88/);
 });
+test('worker stale check is hidden when current and explained when stale', ()=>{
+ const h=helpers();
+ const cur=event('stale?','WORKER_STALE_CHECK old_stale=False new_stale=False active=0 old_hash=a new_hash=b disk_new_hash=b','worker');
+ assert.equal(h._readableLogPresentation(cur).hidden,true);
+ assert.equal(h._readableLogGroups([cur]).length,0);
+ const stale=h._readableLogPresentation(event('stale?','WORKER_STALE_CHECK old_stale=True new_stale=False active=0','worker'));
+ assert.equal(stale.headline,'Worker is running older code than what is on disk');
+ assert.equal(stale.level,'warning');
+ const shadow=h._readableLogPresentation(event('stale?','WORKER_STALE_CHECK old_stale=False new_stale=True active=0','worker'));
+ assert.match(shadow.headline,/Experimental check/);
+});
+test('every expanded occurrence has a copy button carrying the raw event', ()=>{
+ const h=helpers();
+ const html=h._readableLogGroupHtml(h._readableLogGroups([event('TIMEOUT','method=initialize id=1 no reply within 10s')])[0],true);
+ assert.ok(html.includes('class="activity-log-copy"'));
+ assert.ok(html.includes('data-copy-text="2026-09-05 19:00:00 UTC  app-server  TIMEOUT  method=initialize id=1 no reply within 10s"'));
+});

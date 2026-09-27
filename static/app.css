@@ -29416,7 +29416,10 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 .activity-log-entry[open] .activity-log-disclosure { color: var(--log-level); }
 .activity-log-occurrences { padding: 0 10px 10px; min-width: 0; }
 .activity-log-occurrence { border-top: 1px solid var(--border); padding-top: 7px; margin-top: 3px; }
-.activity-log-occurrence-time { color: var(--text-muted); font-size: 10px; }
+.activity-log-occurrence-time { color: var(--text-muted); font-size: 10px; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.activity-log-copy { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text-muted); cursor: pointer; }
+.activity-log-copy:hover { color: var(--text); border-color: var(--border); }
+.activity-log-copy.is-copied { color: var(--success, #3fb950); }
 .activity-log-raw { margin: 5px 0; font: 11px/1.5 var(--font-mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 :root[data-theme="light"] .activity-log-entry { --log-level: #246ab6; }
 :root[data-theme="light"] .activity-log-entry.is-error { --log-level: #b52b35; }
