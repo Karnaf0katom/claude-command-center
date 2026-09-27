@@ -144,7 +144,7 @@ def test_updates_watchtower_and_bounces_the_daemon_after_the_ccc_pull(harness):
 
     kinds = []
     for kind, cmd in harness["log"]:
-        if kind == "git" and cmd[0] == "reset":
+        if kind == "git" and cmd[0] == "merge":
             kinds.append("ccc-reset")
         elif kind == "run" and cmd[:1] == ["bash"]:
             kinds.append("wt-update")

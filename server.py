@@ -16666,9 +16666,12 @@ def _self_update():
     rc, _, err = _git(["fetch", "origin", "--quiet"], d, timeout=30)
     if rc != 0:
         return {"ok": False, "error": f"git fetch failed: {err or 'rc={}'.format(rc)}"}
-    rc, _, err = _git(["reset", "--hard", "origin/main", "--quiet"], d)
+    # Fast-forward only, never `reset --hard`: the install dir may be a
+    # symlink to a developer's working clone, where a reset would silently
+    # drop local commits that have not been pushed yet.
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", "origin/main"], d)
     if rc != 0:
-        return {"ok": False, "error": f"git reset failed: {err or 'rc={}'.format(rc)}"}
+        return {"ok": False, "error": f"git merge --ff-only failed: {err or 'rc={}'.format(rc)}"}
     rc, sha, _ = _git(["rev-parse", "HEAD"], d)
     # Bust the 6h cache so the post-restart UI reads fresh latest/current.
     _VERSION_CHECK_CACHE["ts"] = 0.0
@@ -16719,6 +16722,41 @@ def _self_update():
     # asserting a stale answer if that restart never fires.
     _reset_wt_capability_caches()
     return result
+
+
+def _pull_before_restart():
+    """Best-effort fast-forward of the install dir before a manual restart.
+
+    A restart that re-execs the same code on disk looks, to the user, like
+    the restart did nothing, so the restart buttons pick up whatever has
+    landed on origin/main first. Never blocks the restart: offline, a
+    non-main branch, local commits, or a dirty file the merge would touch
+    all just skip the pull (git refuses the fast-forward on its own).
+    Opt out with CCC_RESTART_PULL=0.
+    """
+    if os.environ.get("CCC_RESTART_PULL", "1").strip() == "0":
+        return {"ok": True, "skipped": "disabled by CCC_RESTART_PULL=0"}
+    d = _install_dir()
+    if not (d / ".git").exists():
+        return {"ok": True, "skipped": "not a git clone"}
+    rc, branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"], d)
+    branch = (branch or "").strip()
+    if rc != 0 or branch != "main":
+        return {"ok": True, "skipped": f"on branch {branch or '?'!r}, not main"}
+    _, before, _ = _git(["rev-parse", "HEAD"], d)
+    rc, _, err = _git(["fetch", "origin", "--quiet"], d, timeout=15)
+    if rc != 0:
+        return {"ok": False, "error": f"git fetch failed: {(err or '').strip() or rc}"}
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", "origin/main"], d)
+    if rc != 0:
+        return {"ok": False, "error": f"fast-forward refused: {(err or '').strip() or rc}"}
+    _, after, _ = _git(["rev-parse", "HEAD"], d)
+    before, after = (before or "").strip(), (after or "").strip()
+    if before != after:
+        _VERSION_CHECK_CACHE["ts"] = 0.0
+        _VERSION_CHECK_CACHE["data"] = None
+    return {"ok": True, "before": before, "after": after,
+            "changed": before != after}
 
 
 # ── In-app bug reporting ───────────────────────────────────────────────
@@ -29449,10 +29487,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not ok:
                 self.send_json(precheck_err, 409)
                 return
+            # Pull before anything restarts, so both processes come back on
+            # the new code rather than re-running what is already on disk.
+            pull = _pull_before_restart()
             # Worker first, then this process: the dashboard's own restart is
             # scheduled after the response flushes, so kicking the worker here
             # keeps the ordering right without stranding the reply.
-            worker_outcome = _restart_worker_process() if restart_all else None
+            if restart_all:
+                worker_outcome = _restart_worker_process()
+            elif pull.get("changed"):
+                # execvp bypasses run.sh's stale-worker gate, and the worker
+                # imports server.py, so a pull that changed code needs this.
+                worker_outcome = _restart_stale_worker()
+            else:
+                worker_outcome = None
             self.send_json({
                 "ok": True,
                 "restart": True,
@@ -29462,6 +29510,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "adopted": int(adopted.get("adopted") or 0),
                 "worker_restarted": bool((worker_outcome or {}).get("restarted")),
                 "worker": worker_outcome,
+                "pull": pull,
                 # Snapshot of what THIS process was running, taken before the
                 # restart fires. The restart itself replaces this process
                 # (execvp) or hands off to launchd, so there is no "after"
