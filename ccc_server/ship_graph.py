@@ -1475,7 +1475,71 @@ def _ticket_matches_repo(t_ref: str, repo: str) -> bool:
     return True
 
 
+_staleness_cache: dict[str, tuple[float, int | None]] = {}
+_staleness_lock = threading.Lock()
+_STALENESS_TTL = 300.0  # 5 min: bounds how often a NOT SHIPPED verdict pays for a fetch
+
+
+def _clone_behind_count(repo_path: str) -> int | None:
+    """How many commits `origin/<default-branch>` has that our local clone
+    lacks, or None if this can't be determined. `git fetch -q` first so a
+    stale local clone (no push received in a while) doesn't read as
+    'not shipped' when it actually shipped upstream. Cached per repo_path
+    with a short TTL so a NOT SHIPPED answer doesn't pay for a fetch every
+    call."""
+    now = time.time()
+    with _staleness_lock:
+        cached = _staleness_cache.get(repo_path)
+        if cached and now - cached[0] < _STALENESS_TTL:
+            return cached[1]
+
+    behind: int | None = None
+    try:
+        subprocess.run(
+            ["git", "-C", repo_path, "fetch", "-q", "origin"],
+            capture_output=True, timeout=8,
+        )
+        main_ref = None
+        for ref in ("origin/main", "origin/master"):
+            vr = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "--verify", "--quiet", ref],
+                capture_output=True, text=True, timeout=5,
+            )
+            if vr.returncode == 0 and vr.stdout.strip():
+                main_ref = ref
+                break
+        if main_ref:
+            cr = subprocess.run(
+                ["git", "-C", repo_path, "rev-list", "--count", f"HEAD..{main_ref}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if cr.returncode == 0 and cr.stdout.strip().isdigit():
+                behind = int(cr.stdout.strip())
+    except Exception:
+        behind = None
+
+    with _staleness_lock:
+        _staleness_cache[repo_path] = (now, behind)
+    return behind
+
+
 def is_shipped(topic: str) -> dict:
+    """Determine whether a topic has been shipped. Wraps `_is_shipped_impl`
+    to annotate a NOT SHIPPED verdict with clone staleness, since a behind
+    local clone and 'never shipped' look identical to the search below."""
+    result = _is_shipped_impl(topic)
+    if not result.get("shipped"):
+        roots = discover_repo_roots()
+        detected_repo, _ = detect_named_repo((topic or "").strip(), roots)
+        repo_path = roots.get(detected_repo) if detected_repo else None
+        if repo_path:
+            behind = _clone_behind_count(repo_path)
+            if behind:
+                result["stale_clone"] = {"repo": detected_repo, "behind": behind}
+    return result
+
+
+def _is_shipped_impl(topic: str) -> dict:
     """Determine whether a topic has been shipped.
 
     Contract:

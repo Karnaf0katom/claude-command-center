@@ -594,6 +594,12 @@ def cmd_shipped(args):
     confidence = payload.get("confidence")
     conf_str = f" (confidence {confidence:.2f})" if isinstance(confidence, (int, float)) else ""
     print(f"{verdict}{conf_str}: {text}")
+    stale = payload.get("stale_clone")
+    if stale and stale.get("behind"):
+        n = stale["behind"]
+        repo = stale.get("repo") or "local clone"
+        plural = "s" if n != 1 else ""
+        print(f"  note: {repo} local clone is {n} commit{plural} behind origin; result may be stale")
     for ev in payload.get("evidence") or []:
         subj = ev.get("subject") or ""
         print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}")
