@@ -3557,3 +3557,139 @@ def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
         f"expected exactly 1 re-parse for 1 modified file, got {len(parse_calls)}"
     )
 
+
+def test_ship_graph_second_call_does_no_reparse_or_subprocesses(tmp_path, monkeypatch):
+    """Calling ship_graph a second time re-parses nothing and spawns no per-row subprocesses."""
+    import sqlite3
+    from ccc_server import ship_graph
+
+    db_path = tmp_path / "ship_graph.sqlite"
+    wt_db_path = tmp_path / "queues.db"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_dir = tmp_path / "repo"
+
+    projects_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+    test_file = repo_dir / "index.js"
+    test_file.write_text("console.log('init');", encoding="utf-8")
+    subprocess.run(["git", "add", "index.js"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(export): add csv export for dashboard tables"], cwd=repo_dir, check=True)
+
+    commit_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True).stdout.strip()
+
+    with sqlite3.connect(wt_db_path) as wt_conn:
+        wt_conn.execute("""
+            CREATE TABLE items (
+                ref TEXT PRIMARY KEY,
+                project TEXT,
+                number INTEGER,
+                status TEXT,
+                updated_at TEXT,
+                item_json TEXT
+            )
+        """)
+        item = {
+            "title": "Add csv export for dashboard tables",
+            "text": "Closed with commit",
+            "resolution": {"commit": commit_sha},
+        }
+        wt_conn.execute(
+            """INSERT INTO items (ref, project, number, status, updated_at, item_json)
+               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+            ("DASH-12", "DASH", 12, "closed", json.dumps(item)),
+        )
+        wt_conn.commit()
+
+    repo_sessions_dir = projects_dir / "repo"
+    repo_sessions_dir.mkdir(parents=True)
+    session_file = repo_sessions_dir / "session-001.jsonl"
+    lines = [
+        {
+            "type": "user",
+            "cwd": str(repo_dir),
+            "timestamp": "2026-09-20T10:00:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": f"[main {commit_sha[:7]}] feat(export): add csv export for dashboard tables\n 1 file changed",
+                    }
+                ],
+            },
+        },
+    ]
+    session_file.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
+    monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
+
+    if hasattr(ship_graph._tls, "conn") and ship_graph._tls.conn:
+        try:
+            ship_graph._tls.conn.close()
+        except Exception:
+            pass
+        ship_graph._tls.conn = None
+    ship_graph._last_sync_ts = 0.0
+
+    parse_calls = []
+    real_parse = ship_graph._parse_transcript
+
+    def spy_parse(args):
+        parse_calls.append(args)
+        return real_parse(args)
+
+    monkeypatch.setattr(ship_graph, "_parse_transcript", spy_parse)
+
+    subprocess_calls = []
+    real_run = subprocess.run
+    real_popen = subprocess.Popen
+
+    def spy_run(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_run(*args, **kwargs)
+
+    def spy_popen(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    monkeypatch.setattr(subprocess, "Popen", spy_popen)
+
+    # First call builds the graph
+    res1 = ship_graph.is_shipped("Did we add csv export for dashboard tables?")
+    assert res1["shipped"] is True
+    assert len(parse_calls) == 1, f"Cold run should parse 1 transcript, got {len(parse_calls)}"
+
+    # Clear spies for warm call
+    parse_calls.clear()
+    subprocess_calls.clear()
+    # Force freshness check to exercise incremental checks
+    ship_graph._last_sync_ts = 0.0
+
+    res2 = ship_graph.is_shipped("Did we add csv export for dashboard tables?")
+    assert res2["shipped"] is True
+    assert len(parse_calls) == 0, (
+        f"Warm run re-parsed {len(parse_calls)} transcripts; incremental (mtime, size) cache regressed"
+    )
+    # The fast head check reads .git/HEAD and refs directly; no subprocesses per row or git log should be spawned
+    git_log_calls = [c for c in subprocess_calls if any("log" in str(arg) for arg in c)]
+    assert len(git_log_calls) == 0, (
+        f"Warm run spawned git log subprocesses: {git_log_calls}"
+    )
+    assert len(subprocess_calls) == 0, (
+        f"Warm run spawned subprocesses: {subprocess_calls}"
+    )
+
+
