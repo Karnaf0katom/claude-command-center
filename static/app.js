@@ -62431,7 +62431,9 @@
       if (row.state === 'ended' || row.is_live === false) return 'done';
       if (row.question_waiting || row.needs_approval) return 'waiting';
       if (row.state === 'working' || row.sidecar_in_flight) return 'working';
-      if (row.is_live && ORCH_ONE_SHOT_ENGINES.has(row.engine)) return 'working';
+      // Devin is also live while merely steerable over CCC's shared ACP
+      // conn; acp_status 'idle' there means the run finished (CCC-1203).
+      if (row.is_live && ORCH_ONE_SHOT_ENGINES.has(row.engine) && row.acp_status !== 'idle') return 'working';
       const age = born ? Date.now() / 1000 - born : Infinity;
       if (age < ORCH_BOOT_GRACE_S && !orchSpawnExited(spawn)) return 'working';   // booting: hooks not yet reporting
       return 'done';

@@ -1,0 +1,1 @@
+- Orchestration map no longer shows a finished Devin lane as "working": a Devin session stays live while CCC's shared ACP connection can steer it, so the map now reads its ACP turn state (new `acp_status` field on `/api/sessions/live-activity`).

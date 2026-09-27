@@ -9298,6 +9298,7 @@ _LIVE_ACTIVITY_FIELD_KEYS = (
     "stale_tool_call",
     "stale_tool_age_s",
     "stale_tool_threshold_s",
+    "acp_status",
 )
 
 
@@ -9532,6 +9533,25 @@ def _acp_live_activity_fields(harness, session_id):
     return out
 
 
+def _devin_live_acp_status(raw_id):
+    """"running"/"idle" for a Devin session CCC drives over its shared
+    `devin acp` conn, or None when a headless `devin -p` (or another ACP
+    host) holds the session lock and the ACP registry can't see its turn.
+
+    A dormant Devin session reads is_live whenever the shared conn could
+    steer it, so is_live alone is not a working signal for Devin (CCC-1203:
+    a finished one-shot lane showed "working" on the orchestration map).
+    Mirrors session-status's kind=acp branch; in-memory registry plus one
+    kill(pid, 0) on the lock pid, no subprocess.
+    """
+    if _devin_cli_session_live(raw_id) and not _devin_acp_session_loaded(raw_id):
+        return None
+    with _ACP_LOCK:
+        _acp_load_state("devin")
+        state = _ACP_SESSION_STATE.get("devin", {}).get(raw_id) or {}
+    return "running" if state.get("status") == "active" else "idle"
+
+
 def _live_activity_entry_for_session(session_id):
     """Sidecar-shaped activity snapshot for one session (no JSONL walk)."""
     entry = {"session_id": session_id, "is_live": _archive_session_is_live(session_id)}
@@ -9575,12 +9595,13 @@ def _live_activity_entry_for_session(session_id):
     elif engine == "devin":
         _add_sidecar_fields(entry)
         try:
-            acp_fields = _acp_live_activity_fields(
-                "devin", _devin_cli_raw_id(session_id))
+            raw_id = _devin_cli_raw_id(session_id)
+            acp_fields = _acp_live_activity_fields("devin", raw_id)
             if acp_fields.get("needs_approval"):
                 entry["needs_approval"] = True
                 entry["needs_approval_message"] = acp_fields.get(
                     "needs_approval_message")
+            entry["acp_status"] = _devin_live_acp_status(raw_id)
         except Exception:
             pass
     elif engine == "hermes":
