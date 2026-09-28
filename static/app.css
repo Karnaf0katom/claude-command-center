@@ -28685,6 +28685,8 @@ body.status-pos-right .status-rail-pane[data-rail-pane="metadata"] > .files-pane
   color: var(--text-muted, #8b949e);
 }
 .ask-more-sources > summary::-webkit-details-marker { display: none; }
+.ask-more-caret { display: inline-block; transition: transform 120ms ease; }
+.ask-more-sources[open] .ask-more-caret { transform: rotate(90deg); }
 .ask-more-sources .ask-session-chip { max-width: 240px; font-size: 11px; padding: 1px 7px; }
 
 /* Assistant Action Toolbar */

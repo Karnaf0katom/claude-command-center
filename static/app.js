@@ -63555,7 +63555,7 @@
     const rest = sources.filter(src => src && src.id && !inline.has(src.id));
     if (!sources.length) return '';
     const more = rest.length
-      ? '<details class="ask-more-sources"><summary>' + rest.length + ' other candidate' + (rest.length === 1 ? '' : 's') + ' ▸</summary>'
+      ? '<details class="ask-more-sources"><summary>' + rest.length + ' other candidate' + (rest.length === 1 ? '' : 's') + ' <span class="ask-more-caret">▸</span></summary>'
         + '<div class="ask-top-sources">' + rest.map(src => askSessionChipHtml(src, selectedId)).join('') + '</div></details>'
       : '';
     return '<div class="ask-sources" aria-label="Sources">' + more

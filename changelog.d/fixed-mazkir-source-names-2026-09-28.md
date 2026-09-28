@@ -1,0 +1,1 @@
+- Mazkir source chips now show the same session names as the sidebar (your rename, the session's custom or AI title, then CCC's auto-title) instead of the raw first prompt, and the "other candidates" caret turns when expanded.

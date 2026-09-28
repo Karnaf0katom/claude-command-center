@@ -1051,7 +1051,6 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
     live_ids = _live_ids()
 
     prefetch_info: dict = {"raw": 0, "stats": {}}
-    ccc_titles = _ccc_titles()
 
     def do_prefetch() -> tuple[list[dict], str]:
         # The census fetch and the index search are independent; overlap them
@@ -1067,7 +1066,8 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
                 cands = builtin_prefetch(question, range_key, exclude_session_ids=live_ids)
             prefetch_info["raw"] = len(cands)
             cands, prefetch_info["stats"] = prepare_candidates(
-                cands, question, ccc_titles, full_title=lambda ids: full_titles(ids, db_path))
+                cands, question, _ccc_titles(c.get("session_id") for c in cands),
+                full_title=lambda ids: full_titles(ids, db_path))
             try:
                 snap = snap_f.result(timeout=SNAPSHOT_TIMEOUT_SEC + 1)
             except Exception:
@@ -1150,9 +1150,11 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
         return {"ok": False, "code": "ask_engine_unauthenticated", "error": NOT_SIGNED_IN}, 401
     answer = res["answer"] or "(no answer)"
     sources, cited, actions = assemble_sources(answer, candidates, db_path, live_ids)
-    for src in sources:  # sessions cited from a mid-answer search skipped prepare_candidates
-        if src.get("harness") == "claude" and ccc_titles.get(src["id"]):
-            src["title"] = clean_title(ccc_titles[src["id"]])
+    # Sessions cited from a mid-answer search skipped prepare_candidates.
+    names = _ccc_titles(src["id"] for src in sources if src.get("harness") == "claude")
+    for src in sources:
+        if names.get(src["id"]):
+            src["title"] = clean_title(names[src["id"]])
     confirm_actions = collect_confirm_actions(answer, t0)
     prefetch_src = ("claude-index · sessions search" if (INDEX_BIN or prefetch_runner is not None)
                     else "CCC built-in session search")
@@ -1262,11 +1264,39 @@ def _mark_spawn(session_id: str) -> None:
         pass
 
 
-def _ccc_titles() -> dict:
-    """CCC's auto-titles (warm, cached map); empty when CCC isn't importable."""
+def ccc_titles(ids, overrides: dict, meta_cache: dict, auto: dict) -> dict:
+    """The name CCC's sidebar shows for each id: user rename, then the
+    transcript's custom title, then Claude's ai-title, then CCC's auto-title
+    (same order as the session list's display_name)."""
+    want = set(ids or ())
+    meta: dict[str, dict] = {}
+    for path, m in (meta_cache or {}).items():
+        base = os.path.basename(str(path))
+        if base.endswith(".jsonl") and base[:-6] in want and isinstance(m, dict):
+            meta[base[:-6]] = m
+    out = {}
+    for sid in want:
+        m = meta.get(sid) or {}
+        t = next((str(v).strip() for v in (overrides.get(sid), m.get("custom_title"), m.get("ai_title"),
+                                           auto.get(sid)) if v and str(v).strip()), "")
+        if t:
+            out[sid] = t
+    return out
+
+
+def _ccc_titles(ids) -> dict:
+    """Sidebar names from CCC's warm in-memory state (no transcript reads);
+    empty when CCC isn't importable (the MCP half runs as a plain script)."""
+    ids = [i for i in ids or () if i]
+    if not ids:
+        return {}
     try:
         from ccc_server import core as _core
-        return _core._auto_titled_session_ids() or {}
+        from ccc_server import log_parse as _lp
+        with _lp._conv_meta_cache_lock:
+            meta_cache = dict(_lp._conv_meta_cache)
+        return ccc_titles(ids, _core._load_session_name_overrides() or {}, meta_cache,
+                          _core._auto_titled_session_ids() or {})
     except Exception:
         return {}
 
