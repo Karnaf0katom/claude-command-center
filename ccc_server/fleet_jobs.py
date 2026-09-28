@@ -1051,7 +1051,7 @@ def _federation_handle_post(path, data, handler):
         if peer is None:
             return None, None
         _core._federation_touch_peer(peer["node_id"])
-        return _core._federation_execute_route(data)
+        return _core._federation_execute_route(data, peer=peer)
     if path == "/api/federation/v1/handoff/prepare":
         peer = _core._federation_require_peer(handler)
         if peer is None:

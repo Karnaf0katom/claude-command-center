@@ -370,11 +370,134 @@ _FEDERATION_ROUTE_ACTIONS = {
     "phone_access_enable": ("POST", "/api/phone-access/enable", True),
     "phone_access_disable": ("POST", "/api/phone-access/disable", True),
     "phone_access_test": ("POST", "/api/phone-access/test", False),
+    # Memory (MEMORY-8, multi-machine S3): read-only, so no req_id dedupe.
+    # api_path for memory_brief is rebuilt per call below (its query is a
+    # URL path segment, not a query string) -- the entry here is a stand-in.
+    "memory_recall": ("GET", "/api/memory/recall", False),
+    "memory_shipped": ("GET", "/api/memory/shipped", False),
+    "memory_brief": ("GET", "/api/memory/brief", False),
+    "memory_file_history": ("GET", "/api/memory/file-history", False),
 }
 
+_MEMORY_ROUTE_ACTIONS = frozenset(
+    {"memory_recall", "memory_shipped", "memory_brief", "memory_file_history"}
+)
 
-def _federation_execute_route(envelope):
-    """Execute a routed action envelope on this node. Returns (payload, status)."""
+# Least-privilege pairing (multi-machine spec section 5): a peer entry can
+# carry an optional `scopes` list. Absent or containing "*" is unrestricted
+# (back-compatible with every peer paired before this). A peer scoped to
+# "memory:read" can reach only the read-only memory_* route actions --
+# everything else (spawn, inject, group chat, ...) is refused server-side,
+# regardless of what the caller asks for.
+_SCOPE_ACTIONS = {
+    "memory:read": _MEMORY_ROUTE_ACTIONS,
+}
+
+# Bounds from the multi-machine spec section 5 ("Bounded responses"): no raw
+# transcript, tool output, or file contents ever leave this function to
+# begin with (the underlying memory_api/ship_graph/session_brief endpoints
+# only ever returned summarized rows) -- this only bounds row count and the
+# size of the already-summarized snippet/match text and overall payload.
+_MEMORY_MAX_ROWS = 30
+_MEMORY_SNIPPET_CAP = 400
+_MEMORY_MATCH_CAP = 600
+_MEMORY_RESPONSE_CAP_BYTES = 256 * 1024
+_MEMORY_ARG_STR_CAP = 500
+
+
+def _federation_peer_scope_allows(peer, action):
+    """True unless `peer` was paired with an explicit, non-wildcard `scopes`
+    list that excludes `action`. `peer=None` is a trusted internal caller
+    (e.g. a direct test call, not a peer-routed one) and is unrestricted."""
+    if peer is None:
+        return True
+    scopes = peer.get("scopes")
+    if not scopes or "*" in scopes:
+        return True
+    allowed: set[str] = set()
+    for scope in scopes:
+        allowed |= _SCOPE_ACTIONS.get(scope, set())
+    return action in allowed
+
+
+def _federation_resolve_mapped_repo(ident_key):
+    """Local clone path for a stable cross-machine repo identity on THIS
+    node -- the saved map first, else a scan of known repos (paths never
+    travel between nodes, so each side maps the same identity to its own
+    clone). Shared by the spawn and memory_file_history route actions."""
+    mapped = federation.resolve_repo_path(ident_key)
+    if mapped:
+        return mapped
+    for candidate in _core._known_repo_paths():
+        try:
+            cand = federation.repo_identity(candidate)
+        except Exception:
+            cand = None
+        if cand and cand["identity"] == ident_key:
+            federation.map_repo(ident_key, candidate)
+            return candidate
+    return None
+
+
+def _federation_cap_memory_row(row):
+    if not isinstance(row, dict):
+        return row
+    row = dict(row)
+    snippet = row.get("snippet")
+    if isinstance(snippet, str) and len(snippet) > _MEMORY_SNIPPET_CAP:
+        row["snippet"] = snippet[:_MEMORY_SNIPPET_CAP]
+    match = row.get("match")
+    if isinstance(match, str) and len(match) > _MEMORY_MATCH_CAP:
+        row["match"] = match[:_MEMORY_MATCH_CAP]
+    elif isinstance(match, dict):
+        text = match.get("text")
+        if isinstance(text, str) and len(text) > _MEMORY_MATCH_CAP:
+            row["match"] = {**match, "text": text[:_MEMORY_MATCH_CAP]}
+    return row
+
+
+def _federation_cap_memory_response(result):
+    """Bound a memory_* route result to the caps above. Oversize responses
+    are truncated (row count first, then dropped trailing rows if still
+    over the byte cap) and flagged truncated: true rather than sent whole."""
+    if not isinstance(result, dict):
+        return result
+    result = dict(result)
+    truncated = False
+    list_keys = [k for k in ("results", "evidence", "history") if isinstance(result.get(k), list)]
+    for key in list_keys:
+        rows = result[key]
+        if len(rows) > _MEMORY_MAX_ROWS:
+            rows = rows[:_MEMORY_MAX_ROWS]
+            truncated = True
+        result[key] = [_federation_cap_memory_row(r) for r in rows]
+    while list_keys:
+        try:
+            size = len(json.dumps(result).encode("utf-8"))
+        except (TypeError, ValueError):
+            break
+        if size <= _MEMORY_RESPONSE_CAP_BYTES:
+            break
+        shrunk = False
+        for key in list_keys:
+            if result[key]:
+                result[key] = result[key][:-1]
+                shrunk = True
+                truncated = True
+        if not shrunk:
+            break
+    if truncated:
+        result["truncated"] = True
+    return result
+
+
+def _federation_execute_route(envelope, peer=None):
+    """Execute a routed action envelope on this node. Returns (payload, status).
+
+    `peer` is the caller's own pairing entry (as returned by
+    `_federation_require_peer`), used only to enforce an optional
+    least-privilege `scopes` list on that peer. Pass None for a trusted
+    internal caller that isn't a peer-routed request at all."""
     if not isinstance(envelope, dict):
         return {"ok": False, "error": "bad_request", "detail": "expected envelope object"}, 400
     action = envelope.get("action") or ""
@@ -385,6 +508,9 @@ def _federation_execute_route(envelope):
     if spec is None:
         return {"ok": False, "error": "unsupported_capability",
                 "detail": f"unknown route action {action!r}"}, 400
+    if not _federation_peer_scope_allows(peer, action):
+        return {"ok": False, "error": "scope_forbidden",
+                "detail": f"peer scope does not permit {action!r}"}, 403
     try:
         hops = int(envelope.get("hops", 0))
     except (TypeError, ValueError):
@@ -409,17 +535,7 @@ def _federation_execute_route(envelope):
         # it to its own clone path (paths never travel between machines).
         ident_key = str(args.pop("repo_identity", "") or "").strip()
         if ident_key and not args.get("repo_path") and not args.get("cwd"):
-            mapped = federation.resolve_repo_path(ident_key)
-            if not mapped:
-                for candidate in _core._known_repo_paths():
-                    try:
-                        cand = federation.repo_identity(candidate)
-                    except Exception:
-                        cand = None
-                    if cand and cand["identity"] == ident_key:
-                        federation.map_repo(ident_key, candidate)
-                        mapped = candidate
-                        break
+            mapped = _federation_resolve_mapped_repo(ident_key)
             if not mapped:
                 return {"ok": False, "error": "stale_mapping",
                         "detail": f"no local clone mapped for {ident_key} on "
@@ -439,10 +555,59 @@ def _federation_execute_route(envelope):
             timeout = min(630.0, max(30.0, float(args.get("timeout_ms") or 30000) / 1000.0 + 30.0))
         except (TypeError, ValueError):
             timeout = 60.0
+    if action in _MEMORY_ROUTE_ACTIONS:
+        # Never let a peer's request fan this node out further — a memory
+        # route action always answers from this node's own local index
+        # ("memory fan-out is one hop, never transitive", federation.md).
+        args = {**args, "scope": "local"}
+        for key in ("q", "topic", "path"):
+            if isinstance(args.get(key), str) and len(args[key]) > _MEMORY_ARG_STR_CAP:
+                args[key] = args[key][:_MEMORY_ARG_STR_CAP]
+        try:
+            args["limit"] = max(1, min(int(args.get("limit") or _MEMORY_MAX_ROWS), _MEMORY_MAX_ROWS))
+        except (TypeError, ValueError):
+            args["limit"] = _MEMORY_MAX_ROWS
+        if action == "memory_file_history":
+            # repo_identity + rel_path, never a raw path — paths never
+            # travel between machines. THIS node maps identity to its own
+            # clone, same mechanism as the spawn action above.
+            ident_key = str(args.pop("repo_identity", "") or "").strip()
+            rel_path = str(args.pop("rel_path", "") or "").strip()
+            if not ident_key or not rel_path:
+                return {"ok": False, "error": "bad_request",
+                        "detail": "memory_file_history requires repo_identity and rel_path"}, 400
+            mapped = _federation_resolve_mapped_repo(ident_key)
+            if not mapped:
+                return {"ok": False, "error": "stale_mapping",
+                        "detail": f"no local clone mapped for {ident_key} on "
+                                  "this node"}, 404
+            # rel_path comes from the peer and must be repo-relative: an
+            # absolute rel_path makes os.path.join silently discard `mapped`
+            # (os.path.join('/a', '/etc/passwd') == '/etc/passwd'), and '..'
+            # segments can walk back out after normpath. Reject either
+            # rather than let a peer probe paths outside the repo it claimed.
+            if os.path.isabs(rel_path):
+                return {"ok": False, "error": "bad_request",
+                        "detail": "rel_path must be repo-relative"}, 400
+            candidate = os.path.normpath(os.path.join(mapped, rel_path))
+            if candidate != mapped and not candidate.startswith(mapped + os.sep):
+                return {"ok": False, "error": "bad_request",
+                        "detail": "rel_path escapes the mapped repo"}, 400
+            args["path"] = candidate
+            args.pop("scope", None)  # file_history has no scope concept
+        elif action == "memory_brief":
+            # The local endpoint takes its query as a URL path segment
+            # (/api/memory/brief/<q>), not a query string.
+            q = str(args.pop("q", "") or "")[:_MEMORY_ARG_STR_CAP]
+            args.pop("scope", None)  # brief resolves one local session only
+            args.pop("limit", None)
+            api_path = f"/api/memory/brief/{urllib.parse.quote(q, safe='')}"
     if method == "GET":
         result = _federation_self_api(method, api_path, query=args, timeout=timeout)
     else:
         result = _federation_self_api(method, api_path, body=args, timeout=timeout)
+    if action in _MEMORY_ROUTE_ACTIONS:
+        result = _federation_cap_memory_response(result)
     if mutating and req_id:
         federation.record_request_result(req_id, result)
     return {"ok": True, "result": result}, 200

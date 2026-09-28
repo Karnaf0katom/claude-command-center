@@ -133,9 +133,14 @@ def capability_manifest(version: str, engines: list[str] | None = None) -> dict[
             "group_chat_host",
             "handoff",
             "orchestration",
+            "memory",
         ],
         # Only engines whose native session store we can migrate safely.
         "handoff_engines": ["claude"],
+        # multi-machine S3: the four read-only memory_* route actions
+        # (recall/shipped/brief/file-history). A peer without this reports
+        # unsupported_capability rather than silently returning no rows.
+        "memory": 1,
     }
 
 

@@ -1,0 +1,1 @@
+- Paired peers can now query a node's memory over federation (`memory_recall`, `memory_shipped`, `memory_brief`, `memory_file_history`), scoped to `memory:read` peers, capped to 30 rows / 256KB, and local-only (no transitive fan-out).
