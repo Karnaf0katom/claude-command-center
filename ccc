@@ -54,6 +54,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import shutil
 import sys
@@ -1347,6 +1348,57 @@ def cmd_brain(args):
     os.execv(exe, [exe] + args.args)
 
 
+def _wt_argv():
+    """`CCC_WT_CMD` (shell-split) wins; else a `wt` on PATH or a usual prefix.
+    None when `wt` isn't installed -- callers treat that as "skip, wt is
+    optional"."""
+    override = os.environ.get("CCC_WT_CMD", "").strip()
+    if override:
+        return shlex.split(override)
+    for cand in ("wt", "/opt/homebrew/bin/wt", "/usr/local/bin/wt",
+                 os.path.join(os.path.expanduser("~"), ".local", "bin", "wt")):
+        found = shutil.which(cand) if "/" not in cand else (cand if os.access(cand, os.X_OK) else None)
+        if found:
+            return [found]
+    return None
+
+
+def _wt_json(wt, args, timeout=6):
+    try:
+        out = subprocess.run(wt + args, capture_output=True, text=True, timeout=timeout)
+        return json.loads(out.stdout or "null")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _rebind_wt_counts(old_sid):
+    """Best-effort counts of what else now routes to NEW once CCC has
+    recorded the forward `ccc rebind-report-to --from OLD` just made: open
+    WatchTower tickets OLD submitted (across every queue), and queue
+    subscriptions with OLD as their target. None when `wt` isn't installed or
+    any lookup fails -- this is informational only, never blocking on the
+    report-route rebind itself."""
+    wt = _wt_argv()
+    if not wt:
+        return None
+    queues = _wt_json(wt, ["status", "--json"])
+    if not isinstance(queues, list):
+        return None
+    names = [q.get("queue") for q in queues if isinstance(q, dict) and q.get("queue")]
+    open_tickets = 0
+    subscriptions = 0
+    for name in names:
+        tickets = _wt_json(wt, ["ls", "-q", name, "--status", "active", "--json"])
+        if isinstance(tickets, list):
+            open_tickets += sum(
+                1 for t in tickets if isinstance(t, dict) and t.get("submitter") == old_sid
+            )
+        subs = _wt_json(wt, ["subscribe", name, "--json"])
+        if isinstance(subs, list):
+            subscriptions += sum(1 for s in subs if s == old_sid)
+    return {"open_tickets": open_tickets, "queue_subscriptions": subscriptions}
+
+
 def cmd_rebind_report_to(args):
     base = _resolve_server(args.server)
     if not base:
@@ -1384,14 +1436,24 @@ def cmd_rebind_report_to(args):
     except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
         print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
         return 1
-    if args.json:
-        print(json.dumps(result, indent=2))
-        return 0 if result.get("ok") else 1
     if not result.get("ok"):
-        print(f"ccc: rebind failed: {result.get('error') or f'HTTP {status}'}", file=sys.stderr)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"ccc: rebind failed: {result.get('error') or f'HTTP {status}'}", file=sys.stderr)
         return 1
+    wt_counts = _rebind_wt_counts(old_sid) if args.from_report_to else None
+    if args.json:
+        if wt_counts is not None:
+            result["wt_counts"] = wt_counts
+        print(json.dumps(result, indent=2))
+        return 0
     moved = result.get("rebound") or []
-    print(f"rebound {len(moved)} child report route(s) to {new_sid}")
+    parts = [f"{len(moved)} child report route(s)"]
+    if wt_counts is not None:
+        parts.append(f"{wt_counts['open_tickets']} open ticket(s)")
+        parts.append(f"{wt_counts['queue_subscriptions']} queue subscription(s)")
+    print(f"rebound {', '.join(parts)} to {new_sid}")
     if not moved:
         print("  (children spawned before rebindable routes report to their "
               "original sid; message them with `ccc send` instead)")

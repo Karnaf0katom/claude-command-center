@@ -22,12 +22,16 @@ existing background transcript parser does the rest
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import time
 
 from ccc_server import core as _core
 from ccc_server import lineage as _lineage
 from ccc_server import report_routes as _report_routes
 from ccc_server import ship_graph as _sg
+from ccc_server import test_isolation_active
 from ccc_server import usage_limit as _usage_limit
 from ccc_server.session_brief import _transcript_path, brief as _brief
 
@@ -35,6 +39,79 @@ DEFAULT_LARGE_TOKENS = 150_000
 DEFAULT_STALE_SECONDS = 60 * 60
 
 _SUPPORTED_ENGINES = ("claude", "codex", "kimi")
+
+MAX_MANUAL_FORWARD_HOPS = 25
+
+
+def _manual_forward_path():
+    if test_isolation_active():
+        return os.path.join(
+            tempfile.gettempdir(), f"ccc-test-manual-forwards-{os.getpid()}.json"
+        )
+    base = os.environ.get("CCC_STATE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude", "command-center"
+    )
+    return os.path.join(base, "manual-forwards.json")
+
+
+def _load_manual_forwards(path=None):
+    try:
+        with open(path or _manual_forward_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_manual_forwards(state, path=None):
+    path = path or _manual_forward_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def record_manual_forward(old_sid, new_sid, path=None, now=None):
+    """Explicitly record `old_sid` -> `new_sid` outside a continuation spawn
+    -- e.g. `ccc rebind-report-to`, which repoints report routes without
+    spawning a successor, so there is no "Origin session id:" marker for
+    ship_graph to index. `forward_target()` consults this map first, so
+    anything already addressed to `old_sid` (a ticket submitter, a queue
+    subscription, a report route) follows the same forward a spawned
+    continuation gets for free."""
+    if not old_sid or not new_sid or old_sid == new_sid:
+        return
+    state = _load_manual_forwards(path)
+    state[old_sid] = {"to": new_sid, "at": time.time() if now is None else now}
+    _save_manual_forwards(state, path)
+
+
+def manual_forward_target(sid, path=None):
+    """Chain-resolved manual forward for `sid` (see `record_manual_forward`),
+    or `sid` unchanged if none was ever recorded."""
+    if not sid:
+        return sid
+    state = _load_manual_forwards(path)
+    seen = {sid}
+    current = sid
+    for _ in range(MAX_MANUAL_FORWARD_HOPS):
+        nxt = (state.get(current) or {}).get("to")
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        current = nxt
+    return current
+
+
+def manual_rebind(old_sid, new_sid):
+    """Manual counterpart to `rebind_chain_to()`: every member of `old_sid`'s
+    own continuation chain now manually forwards to `new_sid` too, the same
+    way rebind_chain_to() repoints every member's report routes."""
+    conn = _sg._get_connection()
+    members = _lineage.continuation_chain_members(conn, old_sid) or [old_sid]
+    for member in members:
+        record_manual_forward(member, new_sid)
 
 
 def session_context(query):
@@ -246,18 +323,21 @@ def decide_send_path(query, large_threshold=DEFAULT_LARGE_TOKENS,
 
 def forward_target(sid):
     """Delivery-time lineage forward (MEMO-FIX-lineage): once `sid` has a
-    recorded continuation successor, messages addressed to it -- a child's
-    report, a WatchTower ticket notice (they share this same inject-input
-    delivery path), a peer message -- land on the successor instead, with no
-    rewrite of whatever already has the old sid written down. Chains resolve
-    (A->B->C). Skipped while `sid` is still actively working its own turn: a
-    forward must never race a reply that is already in flight."""
+    recorded continuation successor -- or a manual rebind (`ccc
+    rebind-report-to`, see `manual_rebind()`) -- messages addressed to it --
+    a child's report, a WatchTower ticket notice (they share this same
+    inject-input delivery path), a peer message -- land on the successor
+    instead, with no rewrite of whatever already has the old sid written
+    down. Chains resolve (A->B->C), manual and spawned continuations compose
+    (a manual rebind followed by a later continuation spawn still resolves to
+    the newest member). Skipped while `sid` is still actively working its own
+    turn: a forward must never race a reply that is already in flight."""
     if not sid:
         return sid
     try:
         conn = _sg._get_connection()
         _sg._sync_all(conn, force=False)
-        target = _lineage.latest_successor(conn, sid)
+        target = _lineage.latest_successor(conn, manual_forward_target(sid))
     except Exception:
         return sid
     if not target or target == sid:

@@ -26861,6 +26861,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "session_id": sid,
                 "outstanding": _inject_receipts.outstanding(sid),
             })
+        elif re.match(r"^/api/session/[a-zA-Z0-9_-]+/forward-target$", path):
+            # MEMORY-5: read-only lookup so an external process (WatchTower,
+            # over its own HTTP delegate) can ask "does this sid currently
+            # forward elsewhere" without duplicating CCC's forward map --
+            # ccc_server/continuation.py stays the one source of truth.
+            sid = path.rsplit("/", 2)[-2]
+            from ccc_server import continuation as _continuation
+            forwarded = _continuation.forward_target(sid)
+            self.send_json({
+                "ok": True,
+                "session_id": sid,
+                "forwarded_to": forwarded if forwarded != sid else None,
+            })
         elif path == "/morning/kanban":
             try:
                 html = (MORNING_STATIC_DIR / "kanban.html").read_text()
@@ -35427,6 +35440,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 }, 400)
             else:
                 moved = _report_routes.rebind(new_to, **selectors)
+                # MEMORY-5: from_report_to names an old dispatcher wholesale
+                # (not one route/child), so it's also the "old sid -> new
+                # sid" a manual rebind means: record it as a manual forward
+                # too, the same forward a spawned continuation gets for free
+                # (rebind_chain_to), so tickets/subscriptions still addressed
+                # to the old sid follow along (see forward_target()).
+                if selectors.get("from_report_to"):
+                    from ccc_server import continuation as _continuation
+                    _continuation.manual_rebind(selectors["from_report_to"], new_to)
                 _log_activity(
                     "spawn", "REPORT_REBIND",
                     f"to={new_to} n={len(moved)} "

@@ -31,6 +31,13 @@ def routes_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def manual_forward_store(tmp_path, monkeypatch):
+    path = str(tmp_path / "manual-forwards.json")
+    monkeypatch.setattr(continuation, "_manual_forward_path", lambda: path)
+    return path
+
+
+@pytest.fixture(autouse=True)
 def lineage_conn(monkeypatch):
     conn = sqlite3.connect(":memory:")
     ship_graph._init_db(conn)
@@ -349,3 +356,52 @@ def test_forward_target_exception_falls_back_to_sid(monkeypatch):
         raise RuntimeError("db unavailable")
     monkeypatch.setattr(continuation._sg, "_get_connection", boom)
     assert continuation.forward_target("any-sid") == "any-sid"
+
+
+# -- manual forwards (MEMORY-5) ------------------------------------------------
+
+def test_manual_forward_target_no_record_is_unchanged():
+    assert continuation.manual_forward_target("solo") == "solo"
+
+
+def test_manual_forward_target_follows_recorded_forward():
+    continuation.record_manual_forward("old-sid", "new-sid")
+    assert continuation.manual_forward_target("old-sid") == "new-sid"
+
+
+def test_manual_forward_target_follows_multi_hop_chain():
+    continuation.record_manual_forward("a", "b")
+    continuation.record_manual_forward("b", "c")
+    assert continuation.manual_forward_target("a") == "c"
+
+
+def test_record_manual_forward_noop_for_empty_or_self():
+    continuation.record_manual_forward("", "new-sid")
+    continuation.record_manual_forward("old-sid", "")
+    continuation.record_manual_forward("same", "same")
+    assert continuation.manual_forward_target("old-sid") == "old-sid"
+    assert continuation.manual_forward_target("same") == "same"
+
+
+def test_manual_rebind_covers_every_chain_member(lineage_conn):
+    _insert_session_meta(lineage_conn, "a", start_ts=1.0)
+    _insert_session_meta(lineage_conn, "b", start_ts=2.0, continuation_origin="a")
+    continuation.manual_rebind("a", "new-dispatcher")
+    assert continuation.manual_forward_target("a") == "new-dispatcher"
+    assert continuation.manual_forward_target("b") == "new-dispatcher"
+
+
+def test_forward_target_honors_manual_forward(lineage_conn, monkeypatch):
+    _insert_session_meta(lineage_conn, "old-sid", start_ts=1.0)
+    monkeypatch.setattr(server, "_sessions_state_snapshot", lambda: {"old-sid": {"state": "idle"}})
+    continuation.record_manual_forward("old-sid", "new-sid")
+    assert continuation.forward_target("old-sid") == "new-sid"
+
+
+def test_forward_target_composes_manual_forward_with_later_continuation(lineage_conn, monkeypatch):
+    _insert_session_meta(lineage_conn, "old-sid", start_ts=1.0)
+    _insert_session_meta(lineage_conn, "rebound-sid", start_ts=2.0)
+    _insert_session_meta(lineage_conn, "continued-sid", start_ts=3.0, continuation_origin="rebound-sid")
+    monkeypatch.setattr(server, "_sessions_state_snapshot", lambda: {"old-sid": {"state": "idle"}})
+    continuation.record_manual_forward("old-sid", "rebound-sid")
+    assert continuation.forward_target("old-sid") == "continued-sid"

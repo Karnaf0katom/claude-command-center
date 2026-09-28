@@ -3,6 +3,7 @@
 import pytest
 
 import server
+from ccc_server import continuation
 from ccc_server import report_routes as rr
 
 
@@ -10,6 +11,13 @@ from ccc_server import report_routes as rr
 def store(tmp_path, monkeypatch):
     path = str(tmp_path / "report-routes.json")
     monkeypatch.setattr(rr, "_default_path", lambda: path)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def manual_forward_store(tmp_path, monkeypatch):
+    path = str(tmp_path / "manual-forwards.json")
+    monkeypatch.setattr(continuation, "_manual_forward_path", lambda: path)
     return path
 
 
@@ -144,6 +152,27 @@ def test_rebind_endpoint_and_inject_input_resolve_at_send_time(monkeypatch):
         _request(httpd, "/api/inject-input", {"session_id": rid, "text": "STATUS: SUCCEEDED"})
         _request(httpd, "/api/inject-input", {"session_id": "plain-sid-123", "text": "hi"})
         assert seen == ["dispatcher-new-sid", "plain-sid-123"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_rebind_endpoint_records_manual_forward_for_forward_target_endpoint():
+    """MEMORY-5: `from_report_to` names an old dispatcher wholesale, so the
+    rebind endpoint should also record it as a manual forward -- the
+    read-only forward-target endpoint (consulted by WatchTower) must then
+    report it."""
+    httpd, thread = _serve()
+    try:
+        status, body = _request(httpd, "/api/session/dispatcher-old-sid/forward-target")
+        assert status == 200 and body["forwarded_to"] is None
+        status, body = _request(httpd, "/api/report-routes/rebind", {
+            "report_to": "dispatcher-new-sid", "from_report_to": "dispatcher-old-sid",
+        })
+        assert status == 200
+        status, body = _request(httpd, "/api/session/dispatcher-old-sid/forward-target")
+        assert status == 200 and body["forwarded_to"] == "dispatcher-new-sid"
     finally:
         httpd.shutdown()
         httpd.server_close()

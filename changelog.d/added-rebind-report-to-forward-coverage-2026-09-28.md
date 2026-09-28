@@ -1,0 +1,1 @@
+- `ccc rebind-report-to NEW --from OLD` now also records a manual lineage forward (so OLD's tickets/queue subscriptions follow along, resolved via a new `GET /api/session/<sid>/forward-target`) and its summary reports open WatchTower tickets and queue subscriptions moved, not just report routes.
