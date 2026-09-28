@@ -91,6 +91,8 @@
   .chart-wrap { width: 100%; position: relative; }
   .chart-hit { fill: transparent; cursor: crosshair; }
   .chart-hit:hover, .chart-hit.pinned { fill: rgba(255,255,255,0.06); }
+  .bar-track.chart-hit { cursor: crosshair; }
+  .bar-track.chart-hit:hover, .bar-track.chart-hit.pinned { box-shadow: 0 0 0 1px var(--accent) inset; }
   #chartTip {
     position: fixed; z-index: 10; pointer-events: none; display: none;
     background: #1a2230; border: 1px solid var(--line); border-radius: 6px;
@@ -132,7 +134,7 @@
 
 <div class="tabs" role="tablist">
   <button class="tab active" data-tab="overview" role="tab" aria-selected="true">What these numbers mean</button>
-  <button class="tab" data-tab="opt-in" role="tab" aria-selected="false">Opt-in pings</button>
+  <button class="tab" data-tab="opt-in" role="tab" aria-selected="false">Opt-in pings <span class="pill">legacy</span></button>
   <button class="tab" data-tab="beacon" role="tab" aria-selected="false">Anonymous daily beacons</button>
   <button class="tab" data-tab="downloads" role="tab" aria-selected="false">Download clicks</button>
 </div>
@@ -220,6 +222,24 @@ function renderOverview(d) {
   const anonToday = openToday.boots ?? 0;
   const anonIpsToday = openToday.distinct_ips ?? 0;
 
+  // Weekly/monthly active installs, derived from the beacon's own
+  // first_this_week/first_this_month flags (schema 2, since 2026-09-28) —
+  // no install id needed. Older Worker deploys that predate migration 0003
+  // simply omit these totals; render "not yet available" instead of 0 so
+  // it doesn't read as "nobody used it this week."
+  const weeklyAnon = t.weekly_new_installs;
+  const weeklyAnonWithMe = t.weekly_new_installs_all;
+  const monthlyAnon = t.monthly_new_installs;
+  const monthlyAnonWithMe = t.monthly_new_installs_all;
+
+  // Coarse geo (country + first-level region), also since migration 0003.
+  // Small buckets are already folded into "other" server-side before this
+  // ever reaches the browser.
+  const countries = d.countries_7d;
+  const regions = d.regions_7d;
+  const usVsIntl = d.us_vs_intl_7d;
+  const geoAvailable = Array.isArray(countries) && Array.isArray(regions) && usVsIntl;
+
   // How far the fleet has rolled onto the daily-beacon build. Until this is
   // high, the anonymous daily number is still mostly measuring restarts.
   const v7 = d.versions_7d || [];
@@ -267,6 +287,28 @@ function renderOverview(d) {
       why: anonTrusted
         ? "Most of the fleet is on the daily beacon, so this is the closest thing to true daily usage."
         : `${rolloutPct}% of opt-in installs are on ${DAILY_BEACON_SINCE}+. Older builds beacon once per restart instead of once per day, which can add a few extra counts (restarts) or miss a long-running install. Those errors pull in opposite directions; the distinct-IP count (${anonIpsToday}) is a sanity check from below.`,
+    },
+    {
+      name: "Weekly active installs (anonymous)",
+      value: weeklyAnon ?? "not yet available",
+      withMe: weeklyAnonWithMe ?? "—",
+      kind: "best estimate",
+      what: "Distinct installs whose anonymous beacon first fired this ISO week. No install id — each install's own client marks itself once per week.",
+      trust: weeklyAnon === undefined ? "low" : "medium",
+      why: weeklyAnon === undefined
+        ? "The Worker hasn't picked up the migration that adds this yet. It fills in automatically once it does — no action needed here."
+        : "Counts installs, not events: an install that beacons every day this week still counts once.",
+    },
+    {
+      name: "Monthly active installs (anonymous)",
+      value: monthlyAnon ?? "not yet available",
+      withMe: monthlyAnonWithMe ?? "—",
+      kind: "best estimate",
+      what: "Distinct installs whose anonymous beacon first fired this UTC calendar month.",
+      trust: monthlyAnon === undefined ? "low" : "medium",
+      why: monthlyAnon === undefined
+        ? "Same as the weekly row: waiting on the Worker deploy, not a real zero."
+        : "Same one-count-per-install logic as the weekly row, over a calendar month.",
     },
     {
       name: "Ever opted in",
@@ -373,8 +415,76 @@ function renderOverview(d) {
         </ul>
       </div>
 
+      ${geoCard(countries, regions, usVsIntl, geoAvailable)}
+
       <div class="card wide muted">Updated ${escapeHtml(d.generated_at)}. Cached at the edge for 5 minutes.</div>
     </div>
+  `;
+}
+
+// "Where installs are" card. country/region come from Cloudflare's edge
+// geolocation, computed once per beacon and never from anything the client
+// sends — see docs/telemetry.md. Small buckets are already suppressed
+// server-side into an "other" row before this data leaves the Worker.
+function geoCard(countries, regions, usVsIntl, available) {
+  if (!available) {
+    return `
+      <div class="card wide">
+        <h2>Where installs are</h2>
+        <p class="muted">Not yet available — this fills in once the Worker picks up the 2026-09-28 geo migration. No action needed here.</p>
+      </div>
+    `;
+  }
+  const us = usVsIntl.us || 0;
+  const intl = usVsIntl.intl || 0;
+  const usIntlTotal = us + intl;
+  const usPct = usIntlTotal ? Math.round(100 * us / usIntlTotal) : 0;
+  return `
+    <div class="card wide">
+      <h2>Where installs are</h2>
+      <p class="muted">Last 7 days, by beacon. Country and region come from Cloudflare's edge geolocation for the request, never from the client — see <a href="https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md">telemetry.md</a>. Countries or regions with fewer than 3 beacons in the window are folded into "other" before this reaches the browser, so no single rare location is ever singled out.</p>
+      <div class="two-col">
+        <div>
+          <h3 style="margin:0 0 8px;font-size:14px;font-weight:600;">US vs. outside the US</h3>
+          <div class="bar-track chart-hit" style="width:100%;height:14px" data-day="US vs. outside the US" data-tip="${us} US · ${intl} outside the US (${usPct}% US)">
+            <div class="bar-fill" style="width:${usPct}%"></div>
+          </div>
+          <p class="stat-sub" style="margin-top:6px">${us} US · ${intl} outside the US</p>
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px;font-size:14px;font-weight:600;">Top countries</h3>
+          ${geoTable(countries, "country", "beacons")}
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px;font-size:14px;font-weight:600;">Top regions (state/province)</h3>
+          ${geoTable(regions, "region", "beacons")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function geoTable(rows, labelKey, countKey) {
+  if (!rows || !rows.length) return '<p class="muted">No data yet.</p>';
+  const max = Math.max(1, ...rows.map(r => r[countKey] || 0));
+  const total = rows.reduce((acc, r) => acc + (r[countKey] || 0), 0);
+  return `
+    <table>
+      <tbody>
+        ${rows.map(r => {
+          const raw = r[labelKey];
+          const label = raw === "other" ? "Other (small buckets)" : (raw || "(unknown)");
+          const count = r[countKey] || 0;
+          const pct = total ? Math.round(100 * count / total) : 0;
+          return `
+          <tr>
+            <td>${escapeHtml(label)}</td>
+            <td class="num">${count}</td>
+            <td><div class="bar-track chart-hit" style="width:80px" data-day="${escapeHtml(label)}" data-tip="${count} beacons (${pct}%)"><div class="bar-fill" style="width:${Math.round(100 * count / max)}%"></div></div></td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>
   `;
 }
 
@@ -393,10 +503,13 @@ function renderOptIn(d) {
   const approx30 = uniqueInstallsFromBuckets(pings.slice(0, 30));
   return `
     <p class="tab-intro">
-      Richer payload — install id, version, engines on PATH, last-active date, sessions in last 24h.
-      Fires once per UTC day, <strong>only after</strong> the user clicks <em>Enable</em> on the dashboard banner.
-      <code>CCC_TELEMETRY_DISABLED=1</code> kills it.
-      <br><strong>"Active today" is a floor</strong>: it only counts installs that opted in. The best daily-usage estimate is on the anonymous tab, which every install sends.
+      <strong>Legacy — retired 2026-09-28.</strong> No CCC build made after that date sends this ping;
+      the numbers below are frozen at whatever the fleet reported before then. The anonymous beacon
+      tab is now the primary daily/weekly/monthly usage estimate for every install, not just the ones
+      that opted in.
+      <br>Richer payload — install id, version, engines on PATH, last-active date, sessions in last 24h.
+      Fired once per UTC day, only after the user clicked <em>Enable</em> on the (now-removed) dashboard banner.
+      <br><strong>"Active today" is a floor</strong>: it only ever counted installs that opted in.
     </p>
     <div class="grid">
       <div class="card">
