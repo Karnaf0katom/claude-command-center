@@ -197,11 +197,13 @@ def test_snippet_and_match_text_are_capped(monkeypatch):
 
 
 def test_response_dict_match_text_is_capped(monkeypatch):
-    rows = [{"session_id": "1", "match": {"text": "m" * 900, "turn": 3}}]
+    # Real shape, from session_fts.section_matches() via memory_api.recall():
+    # {"section", "turn", "turn_end", "snippet"} -- "snippet", never "text".
+    rows = [{"session_id": "1", "match": {"snippet": "m" * 900, "turn": 3}}]
     _fake_self_api(monkeypatch, {"query": "x", "results": rows})
     payload, _ = fleet._federation_execute_route(_envelope("memory_recall", {"q": "x"}))
     row = payload["result"]["results"][0]
-    assert len(row["match"]["text"]) == fleet._MEMORY_MATCH_CAP
+    assert len(row["match"]["snippet"]) == fleet._MEMORY_MATCH_CAP
     assert row["match"]["turn"] == 3
 
 
@@ -218,6 +220,28 @@ def test_response_total_size_is_capped(monkeypatch):
     assert len(json.dumps(result).encode("utf-8")) <= fleet._MEMORY_RESPONSE_CAP_BYTES
     assert result["truncated"] is True
     assert len(result["results"]) < 30
+
+
+def test_memory_brief_oversize_lists_are_capped_generically(monkeypatch):
+    """memory_brief's own list fields (files_touched, commits, tickets, ...)
+    aren't named "results"/"evidence"/"history" -- the row/byte caps must
+    apply to every top-level list generically, or these ride through
+    uncapped past the spec's per-response bound (MEMORY-15)."""
+    fake_result = {
+        "found": True,
+        "session_id": "abc123",
+        "files_touched": [f"file{i}.py" for i in range(60)],
+        "commits": [{"sha": str(i), "subject": "x"} for i in range(60)],
+        "tickets": [{"ref": f"T-{i}"} for i in range(60)],
+    }
+    _fake_self_api(monkeypatch, fake_result)
+    payload, status = fleet._federation_execute_route(_envelope("memory_brief", {"q": "abc12345"}))
+    assert status == 200
+    result = payload["result"]
+    assert len(result["files_touched"]) == fleet._MEMORY_MAX_ROWS
+    assert len(result["commits"]) == fleet._MEMORY_MAX_ROWS
+    assert len(result["tickets"]) == fleet._MEMORY_MAX_ROWS
+    assert result["truncated"] is True
 
 
 def test_non_memory_action_response_is_not_capped(monkeypatch):
@@ -283,8 +307,11 @@ def test_wildcard_scope_is_unrestricted(monkeypatch):
 def test_peer_scope_allows_helper_matrix():
     allows = fleet._federation_peer_scope_allows
     assert allows(None, "spawn") is True
-    assert allows({}, "spawn") is True
-    assert allows({"scopes": []}, "spawn") is True
+    assert allows({}, "spawn") is True  # no "scopes" key at all: absent -> "*"
+    # An explicit but EMPTY scopes list is not the same as absent -- it means
+    # the peer was deliberately paired with zero capabilities.
+    assert allows({"scopes": []}, "spawn") is False
+    assert allows({"scopes": []}, "memory_recall") is False
     assert allows({"scopes": ["*"]}, "spawn") is True
     assert allows({"scopes": ["memory:read"]}, "memory_recall") is True
     assert allows({"scopes": ["memory:read"]}, "spawn") is False

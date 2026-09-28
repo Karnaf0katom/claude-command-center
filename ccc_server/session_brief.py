@@ -40,6 +40,28 @@ from _reorient_shared import INJECTED_PREFIXES, truncate as _truncate  # noqa: E
 
 LAST_REPLY_CHARS = 1500
 ASK_CHARS = 150
+# `brief()` is reachable from a paired peer (fleet.py's memory_brief route
+# action) with data sourced from a transcript-derived session_meta row --
+# tickets/commits/files counts aren't bounded upstream (a ref regex scan or
+# a very active session can produce a long list). Capping here protects two
+# things: the per-ref `tickets` table query in _ticket_info() and, more
+# importantly, the per-commit `git branch -r --contains` subprocess in
+# _commits_with_origin() -- with no cap, a crafted or just unusually large
+# commits dict would run that subprocess (10 s timeout each) once per entry,
+# on a request a peer can trigger. The multi-machine spec's own response
+# caps (fleet.py's _MEMORY_MAX_ROWS etc.) only trim the LIST AFTER these
+# calls already ran, so they don't bound the subprocess count on their own.
+_BRIEF_LIST_CAP = 50
+_LIKE_WILDCARD_RE = re.compile(r"([%_])")
+
+
+def _escape_like(s: str) -> str:
+    """Escape sqlite LIKE wildcards so a peer-supplied sid prefix is matched
+    literally, not as a pattern (a stray '%' or '_' in `q` would otherwise
+    widen the match far past the intended prefix)."""
+    return _LIKE_WILDCARD_RE.sub(r"\\\1", s)
+
+
 _SCRATCH_DIR_RE = re.compile(r"^/tmp/|/private/var/|/var/folders/", re.I)
 # Claude Code's own per-project auto-memory dir (~/.claude/projects/<repo>/
 # memory/*.md) -- bookkeeping the agent wrote about itself, not a work
@@ -198,6 +220,11 @@ def _commit_on_origin(repo_root: str, sha: str) -> bool | None:
 
 
 def _commits_with_origin(repo_root: str, commits: dict) -> list[dict]:
+    # Capped BEFORE the loop, not after building `out` -- each entry below
+    # runs its own `git branch --contains` subprocess (10 s timeout), so an
+    # uncapped commits dict is a per-request subprocess-count multiplier,
+    # not just an oversize list.
+    items = list(commits.items())[:_BRIEF_LIST_CAP]
     out = [
         {
             "sha": sha,
@@ -205,7 +232,7 @@ def _commits_with_origin(repo_root: str, commits: dict) -> list[dict]:
             "branch": info.get("branch", "") if isinstance(info, dict) else "",
             "on_origin": _commit_on_origin(repo_root, sha),
         }
-        for sha, info in commits.items()
+        for sha, info in items
     ]
     out.sort(key=lambda c: c["sha"])
     return out
@@ -250,10 +277,14 @@ def resolve_session(query: str) -> dict:
     if row:
         return {"session_id": row[0], "alternates": []}
 
-    if " " not in q and len(q) >= 4:
+    # >=8 chars (not 4): the spec's own contract for this arg is "sid prefix
+    # (>=8 chars)" (multi-machine spec section 4.1) -- a peer-reachable
+    # short prefix matches far too broadly. Wildcards are escaped so a
+    # literal '%'/'_' in `q` can't widen the match into a pattern scan.
+    if " " not in q and len(q) >= 8:
         rows = conn.execute(
-            "SELECT sid FROM session_meta WHERE sid LIKE ? ORDER BY start_ts DESC",
-            (q + "%",),
+            "SELECT sid FROM session_meta WHERE sid LIKE ? ESCAPE '\\' ORDER BY start_ts DESC",
+            (_escape_like(q) + "%",),
         ).fetchall()
         if rows:
             sids = [r[0] for r in rows]
@@ -301,12 +332,13 @@ def brief(query: str) -> dict:
         "engine": engine,
         "start_date": _date(meta.get("start_ts")),
         "end_date": _date(meta.get("end_ts")),
-        "tickets": _ticket_info(conn, meta.get("tickets") or []),
+        "tickets": _ticket_info(conn, (meta.get("tickets") or [])[:_BRIEF_LIST_CAP]),
         "last_user_asks": _last_user_asks(sdoc.get("prompts", "")),
         "last_assistant_reply": _last_reply(sdoc.get("report", "")),
-        "files_touched": meta.get("files") or [],
+        "files_touched": (meta.get("files") or [])[:_BRIEF_LIST_CAP],
         "commits": _commits_with_origin(repo_root, meta.get("commits") or {}),
-        "artifacts_outside_repos": _artifacts_outside_repos(meta.get("files") or [], roots),
+        "artifacts_outside_repos": _artifacts_outside_repos(
+            (meta.get("files") or [])[:_BRIEF_LIST_CAP], roots),
         "resume_command": _resume_command(engine, sid, meta.get("cwd", "")),
         "indexing": _sfts.is_indexing() or _sg.is_indexing(),
         "parent": lineage["parent"],

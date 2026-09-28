@@ -84,10 +84,16 @@ class TestSecurityBoundary(unittest.TestCase):
             ("GET", "/api/federation/v1/fleet-inventory", None),
             ("POST", "/api/federation/v1/route",
              {"action": "inject", "args": {}, "hops": 2, "req_id": "x"}),
+            # A memory_* route action is a strictly lower-authority read, not
+            # a special case -- it must be refused identically to any other
+            # action for an unpaired/wrong-secret caller (MEMORY-15).
+            ("POST", "/api/federation/v1/route",
+             {"action": "memory_recall", "args": {"q": "x"}, "hops": 2, "req_id": "y"}),
             ("POST", "/api/federation/v1/handoff/prepare",
              {"repo_identity": "x", "commit": "y"}),
             ("POST", "/api/federation/v1/handoff/import",
              {"manifest": {}, "files": {}}),
+            ("POST", "/api/federation/v1/group-chat/import", {}),
             ("POST", "/api/federation/v1/unpair", {}),
         ):
             status, payload = self.fleet.node_b.request(
@@ -95,6 +101,67 @@ class TestSecurityBoundary(unittest.TestCase):
             self.assertEqual(status, 403, f"{method} {path}: {payload}")
             self.assertEqual(payload.get("error"), "unpaired_peer",
                              f"{method} {path}: {payload}")
+
+    def test_memory_scoped_peer_blocked_from_non_route_peer_endpoints(self):
+        """A peer entry restricted to `scopes: ["memory:read"]` (spec section
+        5, "least privilege for new pairings") may reach only the four
+        memory_* route actions plus hello/health. Before MEMORY-15 that scope
+        was enforced only inside /v1/route's own per-action check -- every
+        other peer-facing endpoint (sessions/repo/fleet inventory, handoff,
+        group-chat import) never consulted it at all, so a memory:read-only
+        peer could still call them. Proven here end to end over the real
+        HTTP + auth path, on the actual serving node (node_b), not just via
+        a direct in-process call to the routing helper."""
+        peers_path = self.fleet.node_b.state_dir / "peers.json"
+        original = peers_path.read_text()
+        peers = json.loads(original)
+        for p in peers:
+            if p["node_id"] == self.fleet.node_a.node_id:
+                p["scopes"] = ["memory:read"]
+        peers_path.write_text(json.dumps(peers))
+        headers = self._auth_headers()
+        try:
+            for method, path, body in (
+                ("GET", "/api/federation/v1/sessions", None),
+                ("GET", "/api/federation/v1/repo-inventory?repo_path=/tmp", None),
+                ("GET", "/api/federation/v1/fleet-inventory", None),
+                ("POST", "/api/federation/v1/handoff/prepare",
+                 {"repo_identity": "x", "commit": "y"}),
+                ("POST", "/api/federation/v1/handoff/import",
+                 {"manifest": {}, "files": {}}),
+                ("POST", "/api/federation/v1/group-chat/import", {}),
+            ):
+                status, payload = self.fleet.node_b.request(
+                    method, path, body=body, headers=headers)
+                self.assertEqual(status, 403, f"{method} {path}: {payload}")
+                self.assertEqual(payload.get("error"), "scope_forbidden",
+                                 f"{method} {path}: {payload}")
+
+            # Still allowed for a memory:read-scoped peer: health, and any
+            # memory_* action via /v1/route.
+            status, payload = self.fleet.node_b.request(
+                "GET", "/api/federation/v1/health", headers=headers)
+            self.assertEqual(status, 200, payload)
+
+            status, payload = self.fleet.node_b.post(
+                "/api/federation/v1/route",
+                {"action": "memory_recall", "args": {"q": "anything"},
+                 "hops": 2, "req_id": "scoped-allowed"},
+                headers=headers)
+            self.assertEqual(status, 200, payload)
+
+            # But a non-memory route action is still refused through
+            # /v1/route itself too (the per-action check inside
+            # _federation_execute_route, exercised here over real HTTP).
+            status, payload = self.fleet.node_b.post(
+                "/api/federation/v1/route",
+                {"action": "group_chat_read", "args": {},
+                 "hops": 2, "req_id": "scoped-blocked"},
+                headers=headers, expect_error=True)
+            self.assertEqual(status, 403, payload)
+            self.assertEqual(payload.get("error"), "scope_forbidden")
+        finally:
+            peers_path.write_text(original)
 
     def test_import_cannot_escape_approved_roots(self):
         # Even a PAIRED peer cannot land a bundle outside the repo mapping /
