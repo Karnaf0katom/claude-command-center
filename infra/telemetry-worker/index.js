@@ -8,14 +8,21 @@
 //   4. Return 204 on success; never echo state back to the caller.
 //
 // Endpoints:
-//   POST /v1/ping  — opt-in daily ping with install_id (schema v1 or v2).
-//                    Five fields in v1, six in v2 (adds sessions_today).
+//   POST /v1/ping  — LEGACY. The opt-in daily ping was retired from the app
+//                    on 2026-09-28 (see docs/telemetry.md); this handler
+//                    stays so installs on older builds that still send it
+//                    don't 404. No new fields are planned for it.
 //   POST /v1/open  — anonymous open beacon, fires at most once per UTC day
-//                    per running install (was once per boot before
-//                    2026-08-12), not gated on opt-in. THREE FIELDS ONLY:
-//                    schema_version, version, platform. No install_id, no
-//                    identity. Rows therefore count install-days, and the
-//                    `opens` table mixes both eras before 2026-08-12.
+//                    per running install, not gated on opt-in. Schema v1 is
+//                    three fields (schema_version, version, platform); v2
+//                    adds two more local booleans (first_this_week,
+//                    first_this_month) computed client-side from nothing
+//                    but the install's own last-beacon date — still no
+//                    install_id, no identity. The Worker additionally
+//                    persists coarse edge-computed geo (ISO-2 country +
+//                    first-level region name only — never city, postal
+//                    code, lat/long, ASN, or the raw IP) read from
+//                    request.cf. Rows therefore count install-days.
 //   POST /v1/download — empty landing-page click event. The handler receives
 //                       no request object and binds three fixed/bounded values.
 //   GET  /v1/stats — aggregate counts only; never returns event rows.
@@ -98,14 +105,18 @@ function validatePing(body) {
   return null;
 }
 
-// Open beacon body — three required fields plus one optional `dev` flag.
-// No install_id, no identity, no engines list, no last_active_date. The
-// `dev` flag lets the maintainer's own installs exclude themselves from
-// the stats page counts; setting it doesn't reveal identity, just marks
-// the row as "not-a-real-user" for filtering.
+// Open beacon body. v1 is three required fields plus one optional `dev`
+// flag. v2 adds two required booleans — first_this_week, first_this_month —
+// computed by the client from nothing but its own last-beacon date, so they
+// carry no identity either. No install_id, no engines list, no
+// last_active_date in either version. The `dev` flag lets the maintainer's
+// own installs exclude themselves from the stats page counts; setting it
+// doesn't reveal identity, just marks the row as "not-a-real-user".
 function validateOpen(body) {
   if (!body || typeof body !== "object") return "body must be a JSON object";
-  if (body.schema_version !== 1) return "schema_version must be 1";
+  if (body.schema_version !== 1 && body.schema_version !== 2) {
+    return "schema_version must be 1 or 2";
+  }
   if (typeof body.version !== "string" || !SEMVER_RE.test(body.version)) {
     return "version must be semver";
   }
@@ -115,7 +126,31 @@ function validateOpen(body) {
   if (body.dev !== undefined && typeof body.dev !== "boolean") {
     return "dev must be a boolean if present";
   }
+  if (body.schema_version === 2) {
+    if (typeof body.first_this_week !== "boolean") {
+      return "first_this_week must be a boolean for schema_version 2";
+    }
+    if (typeof body.first_this_month !== "boolean") {
+      return "first_this_month must be a boolean for schema_version 2";
+    }
+  }
   return null;
+}
+
+// Coarse edge-computed geo from Cloudflare's `request.cf`. Bounded and
+// sanitized on both fields; anything that doesn't look like a plain code /
+// name is dropped rather than stored. NEVER read city, postalCode,
+// latitude, longitude, or asn off `cf` — those fields exist on the object
+// but this function must not touch them.
+const COUNTRY_RE = /^[A-Z]{2}$/;
+const REGION_RE = /^[A-Za-z0-9 .'-]{1,64}$/;
+function sanitizeGeo(cf) {
+  if (!cf || typeof cf !== "object") return { country: null, region: null };
+  let country = typeof cf.country === "string" ? cf.country.toUpperCase() : null;
+  if (!country || !COUNTRY_RE.test(country)) country = null;
+  let region = typeof cf.region === "string" ? cf.region.trim() : null;
+  if (!region || !REGION_RE.test(region)) region = null;
+  return { country, region };
 }
 
 async function handlePing(request, env) {
@@ -187,15 +222,24 @@ async function handleOpen(request, env) {
   try {
     ipHash = await hashIpForToday(ip, env);
   } catch (_) { /* best-effort — never block the insert on hash failure */ }
+  const { country, region } = sanitizeGeo(request.cf);
+  const v2 = body.schema_version === 2;
   try {
     await env.DB.prepare(
-      "INSERT INTO opens (received_at, version, platform, ip_hash, is_dev) VALUES (?, ?, ?, ?, ?)"
+      "INSERT INTO opens (received_at, version, platform, ip_hash, is_dev, first_this_week, first_this_month, country, region) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ).bind(
       new Date().toISOString(),
       body.version,
       body.platform,
       ipHash,
       body.dev === true ? 1 : 0,
+      // v1 rows store NULL — the flags didn't exist on that client, and we
+      // cannot reconstruct them after the fact.
+      v2 ? (body.first_this_week ? 1 : 0) : null,
+      v2 ? (body.first_this_month ? 1 : 0) : null,
+      country,
+      region,
     ).run();
   } catch (_) {
     return new Response("", { status: 500 });
@@ -216,6 +260,24 @@ async function handleDownload(env) {
     // Counting never exposes storage health or enters the download path.
   }
   return new Response(null, { status: 204 });
+}
+
+// Minimum-count suppression: any bucket with fewer than `minCount` beacons
+// is folded into a single "other" bucket instead of being returned by
+// name, so a country or state with exactly one beacon can never be read
+// off the public stats page as "this one person is here." Buckets already
+// come from a query with no NULLs and no per-row identity — this just
+// keeps small groups from being singled out.
+function suppressSmallBuckets(rows, key, countKey, minCount) {
+  const kept = [];
+  let otherCount = 0;
+  for (const r of rows) {
+    const n = r[countKey] || 0;
+    if (n >= minCount) kept.push(r);
+    else otherCount += n;
+  }
+  if (otherCount > 0) kept.push({ [key]: "other", [countKey]: otherCount });
+  return kept;
 }
 
 // Public read-only stats endpoint. Returns aggregates only — never
@@ -310,15 +372,54 @@ async function handleStats(_request, env) {
       "GROUP BY install_id ORDER BY last_seen DESC LIMIT 50"
     ).all()).results;
 
+    // Weekly/monthly active installs, derived from the beacon-v2
+    // first_this_week / first_this_month flags — each is true on exactly
+    // one beacon per install per period, so counting flagged rows in the
+    // matching window counts installs, not install-days, without ever
+    // storing an id. The 7-day window approximates the ISO week the client
+    // used to set the flag; the month match is exact (calendar month via
+    // strftime). v1 beacons (pre-2026-09-28) left these columns NULL and
+    // are correctly excluded.
+    const weeklyMonthly = await env.DB.prepare(
+      "SELECT " +
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= date('now','-6 days') AND ${NODEV}) AS weekly_new_installs, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= date('now','-6 days')) AS weekly_new_installs_all, " +
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now') AND ${NODEV}) AS monthly_new_installs, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now')) AS monthly_new_installs_all"
+    ).first();
+
+    // Coarse geography, last 7 days, dev rows excluded. Small buckets are
+    // rolled into "other" below so a single beacon from a rare country or
+    // state is never individually visible on the public page.
+    const countriesRaw = (await env.DB.prepare(
+      "SELECT country, COUNT(*) AS beacons FROM opens " +
+      `WHERE received_at >= date('now','-6 days') AND country IS NOT NULL AND ${NODEV} ` +
+      "GROUP BY country ORDER BY beacons DESC LIMIT 50"
+    ).all()).results;
+    const regionsRaw = (await env.DB.prepare(
+      "SELECT region, COUNT(*) AS beacons FROM opens " +
+      `WHERE received_at >= date('now','-6 days') AND region IS NOT NULL AND ${NODEV} ` +
+      "GROUP BY region ORDER BY beacons DESC LIMIT 25"
+    ).all()).results;
+    const usVsIntl = await env.DB.prepare(
+      "SELECT " +
+      "  SUM(CASE WHEN country = 'US' THEN 1 ELSE 0 END) AS us, " +
+      "  SUM(CASE WHEN country IS NOT NULL AND country != 'US' THEN 1 ELSE 0 END) AS intl " +
+      `FROM opens WHERE received_at >= date('now','-6 days') AND ${NODEV}`
+    ).first();
+
     const body = JSON.stringify({
       generated_at: new Date().toISOString(),
-      totals: { ...totals, ...activeWindows },
+      totals: { ...totals, ...activeWindows, ...weeklyMonthly },
       opens_by_day: opensByDay,
       pings_by_day: pingsByDay,
       downloads_by_day: downloadsByDay,
       versions,
       versions_7d: versions7d,
       platforms,
+      countries_7d: suppressSmallBuckets(countriesRaw, "country", "beacons", 3),
+      regions_7d: suppressSmallBuckets(regionsRaw, "region", "beacons", 3),
+      us_vs_intl_7d: { us: usVsIntl.us || 0, intl: usVsIntl.intl || 0 },
       sessions_today_per_install: sessionsToday.map(r => ({
         install_id_prefix: r.install_id.slice(0, 8),
         latest_sessions_today: r.latest_sessions_today,
