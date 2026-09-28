@@ -1,1 +1,0 @@
-- `ccc shipped <topic>` now reports how fresh its knowledge of `origin/<default>` is (e.g. `origin/main fetched 3 min ago`). A background thread keeps each active repo's origin ref warm via `git ls-remote`/`git fetch` on its own schedule (every 15 min if it had commit activity in the last 30 days, else daily) — the `is_shipped` request path itself never spawns those subprocesses.

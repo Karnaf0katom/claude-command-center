@@ -1,1 +1,0 @@
-Fixed a stale, non-launchd-managed worker process holding `worker.sock` and surviving a restart request, which left launchd's freshly kicked worker crash-looping "already running" — restart now verifies the known stale worker actually exited before trusting it, and kills and respawns it directly otherwise.

@@ -1,1 +1,0 @@
-- Keep open Hermes conversations updating by reading Hermes' active-session ownership ledger and polling its DB/WAL freshness instead of forcing every Hermes session into historical state.

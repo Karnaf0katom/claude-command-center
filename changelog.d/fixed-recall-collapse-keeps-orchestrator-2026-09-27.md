@@ -1,1 +1,0 @@
-- Search and `ccc recall` no longer hide a session behind a newer child it spawned: related sessions now collapse under the parent session (its latest continuation), not whichever child is newest.

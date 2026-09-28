@@ -1,1 +1,0 @@
-- In a very narrow conversation list (sidebar under 400px), rows drop the context-% badge and the last-activity time so titles get the room.

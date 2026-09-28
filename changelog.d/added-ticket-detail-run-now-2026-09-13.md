@@ -1,1 +1,0 @@
-- Added a Run now action to open WatchTower ticket details, with queued-run cancellation.

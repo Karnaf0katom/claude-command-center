@@ -7,6 +7,346 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.34.0] - 2026-09-28
+
+### Added
+- Annotate now works on installs without a CCC fix queue: instead of filing into a local queue nobody drains, the annotation editor offers **Report on GitHub**, which opens a pre-filled issue on the CCC repo (note, page, element, version, with home-directory paths scrubbed) and copies the annotation screenshot to the clipboard so one paste attaches it. Set `CCC_ANNOTATE_TARGET=queue|github` to override the detection.
+- Annotation toasts that report a missing macOS Accessibility or Screen Recording permission now include a button that opens the matching System Settings pane.
+- Added weekly/monthly install estimates and coarse geo to the anonymous
+open beacon (schema v2): it now carries `first_this_week` /
+`first_this_month` booleans computed locally from the install's own last
+beacon date, still with no identifier. The Worker persists a country code
+and first-level region name read from Cloudflare's edge geolocation
+(never city, postal code, lat/long, ASN, or raw IP). `/v1/stats` gains
+`weekly_active_installs` / `monthly_active_installs` (plus `_prev` and
+`_all` variants) bound to exact ISO-week and calendar-month boundaries, and
+`geo_week`, one ISO week of country/region breakdown counted per install
+(not per beacon) with buckets under 3 installs folded into `"other"`. The
+stats page's overview adds these counts and a "Where installs are" card.
+Maintainers can now self-exclude via `"dev": true` in `telemetry.json`, in
+addition to `CCC_TELEMETRY_DEV_MODE=1`.
+- Optional generic hook for a private "brain" plugin: `ccc brain <subcmd>` passes through to a configured plugin executable, and an opted-in repo's spawned sessions get the plugin's session-start index text prepended to the prompt. No-op with zero subprocess cost when no plugin is configured (see `ccc_server/brain_hook.py`).
+- Added Canvas annotations and separate-window navigation from the application rail.
+- Pipeline Canvas phase 2: the component library grows from 5 archetypes to 33 data-driven components in five color-coded categories (sources, workers, gates, sinks, utilities) — searchable, keyboard-navigable, each with a real-fleet "Pattern:" anchor in the inspector. Seven templates with mini-graph previews (Payment watchdog, PR gauntlet, Self-healing ops, Research→Spec→Build added). Fun pass: magnetic port snapping with valid/invalid feedback, connect sparks, pipeline-complete shimmer + chip, breathing live nodes, coach marks, ghost-graph empty state. All still read-only.
+- Pipeline Canvas: runtime source nodes — the real timers/crons that file tickets into queues now render as typed component instances (registry icon, color, Pattern, schedule, filing contract) with mint filing edges into their target queue. The list lives in a local untracked `canvas-sources.json` in the command-center state dir (mechanism ships, private queue names don't); entries pointing at nonexistent queues are skipped. Sources sit left of their queue and follow the 7-day activity filter of their target.
+- Added `ccc brief <session>` (and `GET /api/memory/brief/<session>`): "where did this session leave off and how do I resume it?" for one session id, id-prefix, or recall-style query — title, repo/engine/dates, WatchTower ticket(s) + status, last asks, last reply, commits made (and whether they're on origin), files touched, artifacts written outside any repo, and the exact resume command. The usage-limit "continue in a new session" handoff prompt now points at `ccc brief <origin-sid>` first, ahead of tailing the raw transcript.
+- Preview (Settings > Experimental > Claude re-authenticate): a **Re-authenticate** action on sessions and Fleet nodes that stopped with "Failed to authenticate" / "Not logged in". It runs `claude auth login` on that node (local or paired peer) in tmux, opens the sign-in page in your browser, takes the pasted code, verifies the login, and tells the stuck sessions to retry. See docs/claude-reauth.md.
+- Claude Task-tool subagents now appear in the session list as nested children
+of their parent session. The archive scan picks up
+`<session>/subagents/agent-*.jsonl` transcripts alongside top-level JSONLs,
+emits each as a row with `parent_session_id` set, and opens it through the
+existing `<parent>:agent-<id>` composite id — so clicking a child plays back
+its own transcript. Liveness comes from the transcript tail (tool_use in
+flight = live), matching the family-tree lane, and subagent files are folded
+into the corpus signature so new/changed/removed agents refresh through the
+normal incremental path.
+- Added a Codex PostCompact hook (parity with Claude Code's post-compact re-orientation block): after Codex compacts a session, it prints the claimed WatchTower ticket, the last few real asks, and a `ccc recall`/`ccc shipped` pointer. Wired into `~/.codex/hooks.json` automatically on dashboard start (needs a one-time trust approval in Codex).
+- Show a yellow warning triangle beside Coding sessions in Cozy view when an unfinished live turn has no recorded transcript or tool progress for five minutes. The tooltip explains the quiet period; completed turns and sessions waiting for input are excluded.
+- Added recently used engine, model, and effort quick picks to continuation launches.
+- Added `ccc spawn --continue-from <sid|prefix>` and `ccc send <sid> --new-if-large-and-stale`:
+resuming an old session reloads its whole transcript into context (a real
+case re-loaded 430k tokens to do a few merges), so these spawn a fresh
+session that continues from a short brief instead. `--continue-from`
+resolves to the session's latest continuation successor, reuses its
+cwd/engine/model/effort, and rebinds any children or WatchTower tickets
+still reporting to the old chain onto the new session.
+`--new-if-large-and-stale` sends normally unless the target is both large
+(context tokens, `--large-threshold`/`$CCC_LARGE_CONTEXT_TOKENS`, default
+150k) and stale (idle time, `--stale-seconds`/`$CCC_STALE_SECONDS`, default
+1h — the prompt-cache TTL); `--dry-run` previews the decision either way.
+Any message later addressed to an old session with a recorded continuation
+now automatically forwards to its latest successor at delivery time (child
+reports, WatchTower ticket notices, peer messages alike), following chains
+and skipping sessions still actively working their own turn.
+- Starting a New Session in a folder that does not exist now offers "Create folder & start", which creates it and launches the session there, instead of just failing. (CCC-1187)
+- Multi-machine memory (S6): spawning a session on a paired peer now records the child as a global ref (`<node>:<sid>`) in the dispatching node's own session graph too, so `ccc brief`/family-tree lookups against the local parent find the cross-node child (previously only the peer's own side of the edge existed). `ccc brief` also reports a session's spawn `children` and tags any parent/latest/ancestor/child ref that names a peer node in a new `nodes` field.
+- Added a "+ object" button to the Current sessions header: it creates an empty Flow object at the top of the by-objects Current sessions list (with inline rename) so sessions can be dragged straight into it.
+- Nightly decision extraction now scans session transcripts incrementally (mtime, size gated, same pattern as the ship-graph sync) for explicit user rulings ("we decided...", approved options) and stores them in `decisions.sqlite` beside `ship_graph.sqlite`. Exposed via `list_decisions()` and `GET /api/memory/decisions/extracted` for a future decisions UI, plus a report-only `GET /api/memory/decisions/audit` that flags `MEMORY.md` entries a newer decision may have made stale (never edits memory files). Runs as a daemon thread the server starts; no new launchd job.
+- **Decision Inbox triage**: open cards now split into "Needs your decision"
+(external / WatchTower / board) on top and a collapsed "Monitoring" section
+(governor / idle-session nudges) with a count badge; cards mentioning a
+dollar amount get a red money pill. Moment-in-time governor and idle-session
+cards auto-expire after a configurable TTL (`governor_card_ttl_s`, default
+12h) instead of piling up forever, and a recurring producer's new firing
+(source id ending in a date, e.g. the daily check-in) supersedes its previous
+open card instead of stacking.
+- Devin CLI sessions are now driven over `devin acp` — the same ACP transport Devin Desktop / Devin - Next use — instead of spawning a one-shot `devin --resume` process per message. Sends, steers (cancel + resend mid-turn), and `/compact` all go through the live connection, which attaches to any session in the shared session store (including `devin -p` and Desktop-created sessions) on first use. Authentication runs through the ACP `authenticate` handshake (`devin-browser`), and sessions locked by another ACP host (e.g. open in Devin Desktop) degrade cleanly to the existing durable queue.
+- Restart session now works for Devin CLI sessions, unsticking a message parked behind a dead or zombie lock file without touching a session another client (Devin Desktop, a `devin` TUI, another CCC instance) still has open.
+- Devin CLI conversation view now renders tool calls and results for `devincli-*` sessions (previously text-only), and on Fusion sessions each turn is tagged lead vs. sidekick — sidekick turns get an accent border + chip, the lead's `sidekick` handoffs render as tool rows, the `<lead_handoff>` brief collapses to a one-line card, and the sidekick's completion report lands as a "sidekick ▸ report" message. Long thinking blocks now clamp to a two-line teaser (click to expand), and fusion lanes use tighter spacing than prose turns.
+- Devin sessions now get a Steer button on sent user messages (matching Codex): while a turn runs on the shared `devin acp` connection, clicking Steer on any of your messages cancels the turn and resends it — the same live-steer path queued messages already had.
+- `ccc doctor` now reports memory-subsystem health: session index size, embeddings coverage, whether Ollama and its embedding model are reachable, embedding-model directory risk (unmounted share), ship-graph freshness, and decision-extraction last-run — so a silent semantic-search outage (e.g. an unmounted model directory) shows up instead of going unnoticed.
+- Settings > Engines: Automatic CLI updates now has an on/off switch. Off stops the hourly update pass; Update now still works.
+- Sessions from paired machines now appear in the conversation list under "Other machines", each with a machine chip (greyed when the peer is offline or stale). Click one to open that conversation embedded from the peer's own CCC, no new tab. A peer with no web address (or a Phone access PIN) shows why it can't be opened. `GET /api/sessions?federated=1` gains per-node `web_url` / `web_url_state` and a `peers_only` option.
+- Added a sidebar "+ Ticket" button: file a ticket into any queue without opening it first. The Queue picker lists your three most-used queues first (recency-weighted), then the rest A-Z.
+- Added Grok 4.7 as the default and top-listed model for the Grok engine (spawn defaults, model picker, orchestration executor/critic pools, Droid's Grok sub-model, and the OpenRouter BYOK catalog). Grok 4.6 and 4.5 remain selectable.
+- Added Hermes agent `state.db` `messages_fts` as a search channel in `session_fts`, so Hermes conversations now surface in cross-provider search (`/api/search-history` and the Ask tab) alongside Claude Code, Codex, Kimi, Gemini and Cursor sessions.
+- **Hermes systemd service units** (`systemd/ccc.service`, `systemd/ccc-worker.service`, and `systemd/install.sh`). Binds CCC persistently to port 8091 under `/etc/systemd/system/` following the `bym-dev.service` / `bym-digest-*` convention (`User=hermes`, memory limits, `KillMode=process`), documenting the port 8090 collision with the Hermes agent gateway and establishing durability for `bym-studio-digest`'s `DECISION_INBOX_URL`.
+- Instinct daily brief: `python3 -m ccc_server.instinct brief` writes a local HTML page covering what changed (commits, with the Hunch "why"), what's stuck (sessions, blocked tickets, stalled queues, unpushed commits), and what to do next, plus dry-run ticket proposals. `scripts/instinct-schedule.sh --install` runs it every morning. See `docs/instinct.md`.
+- History setup now offers, opt-in, to keep Claude Code conversations past its 30-day default (`cleanupPeriodDays` in `~/.claude/settings.json`) so older history stays searchable. It never lowers an existing value, writes atomically with a backup, and leaves a malformed settings file untouched. `GET /api/history/status` gains `transcript_retention_days`, and there is a new `POST /api/history/retention`.
+- `ccc brief` now shows `parent`/`latest` for spawn, report-to, and continuation
+chains; `ccc recall` and sidebar search collapse a continuation/spawn chain
+into its newest member with a `(+N earlier)` marker; the PostCompact
+re-orientation block now shows `Continued from: <origin session>` when a
+session resumed from an earlier one.
+- Activity log: each expanded event has a small copy button that copies its timestamp, category, verb and raw detail. The post-restart worker code check no longer shows up when the worker is current; when it is stale, it says so in plain words.
+- Paired peers can now query a node's memory over federation (`memory_recall`, `memory_shipped`, `memory_brief`, `memory_file_history`), scoped to `memory:read` peers, capped to 30 rows / 256KB, and local-only (no transitive fan-out).
+- Added `GET /api/memory/file-history` and `GET /api/memory/decisions`, plus `ccc history <path>` and `ccc decisions "<topic>"` CLI verbs, so an agent can ask "who touched this file and why" or "did we already decide this" without re-deriving history from scratch. The Ask tab now also pulls in `shipped`/`recall` context for "did we already ship X" questions.
+- Added `GET /api/memory/recall` and `GET /api/memory/shipped`, plus `ccc recall "<query>"` and `ccc shipped "<topic>"` CLI verbs, exposing the existing cross-session ship-graph search to any agent or script instead of only an offline benchmark.
+- New Session now compares model strengths, capabilities, context limits, and catalog prices before launch. Select models directly from the comparison and switch engines without losing the shared composer selection. Subscription billing and missing pricing are labeled explicitly.
+- Add Claude Opus 5.5 to model pickers, orchestration, pricing, and supported engine catalogs.
+- The "Original ask" panel and its in-conversation bubble now have a (+) button that opens the full ask in a large-font reading modal.
+- **Phone access** (Settings > Experimental, then Settings > Phone access…): put CCC on your Tailscale tailnet with one button (`tailscale serve`, on a free HTTPS port, never touching serve entries you made), get a QR code and copy button for your phone, and run a Test that does a real round trip and names the exact failure. The new address is trusted immediately, no restart, and `network.json` origins now apply live too. An optional PIN gates requests from off this machine; loopback stays open. The Fleet page shows each paired node's phone URL and sets it up remotely. See `docs/phone-access.md`.
+- Added the Pipeline Canvas (`/canvas.html`, rail: Canvas): an n8n-grade node graph over real WatchTower truth — every queue auto-placed with live health (drain state, claimable depth, workers, engine/model), convention edges (planner→executor with its filing label, sign-offs to the Decision Inbox gate), a design mode with a five-archetype component library, three pipeline templates with read-only materialization preview, minimap, undo/redo, and a persisted layout. Fully read-only: it never writes queue-config or touches wt.
+- Claude Code sessions now get a short re-orientation block right after a `/compact` — the WatchTower ticket ref/title the session is working (if any), its last 3 real asks, and a reminder that `ccc recall` / `ccc shipped` exist. `hooks/post-compact.py` builds it from the transcript Claude Code already wrote (no subprocess, no LLM call), bounded to a head+tail read so it stays fast regardless of transcript size. Codex has no equivalent compaction hook event today — noted in `skills/memory-recall.md`.
+- Pre-spawn "already shipped?" check: `/api/sessions/spawn` now runs a capped (1.5s), WARN-only lookup against git/ticket history and, at confidence ≥ 0.8, prepends a heads-up line to the spawned prompt and adds an `already_shipped` field to the response so the UI can surface it. Never delays or blocks the spawn. Disable with `CCC_DISABLE_SHIPPED_CHECK=1`.
+- q2 Queues: new Duplicate button next to a queue's settings gear opens the settings dialog as a new queue pre-filled from that queue (name blank and required; the membership label is not copied, and auto-drain starts off). Also: a queue label of `*` makes a GitHub queue the repo's catch-all (owns every issue no other queue claims; one per repo, enforced on save).
+- q2 Queues: queues backed by the GitHub `TODO` repo are now pinned to the top of the queue list, above a divider that separates them from every other queue.
+- q2 Queues: GitHub-backed tickets now show the issue's GitHub labels — as read-only chips in the ticket details header and as chips on each ticket row, where they yield (and ellipsize) when the row is out of room. WatchTower-internal `watchtower:*` labels are filtered out.
+- Queue settings (main manager and Q2) gain a "Revert to CCC default worker if current model is exhausted" toggle, wired to WatchTower's `fallback_to_default_worker` queue key — on retries a failed engine/model launch on the CCC default worker for that launch only; off parks the queue with a visible reason.
+- Queue settings (Q2 dialog and the main-UI Queue manager): new "Queue label" field for GitHub queues — the label that marks an issue as belonging to the queue when 2+ queues share a repo (`wt config --queue-label`). Blank keeps the default `watchtower:<QUEUE>`; callers that don't send the field leave the saved label untouched.
+- `ccc rebind-report-to NEW --from OLD` now also records a manual lineage forward (so OLD's tickets/queue subscriptions follow along, resolved via a new `GET /api/session/<sid>/forward-target`) and its summary reports open WatchTower tickets and queue subscriptions moved, not just report routes.
+- Spawned sessions' `--report-to` return address can now be rebound mid-run: the child's footer addresses a route id that CCC resolves to the current dispatcher at delivery time. Rebind with `ccc rebind-report-to NEW --from OLD` (all children) or `--child CHILD`, or `POST /api/report-routes/rebind`; list routes with `GET /api/report-routes`. Children spawned before this keep reporting to their original session.
+- Managed installs (the clone at `~/.ccc/claude-command-center`) now follow releases instead of `main`: launching, restarting and the "Update available" pill fast-forward to the newest `vX.Y.Z` tag, never downgrading or resetting. Dev clones and symlinked installs keep tracking `origin/main`; override with `CCC_UPDATE_CHANNEL=release|main`. Managed installs also auto-update hourly to a new release when CCC is idle (no running turns, queue items or WatchTower workers, no activity for 10 minutes), using the same session-safe handoff as Restart; opt out with `CCC_AUTO_UPDATE=0`; `/api/version/check` gains an `update_channel` field.
+- CCC now harvests transcripts out of ephemeral WatchTower worker sandboxes (`/tmp/ccc-local-*`) before they're wiped, indexing them from `~/.claude/command-center/harvested/` so queue-worker sessions stay searchable.
+- Added `ccc_server.session_fts` providing incremental session-level SQLite FTS5 search across Claude Code and Codex transcripts with BM25 ranking and query term sanitization.
+- Session search now fuses in local Ollama embeddings (`nomic-embed-text`, RRF-fused with FTS5) when a local Ollama daemon is running with the model pulled; degrades silently to the existing FTS-only ranking otherwise. Embeddings are built incrementally by the same (mtime, size) cache as the FTS index.
+- Added a Session Waste panel to the Throughput page: pick a session and press Analyze waste to see its score, what the money went to, and which fixes would have saved how much (uses the optional agent-throughput `throughput analyze`; shows the install command when it is missing).
+- Added `ccc_server.ship_graph` providing a commit, ticket, and session graph that answers "did we ship X?" queries with high precision and augments session retrieval.
+- `ccc shipped <topic>` now reports how fresh its knowledge of `origin/<default>` is (e.g. `origin/main fetched 3 min ago`). A background thread keeps each active repo's origin ref warm via `git ls-remote`/`git fetch` on its own schedule (every 15 min if it had commit activity in the last 30 days, else daily) — the `is_shipped` request path itself never spawns those subprocesses.
+- `ccc shipped <topic>` now gives a richer verdict than SHIPPED/NOT SHIPPED: `PUSHED, NOT MERGED` (evidence commit is on a pushed branch but not the default branch), `COMMITTED ON <node>, NOT PUSHED` (exists only on this machine's disk), or `NOT FOUND on reachable nodes (<node>; ...)`. When the local clone's fetched view of `origin/<default>` is stale, the top candidate commit is verified with one quota-gated, cached `gh api .../compare/...` call instead of trusting a possibly-outdated local view.
+- Added a button next to the pane pop-out button that moves the current conversation into a right-hand split pane and loads the next conversation from the sidebar into the main pane, for triaging sessions one by one without losing the previous one from view.
+- Throughput CLI: `summary`, `runrate` and `breakeven` now show what you actually pay — REAL $/MTok (your plan fee ÷ tokens) and LIST:REAL (list-price cost ÷ fee) — with fees accruing daily from each plan's `--since`/`--until` dates. `summary` can slice by model with `--split-model` / `--model` (list price only; the fee is per engine).
+- Throughput usage database: `scripts/throughput ingest` reads Claude Code, Codex and Kimi session stores (read-only) into a local SQLite DB with one row per session — fresh/cached/cache-write/output tokens, model, message counts, timestamps — plus per-call usage events, a versioned price table and cost views (`summary`, `runrate`, `breakeven`). Unknown prices stay unknown instead of counting as free. See `docs/usage-db.md`.
+- Added a Run now action to open WatchTower ticket details, with queued-run cancellation.
+- Ask (Mazkir) keeps one warm agent process between questions, so answers start in about 2 s instead of 5 s. Sources now show as session chips that are always visible, and Mazkir can propose starting a session, steering a session, or filing and commenting on a WatchTower ticket. Nothing runs until you click Confirm on the card. It can also read the Instinct daily brief and a repo's recorded Hunch decisions.
+- Added `ccc where <session|query>` and a "Where?" button on any session row
+with a brief: one cached, read-only headless Sonnet call summarizes a
+session's whole lineage chain (plus any runbook it referenced) into a
+plain-language status, a checklist of what a human still needs to do with
+deep links, and a "Continue" button that spawns a session seeded with the
+next step.
+- The "Where are we?" button now also appears in the open session's header (next to the title), on hover for search-result rows (including sessions found only via history/semantic search), and in the session's overflow menu — not just in a live row's hover meta line.
+
+### Changed
+- ACP adapter: clamp client-supplied `new_session` cwd to `$HOME` by default (opt out with `CCC_ACP_ALLOW_OUTSIDE_HOME=1`). The path is resolved with `realpath` first, so a symlink inside `$HOME` pointing outside it can't slip past the check. The adapter's reported version now tracks `server.py` instead of a hardcoded string. The experimental ACP adapter spawns Claude with `--dangerously-skip-permissions` in client-supplied paths; see SECURITY.md for the risk surface.
+- The conversation background color picker at the bottom of the status rail is now always visible instead of requiring Debug mode.
+- `ccc recall` output is easier to scan: numbered results, short ids, bold titles, a dim repo/date line, one snippet per result fitted to the terminal width, and CCC's own "Heads-up: may already be shipped" preamble stripped.
+- The new-session model comparison table is collapsed by default behind a one-line "Model: … · price" summary.
+- "Continue in a new session" handoff prompts now point at `ccc recall` / `ccc shipped` instead of Total Recall, and warn against byte-cutting the transcript.
+- **Decision Inbox**: governor finding kinds listed in the new
+`governor_muted_sources` config key never file cards (the owner muted
+`context_high` — "no action to take with a near-full context"); muted
+findings are counted as `skipped_muted` in the run record. Cards now show
+ticket-ref pills (BECKY-1371, SITE-VS-ZIPPER-8, …) extracted from title /
+context / source id; refs whose WatchTower queue is GitHub-backed (per the
+local watchtower queue config) link straight to the GitHub issue. The
+"Dismiss" button is now "Close" and removes the card from the open list
+immediately instead of leaving it grayed in place.
+- Devin sessions now spawn through `devin acp` `session/new` — the same call Devin Desktop uses — so the `devincli-` id arrives in-band (no more pid-only placeholder cards), the session is attached for steer/compact from its first turn, and spawning no longer depends on `devin -p`'s interactive-login gate. The one-shot CLI spawn remains as fallback, with a longer early-failure window so `Not logged in` / `Unknown model` deaths surface as errors instead of dead sessions. The Devin model catalog now persists to disk so the picker survives a lapsed CLI login.
+- Devin queued sends now drain over the shared `devin acp` conn — previously a session attached via ACP looked like a "foreign owner" to the durable-queue pump (its own conn holds the session lock), so queued messages never landed. Session status pills now report `Devin ACP` / `Devin ACP · working` instead of the misleading `headless` label when the ACP transport is the delivery path.
+- Sends to a devincli session that is open in another Devin client (Devin Desktop / Next, a `devin` TUI, or a sibling CCC) now explain the hold instead of showing a generic "Queued" — the session lock is single-writer by protocol, and the queue drains automatically when the other client releases it.
+- Settings > Engines is now a status hub: every engine shows whether it is installed, signed in and how much usage is left, with a switch that hides an engine from every engine picker. Each ready engine has one-click Sessions and Workers default buttons on its row. Open a row for the next setup step (install or sign in through a terminal, copyable commands, Verify setup). The new-session and worker defaults moved here from Sessions & Spawning, which is now called Subscription data, and Engines sits right after Layout & View. Status refreshes on its own.
+- An embedded conversation from another machine now uses the same background color as its sidebar row.
+- Switching between conversations from **Other machines** is faster: each machine's embedded view stays loaded and switches conversations in place instead of reloading the whole app. It accepts that request only from trusted CCC dashboards (loopback, tailnet addresses, or its own tailnet).
+- Sessions from other machines now have their own background color, pickable from a swatch in the "Other machines" header, and the section can be collapsed.
+- Activity log inject rows now lead with the message text (`→ "…"`) and say who sent it and to which session (`From Dashboard composer → to 1a2b3c4d`), instead of a generic "Message injection requested". (CCC-1189)
+- Kimi: the `kimi-code/kimi-for-coding` picker entry is now labeled "K2.8 Preview" — Moonshot upgraded the alias in place on 2026-09-11 (same model ID, effort ladder low/high/max read from Kimi's config.toml as before). Highspeed remains K2.7 Code HighSpeed.
+- Activity log: Codex app-server timeouts, held messages and session recoveries now say what happened in plain words (for example "Codex app-server did not start within 10s" and "Message waiting: session is from before the last CCC restart") instead of raw log codes.
+- Activity log: rows that mention a session now show its name (the sidebar title, shortened) instead of a bare id, and model-switch restart requests read in plain words ("CCC asked to restart a session to apply a model switch", "Restart request dismissed; …").
+- Mazkir answers now lead with bold topic labels and use small, muted inline session chips; sessions cited inline are no longer repeated at the bottom (the other candidates sit behind a collapsed "N other candidates" line). A short trace above each answer lists the searches and tools Mazkir used. Source labels drop CCC's injected "Heads-up: this may already be shipped" preamble and prefer CCC's session titles, evaluation runs are hidden unless you ask about evals, repeated runs of one worker loop are merged, and the pinned quick-prompt strip no longer overlaps the answer when scrolled.
+- In a very narrow conversation list (sidebar under 400px), rows drop the context-% badge and the last-activity time so titles get the room.
+- Split view: the per-pane annotate icon now shows in each pane header (was debug-only) and annotations anchor to the clicked pane's session id. Hidden in single-pane mode.
+- Peer reports from child sessions (STATUS/SUMMARY/FILES) now render with section breaks, one paragraph per numbered item or "Needs ...:" callout, and one file per line.
+- Queue panel and board: switching queues paints instantly from the list already in memory, and the polled ticket list is about half the size (`/api/queue/list?slim=1` trims closed-ticket prose; full text loads when a ticket is opened).
+- Sidebar rows stay quiet on hover until selected: no session-id/lineage overlay, trash, menu, rename pencil, or drag grip on unselected rows, so the whole row is a clean click target.
+- Restart now picks up new code: the Restart and Restart all buttons fast-forward CCC to the latest `main` before restarting (skipped when offline, off `main`, or when local work is in the way; opt out with `CCC_RESTART_PULL=0`). The in-app update now only fast-forwards instead of hard-resetting, so it can no longer drop local commits.
+- The public website now records cookieless pageviews and download-button clicks (PostHog, Do Not Track honored, no replay or autocapture) so we can see which links bring visitors; documented in `docs/telemetry.md` under "Website analytics". The installed app is unaffected.
+- A worker running older code is now restarted only when it is idle. If it has active, queued or uncertain work, the restart is deferred and retried on the hourly maintenance tick, so an unrelated source edit no longer cuts off a running turn.
+- Stats page: the daily-users headline now leads with the anonymous daily beacon count as the best estimate (opt-in shown as a floor), and every chart shows the exact per-day number on hover or tap.
+- Extend quiet unfinished-turn warning triangles to Cozy and Detailed in Coding and Workers, and to Active when Wrap or Details is enabled.
+- "Attach as sub-session" is now drag-and-drop: drag a session row onto another session row to nest it (whole-row highlight, backlog/issue cards rejected, circular links refused). The link-icon button and its picker are gone; the "Detach from parent session" button is unchanged.
+- Settings > Experimental now names the status-bar pill's flag "token-sitter toggle" (was "Auto handover toggle"), so the hidden token-sitter pill can be found by name.
+- The sidebar "Search…" box now runs on the same index as `ccc recall` (BM25 + local-Ollama semantic fusion, 45-day window) instead of merging three separate search stacks: `/api/search-history` and `/api/search-recall-sessions` are both served straight from `session_fts`, and its ingestion now covers Kimi Code, Gemini CLI, and Cursor sessions in addition to Claude Code and Codex. URLs and response shapes are unchanged. Paraphrased queries (e.g. "why was the app so slow after rebooting") now surface relevant sessions across all five harnesses; keystrokes stay O(1) against the corpus (no reparse, no subprocess spawn), verified against the real ~2.8k-session corpus and covered by new call-count regression tests.
+
+### Removed
+- Instinct brief and the Mazkir agent no longer read Hunch decision graphs (Hunch support removed).
+- Removed the opt-in daily telemetry ping and its consent banner: the
+dashboard no longer shows an "enable telemetry" bar or onboarding
+checkbox, `POST /v1/ping` is no longer sent by this build, and no new
+`install_id` is ever generated. The active-seconds accounting behind the
+old heartbeat is gone. `/api/telemetry/opt-in` and
+`/api/telemetry/heartbeat` stay as inert no-op stubs (they're public API,
+and a dashboard tab left open from before the upgrade keeps calling the
+heartbeat every 30s until it reloads) instead of 404ing.
+`/api/telemetry/status` stays as public API and now reports
+`retired: true`. Existing `install-id` / `telemetry.json` files on disk
+are left untouched, never deleted. The stats page keeps a legacy "Opt-in
+pings" tab showing data from before the retirement.
+- Removed the Total Recall and Token Optimizer integrations: sidebar session
+search no longer shells out to a third-party CLI (it already had its own
+in-process scanner in `ccc_server/recent_search.py`, now the only path), the
+"TR" history badge and Token Optimizer quality-score badges/pills are gone,
+the Kimi-to-Total-Recall bridge script and module are removed, and the
+Total Recall / Token Optimizer dashboard launchers are gone from Settings.
+`/api/session/<sid>/token-sitter-checkpoint` keeps working but now always
+reports no checkpoint instead of reading that tool's files. Use `ccc recall`
+for cross-session search instead.
+
+### Fixed
+- Fixed Devin (and any ACP agent sending a whole command line) running shell commands without a shell: `terminal/create` shlex-split `wt ls | jq` or `a && b > f` into argv, so `|`, `&&` and `>` reached the first program as literal arguments. Command lines that are not already a `bash -lc …` invocation now run under `/bin/bash -lc`.
+- The sidebar's ⋮ view-options menu now fits inside the sidebar and opens upward near the bottom of the list, so every grouping and density option is reachable.
+- Sidebar session toolbar no longer wraps into 4 rows on narrow sidebars — grouping and density controls fold into a ⋮ overflow menu below a 600px sidebar-width breakpoint, keeping the toolbar to one row.
+- Ask no longer ships maintainer-specific defaults: claude-index is found via `CLAUDE_INDEX_BIN` or `PATH` (without it, Ask searches with CCC's built-in session search), and the daily check-in tool only appears when `CCC_DAILY_CHECKIN_FILE` is set or `~/.claude/command-center/daily-checkin.md` exists. The spawn-ledger default moved to `~/.claude/command-center/spawn-ledger.jsonl` (override with `SPAWN_LEDGER_PATH`).
+- Ask now says plainly when Claude Code is installed but not signed in, instead of showing the CLI's raw "Not logged in" line as an answer. The Daily check-in prompt chip only appears where a check-in agenda is configured.
+- The Spawn Ledger rail app only appears when a spawn ledger file exists.
+- Fixed `ccc brief` showing `ticket: XYZ-1 [?]` for refs that were never a real WatchTower ticket -- a bare regex scan of transcript text picked up a doc's own internal numbering (e.g. an "ADS-1, ADS-2, ..." backlog) as if it were a ticket ref. Refs whose project prefix doesn't match any project WatchTower has synced are now dropped instead of shown with an unresolved status.
+- `run.sh` now links the `ccc` CLI onto `PATH` (`~/.local/bin/ccc`) itself, shared with `scripts/install.sh` via `scripts/link-ccc-cli.sh`. Previously only the curl installer did this, so a plain `git clone` + `./run.sh` never got the `ccc` command.
+- Fixed `ccc shipped` returning a flat NOT SHIPPED when the local clone it searched is behind its remote: it now fetches (short timeout, cached) and notes "local clone N commits behind origin; result may be stale" instead.
+- The activity log now reports a Codex app-server that crashes at startup as a crash, with its stderr, instead of waiting 10s and reporting a timeout.
+- Fix duplicate Codex replies and action rows during live-to-saved handoff, discard delayed updates after switching sessions, and clear obsolete live content. Improve conversation spacing, attachment chips, readable metadata, and keyboard access to tool details.
+- Fixed ghost duplicate turns with a bare "Lundefined" meta row appearing under Codex conversations for sessions parked on a token/subscription limit: the live overlay can keep serving an already-finished turn's items after the transcript rendered, and each poll pass re-inserted them. The renderer now drops overlay items for a turn the rollout has already recorded a result for (and sweeps copies a previous pass inserted), an empty overlay snapshot clears stranded provisional rows, and provisional meta rows no longer render a literal "Lundefined" line tag.
+- Prevented active Codex conversation refreshes from accumulating empty action rows, hiding injected or queued messages, or flickering the live Thinking status.
+- Sidebar: Codex auto-review sessions nest as slim child rows under the session they review instead of showing as bold top-level rows, and collapsing a project also hides its grouped repeat rows.
+- Fixed the composer speaker button in split view reading pane 1's last message even when pane 2 was focused; it now reads the active pane (same behavior as the other TTS controls).
+- **Continue-in-new-session launch picker** now respects the Setup > Engines
+on/off switches: engines switched off no longer appear in the "Launches on"
+dropdown, in the quick-pick history chips, or as the default engine for the
+route. An engine the picker is already showing stays listed until changed.
+- Let failed continuation spawns recover by entering an explicit repository path before retrying.
+- Cost details in the status rail now open only with an explicit toggle, rather than on hover.
+- Restarting only the dashboard now also refreshes a stale worker and waits for it before the dashboard starts, so "restart the worker first" is no longer required. The in-app update path also detects worker code drift by content hash, not just version.
+- The WATCHTOWER ERRORS strip now surfaces dead notify messages: when a needs-input or status notice can never reach the session that filed it (dead outbox message), the strip shows "Needs your input: <REF> — the session that filed it is gone" until acknowledged, instead of the notice dying silently as a DEADMSG line in activity.log.
+- Fixed Devin sessions silently failing to attach when CCC was launched from a Devin Desktop terminal: `devin acp` children inherited a stale `WINDSURF_EXT_HOST_PID` and self-terminated seconds into sign-in, so sends queued forever and every retry popped another browser auth tab. The env marker is now scrubbed, concurrent sign-ins share one browser flow, and queued sends explain "sign-in in progress" instead of looking stuck.
+- Fixed Devin sessions parking forever on tool permission prompts after a `devin acp` restart: pending `session/request_permission` requests now surface in the open pane's Needs-approval strip (with the option buttons) and on kanban rows, and CCC re-asserts the session's configured mode after `session/load` instead of silently dropping back to accept-edits.
+- Fixed the missing Steer button on Devin CLI sessions: `devin_acp_ready` now reports whether the experimental `devin acp` steer path is attemptable (opt-in on, `devin` binary resolvable) instead of whether a connection is already attached — the old check could never turn true, so Steer never appeared. The first steer attaches the ACP connection lazily and still falls back to the durable queue if the attach fails.
+- Devin `/compact` card no longer spins "Compacting context" forever: it lands on "done" when a new Devin context summary appears, or on "Compaction not confirmed" once the ACP turn goes idle without one. A `/compact` sent while Devin is busy now queues instead of erroring. (CCC-1188)
+- Orchestration map no longer shows a finished Devin lane as "working": a Devin session stays live while CCC's shared ACP connection can steer it, so the map now reads its ACP turn state (new `acp_status` field on `/api/sessions/live-activity`).
+- Devin sessions no longer get stuck with messages parked as "external owner" after CCC's own `devin acp` child exits; the dead (zombie) process is now reaped instead of counted as a live owner.
+- Fixed empty-object detection in the Current sessions by-objects view: an object that owns only repos or legacy-keyed sessions is no longer labeled "Empty - drag sessions here."
+- Fixed the multi-node session list (`/api/sessions?federated=1`) returning an empty reply when session timestamps mixed epoch and ISO formats.
+- Fixed the Other machines section flickering and closing its color picker every time the session list refreshed; the picker now offers the conversation-background palette.
+- Fixed clicking a local session after viewing another machine's conversation starting a rename instead of opening it.
+- A fresh install's New Session composer now suggests the git repos in your home folder and conventional workspace folders (~/Apps, ~/projects, ~/code, ~/src, ~/dev, ~/Developer, ...), most recently active first, instead of only the server's launch folder. Set CCC_WORKSPACE_ROOTS to point it elsewhere. First-run model chips fit one row, a blank model reads "Claude default" rather than "Default", and a blank Claude default no longer silently selects the priciest model in the composer.
+- Force-restart and stuck-input auto-recovery now find Claude sessions the worker spawned after the dashboard booted, instead of reporting "no live CCC-owned Claude process" and parking messages forever.
+- `ccc recall` now searches the whole of long sessions, not just their first and last ~30k characters: long transcripts are indexed in sections (about 50 turns each, split at compactions), task and plan text (TaskCreate, TodoWrite, Codex plans) is searchable, and each hit shows the best-matching turn and snippet. The index rebuilds once in the background after upgrading.
+- `ccc history <path>` works for any absolute path, including files outside a repo (e.g. `~/dev/scratch/...`), and lists sessions that read the file as well as those that wrote it.
+- **Grok sessions render as real conversations.** `updates.jsonl` is now
+replayed the way Grok Build's own TUI does: tool calls merge with their
+updates into one row (with command/file detail, status, and decoded
+output — no more raw byte arrays or JSON envelopes), hook executions only
+surface failures, plans collapse into cards, and retries / turn ends /
+image drops become compact system rows instead of protocol noise. The
+session list shows real titles, model, branch, and edit/commit signals,
+and the usage panel reads `usage.json` (tokens, context window, cost).
+- Opening a Hermes conversation no longer scans every session row in the
+  profile's database just to resolve its parent/child lineage — it now
+  walks the chain with one targeted lookup per hop, so open time stops
+  growing with total Hermes session count.
+- Keep open Hermes conversations updating by reading Hermes' active-session ownership ledger and polling its DB/WAL freshness instead of forcing every Hermes session into historical state.
+- Conversation history search now sanitizes free-text natural language queries before executing SQLite FTS5 MATCH, stripping punctuation, quotes, hyphens, and stopwords to prevent FTS5 syntax errors, and automatically falls back to BM25-ranked OR retrieval when AND results are sparse.
+- Sessions spawned by a dashboard that was started from inside a Claude session no longer inherit that session's id and messaging socket.
+- Fixed a silent failure mode where a composer message accepted into the
+  terminal queue could be retried or dropped forever with zero log output —
+  the retry loop now logs a throttled hold line on every outcome, matching
+  every other queue-hold reason.
+- Added a durable per-session inject delivery receipt, exposed via
+  `GET /api/session/<sid>/inject-receipt`, so it's possible to prove whether
+  a queued message ever reached a session instead of inferring it from
+  interaction timestamps.
+- Fixed session names being briefly reset while an inline rename was saving.
+- Sending to a session whose folder can't be used (for example a scheduled run started at the filesystem root) now fails with a clear "Session cwd is gone" error instead of showing "Queued" and silently dropping the message a few seconds later.
+- is_shipped no longer answers "shipped" for a question whose most distinctive word appears nowhere in the corpus, or when a linked ticket merely shares a phrase with a lookalike commit (false "already shipped" warnings at spawn time).
+- Fixed `is_shipped` false positives on four question shapes: answers now require
+the question's rarest distinctive terms to appear in the evidence commit, each
+clause of multi-part questions ("X that also does Y") must be covered, "X
+instead of Y" no longer matches commits that shipped "Y instead of X", and a
+question naming a repo falls back to grepping that repo's pre-window git
+history (cached) when the index has no qualifying commit.
+- Improved is_shipped evidence precision with repo-named preference, multi-term matching requirements, core noun phrase coverage, product word lookalike trap penalization, and calibrated confidence scoring.
+- Fixed kap-routed Kimi sessions showing a bare "Working…" forever: the live-status KAP branch now stamps the wire-tail contract the ACP branch already had — the dangling tool name (so the indicator reads e.g. "▶ Agent") and the stale-mid-turn fields, so a session whose wire goes silent past the stale threshold flips from "Working…" to the stuck card with a Wake-up action instead of spinning indefinitely.
+- `./run.sh --install-service` on Linux now stops the existing systemd units before checking the port, matching the macOS launchd path. Previously, re-running it (e.g. to repair a missing worker unit) always failed with "port already in use" once the service was installed once.
+- Mazkir source chips now show the same session names as the sidebar (your rename, the session's custom or AI title, then CCC's auto-title) instead of the raw first prompt, and the "other candidates" caret turns when expanded.
+- Annotate is now an item in the phone actions menu (⋮), and the annotation overlay no longer lets touch drags scroll the page.
+- The model name in the composer status strip is visible again on phones and narrow panes; lower-priority pills (token totals, cost, context) drop out first as intended.
+- Mobile conversation-list swipes now visibly confirm the lifecycle action and cannot open the swiped conversation.
+- New-session suggestions now survive an immediate first click, offer installed engines’ configured defaults before model history exists, refresh cached picks when reopened, prefer recent/ranked folders, and label unranked folders neutrally.
+- Fixed the dashboard failing to load after the Claude Opus 5.5 model entries landed in the wrong lists (a JavaScript syntax error in `static/app.js`).
+- Fixed a stale, non-launchd-managed worker process holding `worker.sock` and surviving a restart request, which left launchd's freshly kicked worker crash-looping "already running" — restart now verifies the known stale worker actually exited before trusting it, and kills and respawns it directly otherwise.
+- The "This session stopped before finishing" banner no longer flickers every few seconds while the conversation is open.
+- **Conversation pane header asks readable in full.** The session title
+(original ask) and latest-user-message spans in the pane header ellipsize
+when long; hovering now shows the complete text in a tooltip, and clicking
+either span (or pressing Enter/Space when focused) toggles it expanded so
+the whole string wraps inline. The topbar breadcrumb title also gets the
+hover tooltip.
+- Perf-ticket filer no longer files a per-kind slow-open ticket for a lone 3x-threshold sample recorded under gross machine saturation (load1 >= 8 per core); it rolls into the machine-saturated alert instead.
+- Perf telemetry: `archive_load`/`conv_open` samples recorded in the first 5
+minutes after a server restart are now flagged `warmup` and excluded from
+breach-pattern ticket filing — post-boot first paints ride startup
+contention and were self-filing spurious "[perf] slow archive load" tickets.
+Also, a transiently broken `watchtower` checkout (e.g. mid-merge conflict
+markers raising SyntaxError) no longer kills the `--archive-refresh-worker`
+subprocess at import; the optional `watchtower.workers`/`watchtower.config`
+imports degrade instead.
+- Perf telemetry: `archive_load`/`conv_open` no longer count time the page was
+suspended without a lifecycle event — an occluded window (another Space),
+a frozen renderer, or system sleep can stop all JS for minutes while
+`document.hidden` stays false and no `visibilitychange`/`freeze` fires
+(the 143s "cold" archive_load that refiled a "[perf] slow archive load"
+ticket after CCC-1169). A 2s heartbeat now flags any beat-to-beat gap over
+15s as an inactive segment, and `_perfActiveElapsed` merges overlapping
+segments so a heartbeat gap + hidden span recorded at the same wake can't
+double-count.
+- Keep queue settings connected to WatchTower's persistent data directory after removing and reinstalling CCC or WatchTower, including automatic migration from older installations.
+- Conversation popout windows no longer report false slow "archive load" perf samples; the popout has no visible sidebar, so its archive clock no longer runs.
+- Pop-out conversation windows show the model name and workspace row right away instead of after about 20 seconds or a first click.
+- The post-compaction re-orientation block no longer lists queue notifications or peer-session messages as "last asks".
+- q2 Queues: a GitHub queue with a custom `queue_label` (`wt config --queue-label`) no longer shows that membership label as a chip; the ticket's effective `watchtower_label` is treated as queue plumbing like `watchtower:*`.
+- q2 Queues: the reconciler activity log now fills the tickets column all the way to its bottom edge instead of floating at a fixed 28% (which left dead space below it, or clipped it when the sections above grew). Dragging the resize handle still pins an exact pixel height, and double-click/Home resets back to fill.
+- Queue settings: saving from the q2 dialog no longer resets a queue's desired workers to 1 (the dialog posted `desired_workers`, the server read only `workers`; 0 = parked is preserved), turns its product gate off, or drops its grace period. The dialog now carries product gate and grace through, and the server applies grace only when sent.
+- Readable text in the queue worker-config alert banner (dim muted text was near-invisible on dark themes).
+- Queue tab: the WatchTower errors strip and the queue-health list now have default height caps (they scroll), so the ticket list keeps most of the pane.
+- A rejected Steer on a queued Codex/ACP message now leaves the reason on the card ("Not delivered: …") until the next attempt, instead of only a brief toast.
+- Read-aloud from a message's speaker button or the Done footer highlights the spoken word again.
+- Fixed `ccc recall` / `/api/memory/recall` blocking for up to a minute on a cold index (full transcript corpus re-parsed inline on the request thread); a cold or large catch-up now warms in a background thread and the call returns immediately with an `indexing: true` flag instead.
+- Fixed `/api/memory/recall` blocking up to ~10-20s after a restart while Ollama loaded the local embeddings model into memory — document embedding triggered by sync now runs on a background thread instead of the request thread, and the per-query embed used for ranking is capped to a short timeout so a cold model degrades that one call to FTS-only instead of blocking.
+- Search and `ccc recall` no longer hide a session behind a newer child it spawned: related sessions now collapse under the parent session (its latest continuation), not whichever child is newest.
+- Image and PDF path links in a conversation now open in your browser (streamed from the CCC server) instead of trying to open them on the host, so they work when CCC runs on a remote VM.
+- Messages to a live session no longer sit on "sending..." for minutes after a dashboard or worker restart, and the healthy session is no longer killed and resumed to deliver them. A dashboard started from inside a CCC-spawned session inherited the worker's marker variable, ran engines itself, and lost its children on the next restart; the dashboard now clears that marker, spawned sessions no longer inherit it, and a lost child is re-adopted through its existing input channel before recovery is considered.
+- The dashboard no longer shuts itself down during an in-place restart (Settings restart or in-app update) when run from the Mac app.
+- Fix sessions indexed while the local Ollama daemon was down (eg. its model
+  cache living on an external drive) never getting semantic embeddings: those
+  jobs are now queued and a background backfill catches up any session
+  missing one.
+- `is_shipped()` evidence precision: keyword lookalikes from unrelated features no longer win top-1 (a question that names a place like "X in Flow" now requires the commit to mention that place; short questions require every distinguishing term). Hidden-directory mirror clones are no longer indexed as repos and stale repos are pruned, so evidence reports the canonical repo; among identical-subject rebased duplicates the commit on main wins. Confidence is capped at 0.85 when distinguishing-term coverage or the named place is weak.
+- Fixed ship graph topic stemming and evidence matching with Porter stemmer, irregular verb handling, and open ticket override logic.
+- `ccc shipped` now finds commits that are on GitHub but not yet pulled into your local clone; a clone that was behind used to report them as NOT FOUND.
+- Sidebar: "by project", expand/collapse-all and dragging a session onto another project or object now repaint right away. Before, the choice was saved but the list didn't change while the New Session pane was open or the pointer was over a row.
+- Split view: opening New Session in the right pane now shows its folder picker, recent-folder chips and model strip in that pane, instead of splitting them across both panes. (CCC-1189)
+- In split view the right pane now shows its session's repo path and branch above the input, like the left pane.
+- Submit+ (phone mode) and Send-queue buttons now work in the second pane of split view.
+- New Session no longer fails with "Spawn failed: invalid cwd: path does not exist" after a reinstall or a deleted repo. The folder picker used to restore the last folder from browser storage without checking it; it now drops a folder that no longer exists and falls back to one that does, and a spawn that fails for that reason clears it so the retry works.
+- Fixed queue ticket-detail dialogs crashing when determining whether to show Run now.
+- Dashboard no longer hangs on "Loading conversations..." after the + Ticket queue picker landed: its code had been spliced into the wrong functions, threw on page load, and never showed the Queue select.
+- Ticket detail's Session link now resolves even after the claiming worker has exited: the server keeps a durable worker_id→session map (`~/.claude/command-center/wt-worker-session-map.json`, recorded while each worker is live) and the detail view falls back to it plus the 24h past-worker scan — covering devin workers whose session id never reaches `claimed_session_id` or `workers.json`.
+- Auto-clear stale WatchTower activity errors and combine identical current failures across queues.
+- Made WatchTower ticket references in inline Codex responses clickable.
+- **Windows 11 compatibility fixes**. Added `fcntl.py` cross-platform compatibility shim so modules importing `fcntl` load cleanly on Windows; guarded `socket.AF_UNIX` checks in `ccc_server/watchtower_msg.py` and `ccc_peer_uds.py`; configured `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8` in `run.ps1`; and detached Codex `app-server` via `DETACHED_PROCESS` on Windows to prevent console-control broadcast SIGINT from terminating the CCC server.
+- Prevent duplicate activity-log rows for worker-owned Claude FIFO injections.
+- Fixed Workers lane rows stuck on "starting…" forever: a WatchTower worker's pending row now also matches its session via the durable worker→session map and devin's canonical devincli-<slug> conversation id, so it retires the moment the session lands (CCC-1180).
+- Workers lane: working-now rows now carry a hover-revealed "open in CCC" button that jumps straight to the session a worker is running in, even when the ticket's `claimed_session_id` hasn't been backfilled yet — the ticket detail's Session link falls back to the live worker roster too. Workers with no CCC session (e.g. bare `kimi -p` runs) correctly show no button.
+- The Workers lane's WORKING NOW strip no longer lists the same worker twice when the registry holds two records for one worker id.
+- Removed the redundant shared-clone chip from ordinary repository workspace context.
+- Watchtower activity log (main panel and q2 log bar): reconciler bursts now render as one summary line — an idle evaluation's IDLE_CANDIDATE + IDLE_SIGNAL×N + IDLE_DECISION collapses to "worker idle <age> ≥ floor <f> → DECISION · reasons", and a GC sweep's GC_RELEASED lines merge similarly. Raw lines stay reachable behind a per-burst "N lines" toggle.
+- Watchtower activity log (main panel and q2 log bar): periodic refreshes no longer wipe an in-progress text selection. Rows are patched in place via append-aware DOM diffing (WtLogBursts.patchList) instead of rebuilding innerHTML, so unchanged rows keep their nodes — and selections inside them — across refresh cycles.
+
+### Security
+- CCC now asks before writing into your agent config. Its Claude Code hooks (`~/.claude/settings.json`), Codex hook (`~/.codex/hooks.json`), bundled skills (`~/.claude/skills`, `~/.codex/skills`) and WatchTower's skill sync used to be installed silently on every start; now the dashboard shows each change with its exact diff (Approve / Skip), `ccc consent` does the same headless, and **Settings > Maintenance > Agent config access** removes everything CCC installed. Your formatting and other entries are kept, symlinks are followed, and each file is backed up first. Existing installs keep working and are listed once with Keep / Remove. `CCC_SKIP_SKILL_INSTALL=1` still turns skill installs off.
+- A spawn that opts a deny-listed model in with `confirm_blocked_model` (e.g. `ccc spawn --model gpt-6-astra --confirm-blocked-model`) now has the `astra-guardrail` skill's full text prepended to its prompt automatically, instead of depending on the model choosing to load the skill on its own. Also adds `scripts/astra-check <session-id>`, a one-line cost/behavior check (live or finished session) for any Codex session.
+- A peer paired with the least-privilege `memory:read` scope (multi-machine memory federation) could previously still reach every other peer-facing endpoint — session/repo/fleet inventory, handoff prepare/import, group-chat import — because scope was enforced only inside `/v1/route`'s own dispatcher, not on those endpoints directly. Scope is now checked on every peer-facing endpoint. An explicit but empty `scopes: []` on a peer entry now means zero capabilities, not unrestricted access (only an absent `scopes` key still means unrestricted, for back-compat). `memory_brief`'s response cap now bounds every list field it returns (files touched, commits, tickets, ...), not just the three field names the cap originally hardcoded, and a session with an unusually large commit list can no longer trigger an unbounded number of `git branch --contains` subprocess calls per request. Session-id prefix lookups (`ccc brief`) now require at least 8 characters and escape SQL `LIKE` wildcards.
+- `ccc doctor` and the dashboard's setup-banner healthcheck now flag model-policy deny-list drift: a missing or unparseable `model-policy.json`, or any engine's ambient default model (Codex's `~/.codex/config.toml`, CCC's `spawn-defaults.json`) sitting on the deny-list — neither of which the runtime spawn gate can see on its own. The server also logs loudly when the policy file goes missing instead of silently treating it as "nothing blocked".
+- Server and worker now set umask 077 at startup so state files, logs and transcript backups are created owner-only.
+
 ## [5.33.0] - 2026-09-13
 
 ### Added
@@ -3198,7 +3538,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.33.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.34.0...HEAD
+[5.34.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.34.0
 [5.33.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.33.0
 [5.32.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.32.0
 [5.31.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.31.0

@@ -1,1 +1,0 @@
-- The conversation background color picker at the bottom of the status rail is now always visible instead of requiring Debug mode.

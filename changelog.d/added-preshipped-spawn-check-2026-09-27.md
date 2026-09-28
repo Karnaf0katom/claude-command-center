@@ -1,1 +1,0 @@
-Pre-spawn "already shipped?" check: `/api/sessions/spawn` now runs a capped (1.5s), WARN-only lookup against git/ticket history and, at confidence ≥ 0.8, prepends a heads-up line to the spawned prompt and adds an `already_shipped` field to the response so the UI can surface it. Never delays or blocks the spawn. Disable with `CCC_DISABLE_SHIPPED_CHECK=1`.

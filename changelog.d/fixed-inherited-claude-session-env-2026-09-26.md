@@ -1,1 +1,0 @@
-- Sessions spawned by a dashboard that was started from inside a Claude session no longer inherit that session's id and messaging socket.

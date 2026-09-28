@@ -1,1 +1,0 @@
-- The "This session stopped before finishing" banner no longer flickers every few seconds while the conversation is open.

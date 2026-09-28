@@ -1,1 +1,0 @@
-- Queue settings (Q2 dialog and the main-UI Queue manager): new "Queue label" field for GitHub queues — the label that marks an issue as belonging to the queue when 2+ queues share a repo (`wt config --queue-label`). Blank keeps the default `watchtower:<QUEUE>`; callers that don't send the field leave the saved label untouched.

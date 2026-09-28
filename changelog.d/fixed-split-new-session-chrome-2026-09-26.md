@@ -1,1 +1,0 @@
-- Split view: opening New Session in the right pane now shows its folder picker, recent-folder chips and model strip in that pane, instead of splitting them across both panes. (CCC-1189)

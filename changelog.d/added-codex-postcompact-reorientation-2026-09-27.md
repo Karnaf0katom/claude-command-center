@@ -1,1 +1,0 @@
-Added a Codex PostCompact hook (parity with Claude Code's post-compact re-orientation block): after Codex compacts a session, it prints the claimed WatchTower ticket, the last few real asks, and a `ccc recall`/`ccc shipped` pointer. Wired into `~/.codex/hooks.json` automatically on dashboard start (needs a one-time trust approval in Codex).

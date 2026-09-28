@@ -1,1 +1,0 @@
-- Stats page: the daily-users headline now leads with the anonymous daily beacon count as the best estimate (opt-in shown as a floor), and every chart shows the exact per-day number on hover or tap.

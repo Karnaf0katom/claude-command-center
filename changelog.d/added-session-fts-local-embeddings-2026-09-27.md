@@ -1,1 +1,0 @@
-Session search now fuses in local Ollama embeddings (`nomic-embed-text`, RRF-fused with FTS5) when a local Ollama daemon is running with the model pulled; degrades silently to the existing FTS-only ranking otherwise. Embeddings are built incrementally by the same (mtime, size) cache as the FTS index.

@@ -1,1 +1,0 @@
-- Conversation history search now sanitizes free-text natural language queries before executing SQLite FTS5 MATCH, stripping punctuation, quotes, hyphens, and stopwords to prevent FTS5 syntax errors, and automatically falls back to BM25-ranked OR retrieval when AND results are sparse.

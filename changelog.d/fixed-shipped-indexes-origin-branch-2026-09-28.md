@@ -1,1 +1,0 @@
-- `ccc shipped` now finds commits that are on GitHub but not yet pulled into your local clone; a clone that was behind used to report them as NOT FOUND.

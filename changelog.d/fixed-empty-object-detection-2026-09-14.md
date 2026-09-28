@@ -1,1 +1,0 @@
-- Fixed empty-object detection in the Current sessions by-objects view: an object that owns only repos or legacy-keyed sessions is no longer labeled "Empty - drag sessions here."

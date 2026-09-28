@@ -1,1 +1,0 @@
-- Sidebar: Codex auto-review sessions nest as slim child rows under the session they review instead of showing as bold top-level rows, and collapsing a project also hides its grouped repeat rows.

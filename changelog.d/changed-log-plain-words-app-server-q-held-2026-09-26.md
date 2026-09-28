@@ -1,1 +1,0 @@
-Activity log: Codex app-server timeouts, held messages and session recoveries now say what happened in plain words (for example "Codex app-server did not start within 10s" and "Message waiting: session is from before the last CCC restart") instead of raw log codes.

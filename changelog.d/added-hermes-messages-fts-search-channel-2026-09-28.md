@@ -1,1 +1,0 @@
-- Added Hermes agent `state.db` `messages_fts` as a search channel in `session_fts`, so Hermes conversations now surface in cross-provider search (`/api/search-history` and the Ask tab) alongside Claude Code, Codex, Kimi, Gemini and Cursor sessions.

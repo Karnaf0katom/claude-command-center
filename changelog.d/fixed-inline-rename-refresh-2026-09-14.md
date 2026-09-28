@@ -1,1 +1,0 @@
-- Fixed session names being briefly reset while an inline rename was saving.

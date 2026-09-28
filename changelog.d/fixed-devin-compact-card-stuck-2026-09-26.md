@@ -1,1 +1,0 @@
-- Devin `/compact` card no longer spins "Compacting context" forever: it lands on "done" when a new Devin context summary appears, or on "Compaction not confirmed" once the ACP turn goes idle without one. A `/compact` sent while Devin is busy now queues instead of erroring. (CCC-1188)

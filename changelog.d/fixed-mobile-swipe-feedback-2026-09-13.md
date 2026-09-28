@@ -1,1 +1,0 @@
-- Mobile conversation-list swipes now visibly confirm the lifecycle action and cannot open the swiped conversation.

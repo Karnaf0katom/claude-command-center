@@ -1,1 +1,0 @@
-Optional generic hook for a private "brain" plugin: `ccc brain <subcmd>` passes through to a configured plugin executable, and an opted-in repo's spawned sessions get the plugin's session-start index text prepended to the prompt. No-op with zero subprocess cost when no plugin is configured (see `ccc_server/brain_hook.py`).

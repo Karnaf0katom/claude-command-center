@@ -1,1 +1,0 @@
-Fixed `ccc shipped` returning a flat NOT SHIPPED when the local clone it searched is behind its remote: it now fetches (short timeout, cached) and notes "local clone N commits behind origin; result may be stale" instead.

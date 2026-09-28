@@ -1,1 +1,0 @@
-- Starting a New Session in a folder that does not exist now offers "Create folder & start", which creates it and launches the session there, instead of just failing. (CCC-1187)

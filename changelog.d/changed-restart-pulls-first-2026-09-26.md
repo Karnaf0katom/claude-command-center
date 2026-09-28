@@ -1,1 +1,0 @@
-Restart now picks up new code: the Restart and Restart all buttons fast-forward CCC to the latest `main` before restarting (skipped when offline, off `main`, or when local work is in the way; opt out with `CCC_RESTART_PULL=0`). The in-app update now only fast-forwards instead of hard-resetting, so it can no longer drop local commits.

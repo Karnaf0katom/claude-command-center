@@ -1,1 +1,0 @@
-- Made WatchTower ticket references in inline Codex responses clickable.

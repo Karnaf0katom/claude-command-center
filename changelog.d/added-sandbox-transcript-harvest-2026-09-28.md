@@ -1,1 +1,0 @@
-- CCC now harvests transcripts out of ephemeral WatchTower worker sandboxes (`/tmp/ccc-local-*`) before they're wiped, indexing them from `~/.claude/command-center/harvested/` so queue-worker sessions stay searchable.

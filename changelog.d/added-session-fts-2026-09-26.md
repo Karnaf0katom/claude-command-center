@@ -1,1 +1,0 @@
-- Added `ccc_server.session_fts` providing incremental session-level SQLite FTS5 search across Claude Code and Codex transcripts with BM25 ranking and query term sanitization.

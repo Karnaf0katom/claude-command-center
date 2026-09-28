@@ -1,1 +1,0 @@
-Fixed `ccc brief` showing `ticket: XYZ-1 [?]` for refs that were never a real WatchTower ticket -- a bare regex scan of transcript text picked up a doc's own internal numbering (e.g. an "ADS-1, ADS-2, ..." backlog) as if it were a ticket ref. Refs whose project prefix doesn't match any project WatchTower has synced are now dropped instead of shown with an unresolved status.

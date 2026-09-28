@@ -1,2 +1,0 @@
-- `ccc recall` now searches the whole of long sessions, not just their first and last ~30k characters: long transcripts are indexed in sections (about 50 turns each, split at compactions), task and plan text (TaskCreate, TodoWrite, Codex plans) is searchable, and each hit shows the best-matching turn and snippet. The index rebuilds once in the background after upgrading.
-- `ccc history <path>` works for any absolute path, including files outside a repo (e.g. `~/dev/scratch/...`), and lists sessions that read the file as well as those that wrote it.

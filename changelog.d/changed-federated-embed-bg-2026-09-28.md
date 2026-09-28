@@ -1,1 +1,0 @@
-- An embedded conversation from another machine now uses the same background color as its sidebar row.

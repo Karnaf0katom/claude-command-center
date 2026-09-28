@@ -1,1 +1,0 @@
-- Cost details in the status rail now open only with an explicit toggle, rather than on hover.

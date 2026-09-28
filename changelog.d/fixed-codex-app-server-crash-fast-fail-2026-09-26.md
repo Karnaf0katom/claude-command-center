@@ -1,1 +1,0 @@
-- The activity log now reports a Codex app-server that crashes at startup as a crash, with its stderr, instead of waiting 10s and reporting a timeout.

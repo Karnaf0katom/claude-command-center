@@ -1,1 +1,0 @@
-- is_shipped no longer answers "shipped" for a question whose most distinctive word appears nowhere in the corpus, or when a linked ticket merely shares a phrase with a lookalike commit (false "already shipped" warnings at spawn time).

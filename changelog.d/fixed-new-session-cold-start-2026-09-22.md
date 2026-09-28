@@ -1,1 +1,0 @@
-New-session suggestions now survive an immediate first click, offer installed engines’ configured defaults before model history exists, refresh cached picks when reopened, prefer recent/ranked folders, and label unranked folders neutrally.

@@ -1,1 +1,0 @@
-- Switching between conversations from **Other machines** is faster: each machine's embedded view stays loaded and switches conversations in place instead of reloading the whole app. It accepts that request only from trusted CCC dashboards (loopback, tailnet addresses, or its own tailnet).

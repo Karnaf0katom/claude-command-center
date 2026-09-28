@@ -1,1 +1,0 @@
-- Fixed ship graph topic stemming and evidence matching with Porter stemmer, irregular verb handling, and open ticket override logic.

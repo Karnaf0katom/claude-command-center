@@ -1,1 +1,0 @@
-Fixed `/api/memory/recall` blocking up to ~10-20s after a restart while Ollama loaded the local embeddings model into memory — document embedding triggered by sync now runs on a background thread instead of the request thread, and the per-query embed used for ranking is capped to a short timeout so a cold model degrades that one call to FTS-only instead of blocking.

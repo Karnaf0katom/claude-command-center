@@ -1,1 +1,0 @@
-Added `GET /api/memory/recall` and `GET /api/memory/shipped`, plus `ccc recall "<query>"` and `ccc shipped "<topic>"` CLI verbs, exposing the existing cross-session ship-graph search to any agent or script instead of only an offline benchmark.

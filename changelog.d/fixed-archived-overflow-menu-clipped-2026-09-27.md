@@ -1,1 +1,0 @@
-- The sidebar's ⋮ view-options menu now fits inside the sidebar and opens upward near the bottom of the list, so every grouping and density option is reachable.

@@ -1,1 +1,0 @@
-- The new-session model comparison table is collapsed by default behind a one-line "Model: … · price" summary.

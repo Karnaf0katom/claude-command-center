@@ -1,1 +1,0 @@
-- The public website now records cookieless pageviews and download-button clicks (PostHog, Do Not Track honored, no replay or autocapture) so we can see which links bring visitors; documented in `docs/telemetry.md` under "Website analytics". The installed app is unaffected.
