@@ -20455,63 +20455,9 @@ body.status-pos-right #convToolbar {
   margin-bottom: 0;
 }
 
-/* ── Anonymous opt-in telemetry bar ───────────────────────────────────────
-   Low-contrast horizontal strip pinned above the toolbar. The whole element
-   is `hidden` until app.js confirms (a) the server's opt_in is null and
-   (b) the env kill switch isn't set; clicking any of the three buttons
-   removes the bar via the [hidden] attribute and persists the decision. */
-.telemetry-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 8px 14px;
-  background: var(--bg-secondary, rgba(0, 0, 0, 0.05));
-  border-bottom: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-  flex-wrap: wrap;
-}
-.telemetry-bar[hidden] { display: none !important; }
-.telemetry-bar__text { flex: 1 1 auto; min-width: 0; }
-.telemetry-bar__text strong { color: var(--text); font-weight: 600; }
-.telemetry-bar__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-.telemetry-bar__btn {
-  padding: 4px 10px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: opacity 0.15s, background 0.15s;
-}
-.telemetry-bar__btn:hover { background: var(--border); }
-.telemetry-bar__btn--primary {
-  background: var(--accent, #d97757);
-  border-color: var(--accent, #d97757);
-  color: #fff;
-  font-weight: 600;
-}
-.telemetry-bar__btn--primary:hover { opacity: 0.9; background: var(--accent, #d97757); }
-.telemetry-bar__link {
-  font-size: 12px;
-  color: var(--text-muted);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.telemetry-bar__link:hover { color: var(--text); }
-
-/* Star-on-GitHub nudge. Same visual language as the telemetry bar above;
-   app.js shows it only after three distinct days of use and only while the
-   telemetry bar is not on screen. */
+/* Star-on-GitHub nudge. Low-contrast horizontal strip pinned above the
+   toolbar, same visual language the retired opt-in telemetry bar used.
+   app.js shows it only after three distinct days of use. */
 .star-nudge {
   display: flex;
   align-items: center;

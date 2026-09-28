@@ -904,25 +904,8 @@
   <div class="sidebar-resizer" id="sidebarResizer" title="Drag to resize"></div>
   <button type="button" id="convListRestoreBtn" class="conv-list-restore" title="Show conversation list" aria-label="Show conversation list">&raquo;</button>
   <div class="main">
-    <!-- Anonymous opt-in telemetry bar. Hidden until the server confirms
-         opt_in === null (never asked) AND env_disabled is false. Dismissed
-         forever as soon as any of the three buttons fires; the dismissal
-         is server-persisted (so a reload doesn't bring the bar back) AND
-         locally remembered (so a multi-tab dashboard doesn't double-prompt).
-         See server.py `_telemetry_*` and docs/telemetry.md. -->
-    <div class="telemetry-bar" id="telemetryOptInBar" hidden role="region" aria-label="Anonymous opt-in telemetry">
-      <span class="telemetry-bar__text">
-        Send an anonymous daily ping? <strong>5 fields</strong> - version, OS, engines you have. <strong>Zero</strong> paths, prompts, or content. Lets us know CCC is actually being used.
-      </span>
-      <div class="telemetry-bar__actions">
-        <button type="button" id="telemetryEnableBtn" class="telemetry-bar__btn telemetry-bar__btn--primary">Send daily ping</button>
-        <button type="button" id="telemetrySkipBtn" class="telemetry-bar__btn">Skip forever</button>
-        <a id="telemetryDetailsLink" class="telemetry-bar__link" href="https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md" target="_blank" rel="noopener">See the 5 fields</a>
-      </div>
-    </div>
     <!-- Star-on-GitHub nudge. Shown by app.js only once the dashboard has
-         been opened on three distinct days, and never alongside the
-         telemetry bar above (one prompt at a time). "Star" and "Don't ask
+         been opened on three distinct days. "Star" and "Don't ask
          again" hide it forever; "Maybe later" snoozes it for 14 days.
          All state is localStorage-only. -->
     <div class="star-nudge" id="starNudgeBar" hidden role="region" aria-label="Star Command Center on GitHub">
@@ -2158,16 +2141,6 @@
               </div>
             </div>
           </div>
-          <label class="onb-telemetry-opt" for="onbTelemetryOptIn" style="display:flex; align-items:flex-start; gap:10px; margin:18px auto 0; max-width:520px; padding:12px 14px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:8px; cursor:pointer; text-align:left;">
-            <input type="checkbox" id="onbTelemetryOptIn" checked style="margin-top:3px; flex-shrink:0;">
-            <span style="font-size:13px; line-height:1.5; color:var(--ink-dim, #8a96a8);">
-              Send an anonymous daily ping so we can put real numbers on
-              <a href="https://ccc.amirfish.ai/stats" target="_blank" rel="noopener" style="color:var(--accent, #ffd266);">ccc.amirfish.ai/stats</a>.
-              <strong>6 fields</strong> - version, OS, engines you have, sessions in last 24h.
-              <strong>Zero</strong> paths, prompts, or content.
-              <a href="https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md" target="_blank" rel="noopener" style="color:var(--accent, #ffd266);">See the contract</a>.
-            </span>
-          </label>
         </div>
 
         <!-- Step 2: CLI Checker -->

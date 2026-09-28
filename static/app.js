@@ -2218,7 +2218,7 @@
   // Best-effort beacons the client fires during boot. They are POSTs, so
   // the method check below would wave them through; each one still costs
   // a server thread and a GIL slice next to the archive list build.
-  const _startupDeferrableBeacons = ['/api/telemetry/heartbeat', '/api/client-log'];
+  const _startupDeferrableBeacons = ['/api/client-log'];
   // Composer catalogs. Deferred like any other background read, these two
   // raced abortBackgroundApiReadsForSpawn(): the first pointerdown anywhere
   // (e.g. clicking New session) released them into the abortable
@@ -2801,89 +2801,23 @@
   }
   loadAppConfig();
 
-  // ── Anonymous opt-in telemetry bar ──
-  // Defaults OFF. Renders only when the server reports opt_in === null
-  // (never asked) AND the env kill switch is not set. Once the user clicks
-  // any button the bar is hidden forever; the choice is persisted server-
-  // side and mirrored to localStorage so multi-tab dashboards don't double-
-  // prompt during the same session. See docs/telemetry.md for the contract.
-  const TELEMETRY_DISMISSED_LS = 'ccc-telemetry-bar-dismissed';
+  // ── Telemetry status probe ──
+  // The opt-in daily ping (and its consent banner) was retired 2026-09-28;
+  // all that's left of app-originated telemetry is the anonymous beacon,
+  // which needs no consent UI. This fetch stays only because the star
+  // nudge below waits on it to settle before deciding whether to show
+  // itself, so a slow /api/telemetry/status doesn't race the nudge onto
+  // the screen before other startup UI has painted.
   async function loadTelemetryStatus() {
-    let status = null;
     try {
-      const res = await fetch('/api/telemetry/status');
-      if (!res.ok) return;
-      status = await res.json();
-    } catch (_) {
-      return;
-    }
-    if (!status) return;
-    const $bar = document.getElementById('telemetryOptInBar');
-    if (!$bar) return;
-    // Env kill switch wins — the bar must never appear when telemetry is
-    // disabled at the process level (e.g. corporate policy, CI runs).
-    if (status.env_disabled) { $bar.hidden = true; return; }
-    // null → never asked → show the bar. true/false → already decided → hide.
-    if (status.opt_in !== null && status.opt_in !== undefined) {
-      $bar.hidden = true;
-      return;
-    }
-    let dismissed = false;
-    try { dismissed = localStorage.getItem(TELEMETRY_DISMISSED_LS) === '1'; } catch (_) {}
-    if (dismissed) { $bar.hidden = true; return; }
-    // Wire docs link from server (kept in sync with server-side constant
-    // so a future GH org rename only touches one place).
-    if (status.docs_url) {
-      const $link = document.getElementById('telemetryDetailsLink');
-      if ($link) $link.setAttribute('href', status.docs_url);
-    }
-    $bar.hidden = false;
+      await fetch('/api/telemetry/status');
+    } catch (_) { /* best-effort — the nudge still runs either way */ }
   }
-  async function postTelemetryOptIn(enable) {
-    try {
-      const res = await fetch('/api/telemetry/opt-in', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enable: !!enable }),
-      });
-      // Even on failure we hide the bar — the localStorage flag stops it
-      // from coming back this session, and the user can re-open the
-      // settings menu to flip the decision.
-      if (!res.ok) return null;
-      return await res.json();
-    } catch (_) {
-      return null;
-    }
-  }
-  function dismissTelemetryBar() {
-    const $bar = document.getElementById('telemetryOptInBar');
-    if ($bar) $bar.hidden = true;
-    try { localStorage.setItem(TELEMETRY_DISMISSED_LS, '1'); } catch (_) {}
-  }
-  (function wireTelemetryBar() {
-    const $enable = document.getElementById('telemetryEnableBtn');
-    const $skip = document.getElementById('telemetrySkipBtn');
-    if ($enable) {
-      $enable.addEventListener('click', async () => {
-        await postTelemetryOptIn(true);
-        dismissTelemetryBar();
-      });
-    }
-    if ($skip) {
-      $skip.addEventListener('click', async () => {
-        await postTelemetryOptIn(false);
-        dismissTelemetryBar();
-      });
-    }
-    // The "What gets sent?" link is a plain anchor — opens docs/telemetry.md
-    // in a new tab on click; no JS needed beyond the default behaviour.
-  })();
 
   // ── Star-on-GitHub nudge ──
   // Asks for a repo star only after the dashboard has been opened on three
-  // distinct days, and never while the telemetry opt-in bar is on screen
-  // (one prompt at a time). "Star" and "Don't ask again" hide it forever;
-  // "Maybe later" snoozes it for 14 days. State is localStorage-only.
+  // distinct days. "Star" and "Don't ask again" hide it forever; "Maybe
+  // later" snoozes it for 14 days. State is localStorage-only.
   const STAR_NUDGE_DISMISSED_LS = 'ccc-star-nudge-dismissed';
   const STAR_NUDGE_SNOOZE_LS = 'ccc-star-nudge-snooze-until';
   const STAR_NUDGE_DAYS_LS = 'ccc-star-nudge-days';
@@ -2908,8 +2842,6 @@
       }
     } catch (_) { return; }
     if (days < STAR_NUDGE_MIN_DAYS) return;
-    const $telemetry = document.getElementById('telemetryOptInBar');
-    if ($telemetry && !$telemetry.hidden) return;
     $bar.hidden = false;
   }
   function hideStarNudge(forever, snoozeMs) {
@@ -2930,41 +2862,7 @@
     if ($never) $never.addEventListener('click', () => hideStarNudge(true));
   })();
 
-  // The star nudge waits for the telemetry decision so the two bars never
-  // stack — telemetry (a privacy question) always wins the slot.
   loadTelemetryStatus().then(maybeShowStarNudge);
-
-  // ── Dashboard active-time heartbeat ──
-  // Beats every 30s while the tab is visible. Each beat credits 30s to
-  // today's active-seconds bucket on the server. The bucket is only
-  // SHIPPED with the daily opt-in ping; the heartbeat endpoint itself
-  // is non-opt-in (it's local-only and just writes a counter) and is
-  // killed by CCC_TELEMETRY_DISABLED. No content, no session ids, no
-  // url path captured — just an empty POST that means "tab visible
-  // right now."
-  (function wireActiveHeartbeat() {
-    let timer = null;
-    function beat() {
-      if (document.visibilityState !== 'visible') return;
-      fetch('/api/telemetry/heartbeat', { method: 'POST', keepalive: true })
-        .catch(() => { /* swallow - best effort, retries next tick */ });
-    }
-    function start() {
-      if (timer) return;
-      beat();
-      timer = setInterval(beat, 30000);
-    }
-    function stop() {
-      if (!timer) return;
-      clearInterval(timer);
-      timer = null;
-    }
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') start();
-      else stop();
-    });
-    if (document.visibilityState === 'visible') start();
-  })();
 
   // ── Repo selection state ──
   // The repo dropdown is a local archive filter, not a server-side switch.
@@ -81854,20 +81752,6 @@
 
     if (nextBtn) {
       nextBtn.onclick = async () => {
-        // If we're leaving the welcome step (step 0), capture the
-        // telemetry opt-in checkbox decision so we don't lose it if the
-        // user later skips. Fire-and-forget; postTelemetryOptIn already
-        // tolerates a missing endpoint, and we hide the standalone bar
-        // either way so the user isn't asked twice.
-        if (currentOnbStep === 0) {
-          const optInCheckbox = document.getElementById('onbTelemetryOptIn');
-          if (optInCheckbox && typeof postTelemetryOptIn === 'function') {
-            postTelemetryOptIn(!!optInCheckbox.checked);
-            if (typeof dismissTelemetryBar === 'function') {
-              dismissTelemetryBar();
-            }
-          }
-        }
         if (currentOnbStep < 2) {
           showOnbStep(currentOnbStep + 1);
         } else {
