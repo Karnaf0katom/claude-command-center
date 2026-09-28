@@ -358,6 +358,15 @@ class SourceHygieneTest(unittest.TestCase):
             full_title=lambda ids: {i: cut[:-6] + " You are the BYM UX worker" for i in ids})
         self.assertEqual(out[0]["title"], "You are the BYM UX worker")
 
+    def test_ccc_titles_follow_sidebar_priority(self):
+        meta = {"/p/-a/s1.jsonl": {"custom_title": "AUG-4#13: expiry", "ai_title": "ai one"},
+                "/p/-a/s2.jsonl": {"custom_title": None, "ai_title": "Questions about Twilio"},
+                "/p/-a/s1/subagents/agent-x.jsonl": {"custom_title": "subagent"},
+                "/p/-a/s4.jsonl": {"custom_title": "cust"}}
+        got = mazkir.ccc_titles(["s1", "s2", "s3", "s4", "s5"], {"s4": "My rename"}, meta, {"s3": "auto three"})
+        self.assertEqual(got, {"s1": "AUG-4#13: expiry", "s2": "Questions about Twilio",
+                               "s3": "auto three", "s4": "My rename"})
+
     def test_build_trace_names_servers_and_args(self):
         trace = mazkir.build_trace("claude-index · sessions search", 8, 5, 900,
                                    {"evals_hidden": 2, "runs_merged": 1},
