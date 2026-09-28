@@ -3666,6 +3666,84 @@ def test_ship_graph_second_call_does_no_reparse_or_subprocesses(tmp_path, monkey
     )
 
 
+def test_ship_graph_is_shipped_spawns_no_fetch_or_ls_remote(tmp_path, monkeypatch):
+    """MEMORY-6 (multi-machine S1): origin freshness is kept warm by a
+    background thread (_run_origin_freshness_loop), started only from
+    warm_start() -- never from the is_shipped() request path. Even with a
+    repo overdue for a freshness check (fetched_at is unset), a request-path
+    call must spawn zero `git fetch`/`git ls-remote` subprocesses of its own."""
+    import sqlite3
+    from ccc_server import ship_graph
+
+    db_path = tmp_path / "ship_graph.sqlite"
+    wt_db_path = tmp_path / "queues.db"
+    projects_dir = tmp_path / "projects"
+    codex_dir = tmp_path / "codex"
+    repo_dir = tmp_path / "repo"
+
+    projects_dir.mkdir(parents=True)
+    codex_dir.mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+    test_file = repo_dir / "index.js"
+    test_file.write_text("console.log('init');", encoding="utf-8")
+    subprocess.run(["git", "add", "index.js"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(export): add csv export for dashboard tables"], cwd=repo_dir, check=True)
+
+    with sqlite3.connect(wt_db_path) as wt_conn:
+        wt_conn.execute("""
+            CREATE TABLE items (
+                ref TEXT PRIMARY KEY, project TEXT, number INTEGER,
+                status TEXT, updated_at TEXT, item_json TEXT
+            )
+        """)
+        wt_conn.commit()
+
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DB", str(db_path))
+    monkeypatch.setenv("WATCHTOWER_DB", str(wt_db_path))
+    monkeypatch.setenv("CCC_PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setenv("CCC_CODEX_SESSIONS_ROOT", str(codex_dir))
+    monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(tmp_path / "kimi-empty"))
+    monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(tmp_path / "gemini-empty"))
+    monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(tmp_path / "cursor-empty"))
+    monkeypatch.setenv("CCC_SHIP_GRAPH_DAYS", "45")
+    monkeypatch.setenv("CCC_SHIP_GRAPH_REPOS", str(repo_dir))
+
+    if hasattr(ship_graph._tls, "conn") and ship_graph._tls.conn:
+        try:
+            ship_graph._tls.conn.close()
+        except Exception:
+            pass
+        ship_graph._tls.conn = None
+    ship_graph._last_sync_ts = 0.0
+
+    # Cold call builds the graph (repos.fetched_at is left at its default 0
+    # -- every repo starts "overdue" for a freshness check).
+    ship_graph.is_shipped("Did we add csv export for dashboard tables?")
+
+    subprocess_calls = []
+    real_run = subprocess.run
+
+    def spy_run(*args, **kwargs):
+        subprocess_calls.append(args)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    ship_graph.is_shipped("Did we add csv export for dashboard tables?")
+
+    fetch_or_ls_remote = [
+        c for c in subprocess_calls
+        if any(isinstance(arg, list) and ("fetch" in arg or "ls-remote" in arg) for arg in c)
+    ]
+    assert fetch_or_ls_remote == [], (
+        f"is_shipped() request path spawned fetch/ls-remote: {fetch_or_ls_remote}"
+    )
+
+
 def test_memory_recall_warm_call_spawns_no_subprocesses(tmp_path, monkeypatch):
     """ccc_server.memory_api.recall() joins two already-synced tables; a warm
     repeat call (within the 5s sync TTL) must spawn zero subprocesses — the
