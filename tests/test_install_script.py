@@ -161,6 +161,26 @@ class TestInstallScript(unittest.TestCase):
         self.assertIn("macOS or Linux", result.stderr)
 
 
+    def _clt_gate(self, xcode_select_status):
+        return _run_install_script_function(
+            "require_macos_clt",
+            prelude=('uname() { printf "Darwin"; }\n'
+                     f'xcode-select() {{ return {xcode_select_status}; }}'),
+            env_extra={"PATH": "/usr/bin:/bin"},
+        )
+
+    def test_clt_gate_explains_stub_git_on_blank_mac(self):
+        if not os.path.exists("/usr/bin/git"):
+            self.skipTest("no /usr/bin/git on this runner")
+        result = self._clt_gate(1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("xcode-select --install", result.stderr)
+        self.assertIn("git", result.stderr)
+
+    def test_clt_gate_passes_when_tools_installed(self):
+        self.assertEqual(self._clt_gate(0).returncode, 0)
+
+
 class TestInstallBehavior(unittest.TestCase):
     PUBLIC_REPO_URL = "https://github.com/amirfish1/claude-command-center"
 

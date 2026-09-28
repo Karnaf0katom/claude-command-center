@@ -1,0 +1,1 @@
+- The curl installer now says to run `xcode-select --install` on a Mac without Apple's Command Line Tools, instead of failing with a misleading Python version or clone error.

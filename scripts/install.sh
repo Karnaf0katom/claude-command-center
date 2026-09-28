@@ -129,6 +129,24 @@ warn_if_no_claude_cli() {
   fi
 }
 
+# Until Apple's Command Line Tools are installed, macOS ships /usr/bin/git and
+# /usr/bin/python3 as stubs: `command -v` finds them, but running one only pops
+# an "install developer tools" dialog and fails, which surfaced as a confusing
+# "python3 unknown found" or a failed clone on a blank Mac.
+require_macos_clt() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  xcode-select -p >/dev/null 2>&1 && return 0
+  local c stubs=""
+  for c in git "$PYTHON3"; do
+    case "$(command -v "$c" 2>/dev/null)" in
+      /usr/bin/*) stubs="${stubs} ${c}" ;;
+    esac
+  done
+  [ -n "$stubs" ] || return 0
+  err "Apple's Command Line Tools aren't installed, so${stubs} can't run yet. Run: xcode-select --install (or accept the dialog macOS shows), wait for it to finish, then re-run this installer."
+  exit 1
+}
+
 require_git() {
   if ! command -v git >/dev/null 2>&1; then
     err "git not found on PATH. Install git, then re-run this installer."
@@ -342,6 +360,7 @@ link_ccc_cli() {
 # ---------------------------------------------------------------------------
 main() {
   require_supported_platform
+  require_macos_clt
   require_git
   require_python3
   warn_if_no_claude_cli
