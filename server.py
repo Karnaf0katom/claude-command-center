@@ -28765,7 +28765,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "time": time.time(),
             })
         elif path == "/api/federation/v1/sessions":
-            peer = _federation_require_peer(self)
+            peer = _federation_require_peer(self, action="federation_sessions")
             if peer is None:
                 return
             qs_fed = urllib.parse.parse_qs(parsed.query)
@@ -28775,7 +28775,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 fed_limit = 200
             self.send_json(_federation_sessions_inventory(limit=fed_limit))
         elif path == "/api/federation/v1/repo-inventory":
-            peer = _federation_require_peer(self)
+            peer = _federation_require_peer(self, action="federation_repo_inventory")
             if peer is None:
                 return
             qs_fed = urllib.parse.parse_qs(parsed.query)
@@ -28789,7 +28789,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Local management view (browser). Secrets are never included.
             self.send_json(_federation_peers_public())
         elif path == "/api/federation/v1/fleet-inventory":
-            peer = _federation_require_peer(self)
+            peer = _federation_require_peer(self, action="federation_fleet_inventory")
             if peer is None:
                 return
             qs_fed = urllib.parse.parse_qs(parsed.query)

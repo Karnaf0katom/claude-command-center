@@ -49,14 +49,28 @@ def _federation_self_hello():
     }
 
 
-def _federation_require_peer(handler):
+def _federation_require_peer(handler, action=None):
     """Validate the pairing headers on a peer-facing request. Sends the 403
-    itself and returns None when unpaired; returns the peer entry when OK."""
+    itself and returns None when unpaired; returns the peer entry when OK.
+
+    `action` names the endpoint for scope enforcement -- pass it for every
+    endpoint except /v1/route (which enforces scope per routed action inside
+    _federation_execute_route) and endpoints safe for any paired peer
+    regardless of scope (hello is unauthenticated; health and unpair need no
+    scope check: health leaks nothing and unpair only removes the caller's
+    own pairing). Without it, a `memory:read`-scoped peer -- meant to reach
+    only the four read-only memory_* actions -- could still call any other
+    peer-facing endpoint (handoff, group-chat import, sessions/repo/fleet
+    inventory) since those never routed through the scope gate at all."""
     peer_id = (handler.headers.get("X-CCC-Peer") or "").strip()
     token = (handler.headers.get("X-CCC-Peer-Token") or "").strip()
     peer = federation.validate_peer_auth(peer_id, token)
     if peer is None:
         handler.send_json({"ok": False, "error": "unpaired_peer"}, 403)
+        return None
+    if action is not None and not _federation_peer_scope_allows(peer, action):
+        handler.send_json({"ok": False, "error": "scope_forbidden",
+                            "detail": f"peer scope does not permit {action!r}"}, 403)
         return None
     return peer
 
@@ -384,11 +398,14 @@ _MEMORY_ROUTE_ACTIONS = frozenset(
 )
 
 # Least-privilege pairing (multi-machine spec section 5): a peer entry can
-# carry an optional `scopes` list. Absent or containing "*" is unrestricted
-# (back-compatible with every peer paired before this). A peer scoped to
-# "memory:read" can reach only the read-only memory_* route actions --
-# everything else (spawn, inject, group chat, ...) is refused server-side,
-# regardless of what the caller asks for.
+# carry an optional `scopes` list. An ABSENT key (not just falsy -- None
+# specifically) or one containing "*" is unrestricted (back-compatible with
+# every peer paired before this). A peer scoped to "memory:read" can reach
+# only the read-only memory_* route actions -- everything else (spawn,
+# inject, group chat, ...) is refused server-side, regardless of what the
+# caller asks for. An explicit but EMPTY scopes list ([]) is not the same as
+# absent: it means the peer was deliberately paired with no capabilities at
+# all, and must be refused everything.
 _SCOPE_ACTIONS = {
     "memory:read": _MEMORY_ROUTE_ACTIONS,
 }
@@ -408,11 +425,18 @@ _MEMORY_ARG_STR_CAP = 500
 def _federation_peer_scope_allows(peer, action):
     """True unless `peer` was paired with an explicit, non-wildcard `scopes`
     list that excludes `action`. `peer=None` is a trusted internal caller
-    (e.g. a direct test call, not a peer-routed one) and is unrestricted."""
+    (e.g. a direct test call, not a peer-routed one) and is unrestricted.
+
+    Only an ABSENT `scopes` key is unrestricted -- an explicit `scopes: []`
+    means the peer was deliberately paired with zero capabilities and must
+    be refused every action (it must not be conflated with "absent" just
+    because both are falsy)."""
     if peer is None:
         return True
     scopes = peer.get("scopes")
-    if not scopes or "*" in scopes:
+    if scopes is None:
+        return True
+    if "*" in scopes:
         return True
     allowed: set[str] = set()
     for scope in scopes:
@@ -450,21 +474,33 @@ def _federation_cap_memory_row(row):
     if isinstance(match, str) and len(match) > _MEMORY_MATCH_CAP:
         row["match"] = match[:_MEMORY_MATCH_CAP]
     elif isinstance(match, dict):
-        text = match.get("text")
+        # memory_api.recall() populates this from session_fts.section_matches(),
+        # whose text field is "snippet" (there is no "text" key anywhere in
+        # that shape) -- checking the wrong key silently let an oversize
+        # section snippet (up to the FTS snippet() call's own bound, not this
+        # module's 600-char cap) through uncapped.
+        text = match.get("snippet")
         if isinstance(text, str) and len(text) > _MEMORY_MATCH_CAP:
-            row["match"] = {**match, "text": text[:_MEMORY_MATCH_CAP]}
+            row["match"] = {**match, "snippet": text[:_MEMORY_MATCH_CAP]}
     return row
 
 
 def _federation_cap_memory_response(result):
     """Bound a memory_* route result to the caps above. Oversize responses
     are truncated (row count first, then dropped trailing rows if still
-    over the byte cap) and flagged truncated: true rather than sent whole."""
+    over the byte cap) and flagged truncated: true rather than sent whole.
+
+    Caps EVERY top-level list value generically, not a hardcoded name list
+    ("results"/"evidence"/"history") -- memory_brief alone returns several
+    more (files_touched, commits, tickets, last_user_asks, ...), and a
+    hardcoded set would silently exempt whichever of those the caller didn't
+    think to name (the spec's 256 KB response cap is meant to hold for the
+    serialized response as a whole, not per enumerated field)."""
     if not isinstance(result, dict):
         return result
     result = dict(result)
     truncated = False
-    list_keys = [k for k in ("results", "evidence", "history") if isinstance(result.get(k), list)]
+    list_keys = [k for k, v in result.items() if isinstance(v, list)]
     for key in list_keys:
         rows = result[key]
         if len(rows) > _MEMORY_MAX_ROWS:
@@ -563,6 +599,12 @@ def _federation_execute_route(envelope, peer=None):
         for key in ("q", "topic", "path"):
             if isinstance(args.get(key), str) and len(args[key]) > _MEMORY_ARG_STR_CAP:
                 args[key] = args[key][:_MEMORY_ARG_STR_CAP]
+        # memory_shipped's `shas` (spec section 4.1: optional, <=20) isn't
+        # consumed by shipped() yet (that's S2/S4 territory) -- capped here
+        # regardless, so the route-arg contract holds the moment it lands
+        # and an oversize list can't already ride through unbounded today.
+        if isinstance(args.get("shas"), list) and len(args["shas"]) > 20:
+            args["shas"] = args["shas"][:20]
         try:
             args["limit"] = max(1, min(int(args.get("limit") or _MEMORY_MAX_ROWS), _MEMORY_MAX_ROWS))
         except (TypeError, ValueError):
@@ -713,7 +755,26 @@ def _federation_spawn_on_node(node_ref, payload):
 
 def _federation_handle_pair_request(data):
     """Inbound pairing: a peer (which already proved loopback/SSH access)
-    introduces itself with a shared secret. Store it; return our identity."""
+    introduces itself with a shared secret. Store it; return our identity.
+
+    TODO(security, needs a design decision -- spec section 5 "least
+    privilege for new pairings"): this endpoint takes no `_federation_require_peer`
+    check by construction (pairing is how a node BECOMES a peer), and the
+    entry it stores never sets "scopes" -- so `_federation_peer_scope_allows`
+    treats every self-paired node as unrestricted ("*") from here, with no
+    way for THIS side of a pairing to grant only "memory:read" at pair time.
+    A less-trusted third machine can only be scoped down after the fact, by
+    editing peers.json out of band. Separately, `federation.upsert_peer`
+    merges by `node_id` ({**existing, **entry}), so a caller who can reach
+    this loopback-authenticated endpoint and already knows (or reuses) an
+    existing peer's node_id overwrites that peer's secret with one of its
+    own choosing -- existing "scopes" survive the merge (entry never sets
+    that key), but the caller now controls that identity's secret. Neither
+    is a regression from before scopes existed (same-user loopback/SSH
+    access already implied full control), but a real least-privilege story
+    for a less-trusted peer needs this endpoint to accept/require an
+    intended `scopes` at pair time and to not silently rotate an existing
+    peer's secret. Left open per MEMORY-15 (S3 security review)."""
     peer_node = str(data.get("node_id") or "").strip()
     secret = str(data.get("secret") or "").strip()
     if not peer_node or not secret:

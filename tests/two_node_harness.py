@@ -16,6 +16,7 @@ run against real repositories.
 import json
 import os
 import shutil
+import site
 import socket
 import subprocess
 import sys
@@ -86,6 +87,15 @@ class CCCNode:
             "CCC_CHAT_ORCHESTRATOR": "builtin",
         }
         env.pop("CCC_SSH_HOST", None)  # never let dev env leak a remote redirect
+        # server.py hard-requires `watchtower`. When it's only pip-installed
+        # to the real user's site-packages (editable install, common for
+        # local dev), Python resolves that path from $HOME at interpreter
+        # startup -- overriding HOME above for node isolation would make the
+        # child unable to import it. PYTHONUSERBASE overrides that lookup
+        # independently of HOME, so the child still finds it. Computed here
+        # (not from `env`), so it reads the harness process's real HOME.
+        if "PYTHONUSERBASE" not in env:
+            env["PYTHONUSERBASE"] = site.getuserbase()
         env.update(extra_env or {})
         self._log_fh = open(self.log_path, "w")
         self.proc = subprocess.Popen(

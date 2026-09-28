@@ -1053,17 +1053,17 @@ def _federation_handle_post(path, data, handler):
         _core._federation_touch_peer(peer["node_id"])
         return _core._federation_execute_route(data, peer=peer)
     if path == "/api/federation/v1/handoff/prepare":
-        peer = _core._federation_require_peer(handler)
+        peer = _core._federation_require_peer(handler, action="handoff_prepare")
         if peer is None:
             return None, None
         return _handoff_prepare_payload(data, peer)
     if path == "/api/federation/v1/handoff/import":
-        peer = _core._federation_require_peer(handler)
+        peer = _core._federation_require_peer(handler, action="handoff_import")
         if peer is None:
             return None, None
         return _handoff_import_payload(data, peer)
     if path == "/api/federation/v1/group-chat/import":
-        peer = _core._federation_require_peer(handler)
+        peer = _core._federation_require_peer(handler, action="group_chat_import")
         if peer is None:
             return None, None
         return _core._group_chat_import_payload(data, peer)
