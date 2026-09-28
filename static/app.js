@@ -2415,7 +2415,7 @@
   // conversation in its pane): overrides the stored per-conversation color.
   const CONV_POPOUT_BG = (() => {
     const v = (_bootUrlParams.get('conv_bg') || '').trim();
-    return CONV_POPOUT_MODE && /^#[0-9a-f]{6}$/i.test(v) ? v : '';
+    return CONV_POPOUT_MODE && /^(#[0-9a-f]{6}|[a-z]{2,20})$/i.test(v) ? v : '';
   })();
   if (CONV_POPOUT_MODE && document.body) {
     document.body.classList.add('conversation-popout');
@@ -39943,7 +39943,11 @@
         // "I click on a worker, but RHS stays of the group chat i was
         // viewing before").
         const _gcReaderShowing = !!document.getElementById('gcReader');
-        const alreadyActive = !_gcReaderShowing
+        // Same for another machine's conversation embedded over the pane
+        // (federated-sidebar.js): the local row is still "current" underneath,
+        // so a click must bring it back, not start a rename.
+        const _fedEmbedShowing = !!document.getElementById('fedEmbed');
+        const alreadyActive = !_gcReaderShowing && !_fedEmbedShowing
           && (item.classList.contains('active') || currentConversation === item.dataset.id);
         // On touch the title is the primary tap target for ENTERING a session
         // (it fills the row), so a tap must always open / slide to the main pane —
@@ -78930,6 +78934,13 @@
     };
   }
 
+  // Shared with static/federated-sidebar.js (the Other machines color pick
+  // uses the same palette and derived text/surface colors).
+  window.cccConvBg = {
+    palette: CONV_BG_PALETTE.map(p => Object.assign({}, p)),
+    vars: (id) => { const it = conversationBgPaletteItem(id); return conversationPaletteVars(it.bg, it.id); },
+  };
+
   function conversationPaneForId(paneId) {
     const pid = paneId || activePaneId();
     return convPaneElById(pid)
@@ -79030,9 +79041,12 @@
     const pane = conversationPaneForId(paneId);
     if (!pane) return;
     if (CONV_POPOUT_BG && !opts.persist) {
-      pane.setAttribute('data-conv-bg', 'custom');
-      setConversationPanePaletteVars(pane, conversationPaletteVars(CONV_POPOUT_BG, 'custom'));
-      return;
+      if (CONV_POPOUT_BG[0] === '#') {
+        pane.setAttribute('data-conv-bg', 'custom');
+        setConversationPanePaletteVars(pane, conversationPaletteVars(CONV_POPOUT_BG, 'custom'));
+        return;
+      }
+      colorId = CONV_POPOUT_BG;
     }
     const item = conversationBgPaletteItem(colorId);
     const key = conversationBgPrimaryKeyForPane(paneId);

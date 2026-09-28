@@ -1,0 +1,2 @@
+- Fixed the Other machines section flickering and closing its color picker every time the session list refreshed; the picker now offers the conversation-background palette.
+- Fixed clicking a local session after viewing another machine's conversation starting a rename instead of opening it.

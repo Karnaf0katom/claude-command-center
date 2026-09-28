@@ -17,7 +17,7 @@
   var PER_NODE_CAP = 5;
   var FETCH_TIMEOUT_MS = 25000;
   var ROW_BG_KEY = 'ccc-fed-row-bg';
-  var ROW_BG_DEFAULT = '#271923';
+  var ROW_BG_DEFAULT = 'plum';   // conversation-background palette id
   var COLLAPSE_KEY = 'ccc-fed-collapsed';
 
   var state = { nodes: [], rows: [] };
@@ -26,6 +26,7 @@
   try { collapsed = localStorage.getItem(COLLAPSE_KEY) === '1'; } catch (_) {}
   var openRef = '';
   var lastSig = null;
+  var sectionEl = null;   // built once; re-attached (never rebuilt) when the local list redraws
   var pollTimer = null;
   var polling = false;
 
@@ -78,7 +79,7 @@
     var u = new URL(node.web_url);
     u.searchParams.set('ccc_popout', 'conversation');
     u.searchParams.set('conv', row.session_id);
-    u.searchParams.set('conv_bg', rowBg());
+    u.searchParams.set('conv_bg', rowBgId());
     return u.toString();
   }
 
@@ -114,44 +115,108 @@
     });
   }
 
-  // Peer rows get their own background so they never read as local sessions;
-  // the swatch in the section header picks it, persisted per browser.
-  function rowBg() {
-    try {
-      var c = localStorage.getItem(ROW_BG_KEY);
-      if (c && /^#[0-9a-f]{6}$/i.test(c)) return c;
-    } catch (_) {}
-    return ROW_BG_DEFAULT;
+  // Peer rows (and the embedded conversation) get their own background so they
+  // never read as local sessions. The pick comes from the same palette as the
+  // conversation background (window.cccConvBg, set by app.js), per browser.
+  function palette() {
+    return (window.cccConvBg && window.cccConvBg.palette) || [];
   }
 
-  function applyRowBg(c) {
-    document.documentElement.style.setProperty('--fed-row-bg', c);
+  function rowBgId() {
+    var id = '';
+    try { id = localStorage.getItem(ROW_BG_KEY) || ''; } catch (_) {}
+    var pal = palette();
+    if (pal.length) return pal.some(function (p) { return p.id === id; }) ? id : ROW_BG_DEFAULT;
+    return /^[a-z]{2,20}$/.test(id) ? id : ROW_BG_DEFAULT;
   }
 
-  function buildHead(count) {
+  function applyRowBg() {
+    var v = window.cccConvBg ? window.cccConvBg.vars(rowBgId()) : null;
+    var root = document.documentElement.style;
+    if (!v) return;
+    root.setProperty('--fed-row-bg', v.bg);
+    root.setProperty('--fed-row-text', v.text);
+    root.setProperty('--fed-row-muted', v.muted);
+    root.setProperty('--fed-row-chip', v.surface2);
+    root.setProperty('--fed-row-border', v.border);
+  }
+
+  function closePalette() {
+    var pop = $('fedBgPalette');
+    if (pop) pop.remove();
+    document.removeEventListener('mousedown', onOutside, true);
+    document.removeEventListener('keydown', onPaletteKey, true);
+  }
+
+  function onOutside(ev) {
+    var pop = $('fedBgPalette');
+    if (pop && !pop.contains(ev.target) && !(ev.target.closest && ev.target.closest('.fed-color'))) closePalette();
+  }
+
+  function onPaletteKey(ev) { if (ev.key === 'Escape') closePalette(); }
+
+  // Lives on <body>, not in the list, so list redraws can never close it.
+  function openPalette(anchor) {
+    if ($('fedBgPalette')) { closePalette(); return; }
+    var pop = el('div', 'conv-bg-palette fed-bg-popover');
+    pop.id = 'fedBgPalette';
+    pop.setAttribute('role', 'radiogroup');
+    pop.setAttribute('aria-label', 'Background for sessions on other machines');
+    var current = rowBgId();
+    palette().forEach(function (item) {
+      var b = el('button', 'conv-bg-swatch' + (item.id === current ? ' active' : ''));
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(item.id === current));
+      b.setAttribute('aria-label', item.label);
+      b.title = item.label;
+      b.style.setProperty('--swatch-color', item.bg);
+      b.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        try { localStorage.setItem(ROW_BG_KEY, item.id); } catch (_) {}
+        applyRowBg();
+        closePalette();
+        if (openRef) openRow(openRef); // reload the embed with the new color
+      });
+      pop.appendChild(b);
+    });
+    document.body.appendChild(pop);
+    var r = anchor.getBoundingClientRect();
+    pop.style.top = Math.round(r.bottom + 6) + 'px';
+    pop.style.left = Math.max(8, Math.round(r.right - pop.offsetWidth)) + 'px';
+    document.addEventListener('mousedown', onOutside, true);
+    document.addEventListener('keydown', onPaletteKey, true);
+  }
+
+  function buildSection() {
+    var sec = el('div', 'fed-peer-section');
+    sec.setAttribute('data-role', 'fed-peer-section');
     var head = el('div', 'fed-head');
     head.setAttribute('data-role', 'fed-toggle');
     head.setAttribute('role', 'button');
-    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     head.tabIndex = 0;
-    head.title = collapsed ? 'Show sessions on other machines' : 'Hide sessions on other machines';
-    head.appendChild(el('span', 'fed-caret', collapsed ? '\u25b8' : '\u25be'));
+    head.appendChild(el('span', 'fed-caret'));
     head.appendChild(el('span', 'fed-head-label', 'Other machines'));
-    if (collapsed && count) head.appendChild(el('span', 'fed-head-count', String(count)));
-    var pick = el('input', 'fed-color');
-    pick.type = 'color';
-    pick.value = rowBg();
+    head.appendChild(el('span', 'fed-head-count'));
+    var pick = el('button', 'fed-color');
+    pick.type = 'button';
     pick.title = 'Background color for sessions on other machines';
     pick.setAttribute('aria-label', pick.title);
-    pick.addEventListener('input', function () {
-      applyRowBg(pick.value);
-      try { localStorage.setItem(ROW_BG_KEY, pick.value); } catch (_) {}
-    });
-    // The open conversation is another machine's page: reload it with the new
-    // color once the pick settles (not on every drag step).
-    pick.addEventListener('change', function () { if (openRef) openRow(openRef); });
     head.appendChild(pick);
-    return head;
+    sec.appendChild(head);
+    sec.appendChild(el('div', 'fed-body'));
+    return sec;
+  }
+
+  function updateHead(count) {
+    var head = sectionEl.querySelector('.fed-head');
+    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    head.title = collapsed ? 'Show sessions on other machines' : 'Hide sessions on other machines';
+    head.querySelector('.fed-caret').textContent = collapsed ? '\u25b8' : '\u25be';
+    var c = head.querySelector('.fed-head-count');
+    c.textContent = collapsed && count ? String(count) : '';
+    c.hidden = !(collapsed && count);
   }
 
   function el(tag, cls, text) {
@@ -206,7 +271,6 @@
   function render() {
     var list = $('convList');
     if (!list) return;
-    var section = list.querySelector(':scope > .fed-peer-section');
     var peers = state.nodes.filter(function (n) { return !n.self; });
     var rows = (peers.length && sidebarTabIsCoding()) ? visibleRows() : [];
     var offlineOnly = peers.filter(function (n) {
@@ -214,35 +278,39 @@
     });
     var hasContent = rows.length || (offlineOnly.length && !searchValue());
     if (!hasContent) {
-      if (section) section.remove();
-      lastSig = null;
+      if (sectionEl && sectionEl.parentNode) sectionEl.remove();
       return;
     }
+    if (!sectionEl) sectionEl = buildSection();
     var totalHidden = state.rows.length - rows.length;
     var sig = JSON.stringify([
       rows.map(function (r) { return [r.ref, rowTitle(r), ago(rowEpoch(r)), !!r.is_live, r.node_name, r.cwd]; }),
       peers.map(function (n) { return [n.node_id, n.ok, n.stale, n.web_url_state, n.web_url]; }),
       openRef, expanded, collapsed, totalHidden > 0 && !searchValue()]);
+    if (sig !== lastSig) {
+      lastSig = sig;
+      updateHead(state.rows.length);
+      var body = [];
+      if (!collapsed) rows.forEach(function (r) { body.push(buildRow(r)); });
+      if (!collapsed && !searchValue()) {
+        offlineOnly.forEach(function (n) { var b = buildNodeRow(n); if (b) body.push(b); });
+      }
+      if (!collapsed && !searchValue() && (totalHidden > 0 || expanded) && state.rows.length > PER_NODE_CAP) {
+        var more = el('button', 'fed-more', expanded ? 'Show fewer' : 'Show ' + totalHidden + ' more');
+        more.type = 'button';
+        more.setAttribute('data-role', 'fed-more');
+        body.push(more);
+      }
+      sectionEl.querySelector('.fed-body').replaceChildren.apply(sectionEl.querySelector('.fed-body'), body);
+    }
+    // The local list redraws wholesale; put the SAME element back (no rebuild,
+    // so nothing flickers) right after the tab bar.
     var tabBar = list.querySelector(':scope > .conv-tab-bar');
-    var placed = section && (tabBar ? section.previousElementSibling === tabBar : list.firstElementChild === section);
-    if (section && placed && sig === lastSig) return;
-    lastSig = sig;
-    var fresh = el('div', 'fed-peer-section');
-    fresh.setAttribute('data-role', 'fed-peer-section');
-    fresh.appendChild(buildHead(state.rows.length));
-    if (!collapsed) rows.forEach(function (r) { fresh.appendChild(buildRow(r)); });
-    if (!collapsed && !searchValue()) {
-      offlineOnly.forEach(function (n) { var b = buildNodeRow(n); if (b) fresh.appendChild(b); });
-    }
-    if (!collapsed && !searchValue() && (totalHidden > 0 || expanded) && state.rows.length > PER_NODE_CAP) {
-      var more = el('button', 'fed-more', expanded ? 'Show fewer' : 'Show ' + totalHidden + ' more');
-      more.type = 'button';
-      more.setAttribute('data-role', 'fed-more');
-      fresh.appendChild(more);
-    }
-    if (section) section.remove();
-    if (tabBar) tabBar.insertAdjacentElement('afterend', fresh);
-    else list.insertBefore(fresh, list.firstChild);
+    var placed = sectionEl.parentNode === list
+      && (tabBar ? sectionEl.previousElementSibling === tabBar : list.firstElementChild === sectionEl);
+    if (placed) return;
+    if (tabBar) tabBar.insertAdjacentElement('afterend', sectionEl);
+    else list.insertBefore(sectionEl, list.firstChild);
   }
 
   // ---- embed ---------------------------------------------------------------
@@ -304,7 +372,8 @@
     var list = $('convList');
     if (!list) return;
     list.addEventListener('click', function (ev) {
-      if (ev.target.closest && ev.target.closest('.fed-color')) return;
+      var swatch = ev.target.closest && ev.target.closest('.fed-color');
+      if (swatch) { ev.stopPropagation(); openPalette(swatch); return; }
       if (ev.target.closest && ev.target.closest('[data-role="fed-toggle"]')) { toggleCollapsed(); return; }
       var more = ev.target.closest && ev.target.closest('[data-role="fed-more"]');
       if (more) { expanded = !expanded; render(); return; }
@@ -360,7 +429,7 @@
   }
 
   function boot() {
-    applyRowBg(rowBg());
+    applyRowBg();
     wire();
     poll();
     document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
