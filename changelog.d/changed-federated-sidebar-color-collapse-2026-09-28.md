@@ -1,0 +1,1 @@
+- Sessions from other machines now have their own background color, pickable from a swatch in the "Other machines" header, and the section can be collapsed.

@@ -16,9 +16,14 @@
   var IDLE_POLL_MS = 60000; // nothing paired: keep the interval long
   var PER_NODE_CAP = 5;
   var FETCH_TIMEOUT_MS = 25000;
+  var ROW_BG_KEY = 'ccc-fed-row-bg';
+  var ROW_BG_DEFAULT = '#271923';
+  var COLLAPSE_KEY = 'ccc-fed-collapsed';
 
   var state = { nodes: [], rows: [] };
   var expanded = false;
+  var collapsed = false;
+  try { collapsed = localStorage.getItem(COLLAPSE_KEY) === '1'; } catch (_) {}
   var openRef = '';
   var lastSig = null;
   var pollTimer = null;
@@ -108,6 +113,43 @@
     });
   }
 
+  // Peer rows get their own background so they never read as local sessions;
+  // the swatch in the section header picks it, persisted per browser.
+  function rowBg() {
+    try {
+      var c = localStorage.getItem(ROW_BG_KEY);
+      if (c && /^#[0-9a-f]{6}$/i.test(c)) return c;
+    } catch (_) {}
+    return ROW_BG_DEFAULT;
+  }
+
+  function applyRowBg(c) {
+    document.documentElement.style.setProperty('--fed-row-bg', c);
+  }
+
+  function buildHead(count) {
+    var head = el('div', 'fed-head');
+    head.setAttribute('data-role', 'fed-toggle');
+    head.setAttribute('role', 'button');
+    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    head.tabIndex = 0;
+    head.title = collapsed ? 'Show sessions on other machines' : 'Hide sessions on other machines';
+    head.appendChild(el('span', 'fed-caret', collapsed ? '\u25b8' : '\u25be'));
+    head.appendChild(el('span', 'fed-head-label', 'Other machines'));
+    if (collapsed && count) head.appendChild(el('span', 'fed-head-count', String(count)));
+    var pick = el('input', 'fed-color');
+    pick.type = 'color';
+    pick.value = rowBg();
+    pick.title = 'Background color for sessions on other machines';
+    pick.setAttribute('aria-label', pick.title);
+    pick.addEventListener('input', function () {
+      applyRowBg(pick.value);
+      try { localStorage.setItem(ROW_BG_KEY, pick.value); } catch (_) {}
+    });
+    head.appendChild(pick);
+    return head;
+  }
+
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -176,19 +218,19 @@
     var sig = JSON.stringify([
       rows.map(function (r) { return [r.ref, rowTitle(r), ago(rowEpoch(r)), !!r.is_live, r.node_name, r.cwd]; }),
       peers.map(function (n) { return [n.node_id, n.ok, n.stale, n.web_url_state, n.web_url]; }),
-      openRef, expanded, totalHidden > 0 && !searchValue()]);
+      openRef, expanded, collapsed, totalHidden > 0 && !searchValue()]);
     var tabBar = list.querySelector(':scope > .conv-tab-bar');
     var placed = section && (tabBar ? section.previousElementSibling === tabBar : list.firstElementChild === section);
     if (section && placed && sig === lastSig) return;
     lastSig = sig;
     var fresh = el('div', 'fed-peer-section');
     fresh.setAttribute('data-role', 'fed-peer-section');
-    fresh.appendChild(el('div', 'fed-head', 'Other machines'));
-    rows.forEach(function (r) { fresh.appendChild(buildRow(r)); });
-    if (!searchValue()) {
+    fresh.appendChild(buildHead(state.rows.length));
+    if (!collapsed) rows.forEach(function (r) { fresh.appendChild(buildRow(r)); });
+    if (!collapsed && !searchValue()) {
       offlineOnly.forEach(function (n) { var b = buildNodeRow(n); if (b) fresh.appendChild(b); });
     }
-    if (!searchValue() && (totalHidden > 0 || expanded) && state.rows.length > PER_NODE_CAP) {
+    if (!collapsed && !searchValue() && (totalHidden > 0 || expanded) && state.rows.length > PER_NODE_CAP) {
       var more = el('button', 'fed-more', expanded ? 'Show fewer' : 'Show ' + totalHidden + ' more');
       more.type = 'button';
       more.setAttribute('data-role', 'fed-more');
@@ -248,10 +290,18 @@
     render();
   }
 
+  function toggleCollapsed() {
+    collapsed = !collapsed;
+    try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (_) {}
+    render();
+  }
+
   function wire() {
     var list = $('convList');
     if (!list) return;
     list.addEventListener('click', function (ev) {
+      if (ev.target.closest && ev.target.closest('.fed-color')) return;
+      if (ev.target.closest && ev.target.closest('[data-role="fed-toggle"]')) { toggleCollapsed(); return; }
       var more = ev.target.closest && ev.target.closest('[data-role="fed-more"]');
       if (more) { expanded = !expanded; render(); return; }
       var row = ev.target.closest && ev.target.closest('.fed-row[data-node-id]');
@@ -259,6 +309,9 @@
     });
     list.addEventListener('keydown', function (ev) {
       if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      if (ev.target.getAttribute && ev.target.getAttribute('data-role') === 'fed-toggle') {
+        ev.preventDefault(); toggleCollapsed(); return;
+      }
       var row = ev.target.closest && ev.target.closest('.fed-row[data-node-id]');
       if (row) { ev.preventDefault(); openRow(row.getAttribute('data-id')); }
     });
@@ -303,6 +356,7 @@
   }
 
   function boot() {
+    applyRowBg(rowBg());
     wire();
     poll();
     document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
