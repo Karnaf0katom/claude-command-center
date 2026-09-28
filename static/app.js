@@ -63537,17 +63537,33 @@
   // Every source is a session chip, always visible: cited sessions first (the
   // server orders them), then the other candidates. No collapsed list; the
   // chip's title tooltip carries the repo, time and best-match snippet.
+  // Sessions the answer cites already render inline, so the footer only
+  // offers the other candidates, collapsed behind a count.
   function askResultsHtml(t, selectedId) {
     const sources = t.sources || [];
-    if (!sources.length) return '';
     const count = Number.isFinite(t.hitCount) ? t.hitCount : sources.length;
     const bits = [count + (count === 1 ? ' source' : ' sources')];
     if (Number.isFinite(t.ttftMs)) bits.push('first token ' + (t.ttftMs / 1000).toFixed(1) + 's');
     if (t.processMode === 'warm') bits.push('warm');
-    const chips = sources.map(src => askSessionChipHtml(src, selectedId)).join('');
-    return '<div class="ask-sources" aria-label="Sources">'
-      + '<div class="ask-top-sources">' + chips + '</div>'
+    const inline = new Set();
+    for (const m of String(t.a || '').matchAll(/\[\[session:([0-9A-Za-z_.-]{5,128})\]\]/g)) inline.add(m[1]);
+    const rest = sources.filter(src => src && src.id && !inline.has(src.id));
+    if (!sources.length) return '';
+    const more = rest.length
+      ? '<details class="ask-more-sources"><summary>' + rest.length + ' other candidate' + (rest.length === 1 ? '' : 's') + ' ▸</summary>'
+        + '<div class="ask-top-sources">' + rest.map(src => askSessionChipHtml(src, selectedId)).join('') + '</div></details>'
+      : '';
+    return '<div class="ask-sources" aria-label="Sources">' + more
       + '<div class="ask-result-count">' + askEscapeHtml(bits.join(' · ')) + '</div></div>';
+  }
+
+  // Which tools Mazkir used for this answer (server-built, not model prose).
+  function askTraceHtml(t) {
+    const trace = t.trace || [];
+    if (!trace.length) return '';
+    return '<ul class="ask-trace" aria-label="How Mazkir answered">' + trace.map(step =>
+      '<li><span class="ask-trace-tool">' + askEscapeHtml(askNeutralizeMarkers(step.tool || '')) + '</span>'
+      + (step.detail ? ' ' + askEscapeHtml(askNeutralizeMarkers(step.detail)) : '') + '</li>').join('') + '</ul>';
   }
 
   // Confirm cards for actions Mazkir proposed. The text is server-written
@@ -63852,6 +63868,7 @@
           '<div class="ask-turn-q"><span class="ask-user-badge">YOU</span><div class="ask-q-text">' + askEscapeHtml(t.q) + '</div></div>' +
           '<div class="ask-turn-a assistant-text' + (t.error ? ' is-error' : '') + '">' +
           '<div class="ask-assistant-header"><span class="ask-assistant-glyph">M</span><span class="ask-assistant-name">Mazkir</span>' + (elapsedSec ? '<span class="ask-turn-time">' + elapsedSec + '</span>' : '') + '</div>' +
+          (t.error ? '' : askTraceHtml(t)) +
           '<div class="ask-turn-body">' + (t.error ? askEscapeHtml(t.a) : renderAskVerdict(t.a, t.sources, t.spawned)) + '</div>' +
           (!t.error && String(t.a || '').trim() ? askMessageActionsHtml() : '') + '</div>' +
           (t.error ? '' : askConfirmCardsHtml(t)) +
@@ -64053,6 +64070,7 @@
           turn.elapsedMs = data.elapsed_ms;
           turn.ttftMs = data.ttft_ms;
           turn.processMode = data.process_mode;
+          turn.trace = data.trace || [];
           turn.confirmActions = data.confirm_actions || [];
           // CCC-1048: "File an issue" embeds when/id in the ticket context.
           turn.at = Date.now();
