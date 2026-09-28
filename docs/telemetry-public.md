@@ -13,9 +13,9 @@ download clicks — without exposing event rows.
 | App endpoints | `/v1/open` (active); `/v1/ping` (accepted for old clients, no longer sent by current builds — retired 2026-09-28) |
 | Landing endpoint | `/v1/download` |
 | Public aggregates | `/v1/stats` |
-| Worker source SHA at deploy | [`9cd0b3d`](https://github.com/amirfish1/claude-command-center/tree/9cd0b3d/infra/telemetry-worker) (pre-dates the weekly/monthly + geo migration below; update this pin at next deploy) |
+| Worker source SHA at deploy | [`fb1c0e37`](https://github.com/amirfish1/claude-command-center/tree/fb1c0e37/infra/telemetry-worker) |
 | D1 migration | `infra/telemetry-worker/migrations/0003-opens-weekly-monthly-geo.sql` adds `first_this_week`, `first_this_month`, `country`, `region` to `opens` |
-| Worker deployed | 2026-07-15 (download counter); initially 2026-05-22 |
+| Worker deployed | 2026-09-28 (beacon v2: weekly/monthly flags + country/region); 2026-07-15 (download counter); initially 2026-05-22 |
 | Collection started | 2026-05-22 |
 | Storage | Cloudflare D1 (`ccc-telemetry`), with bounded `pings`, `opens`, and `downloads` tables documented in [`telemetry.md`](telemetry.md) |
 
@@ -30,7 +30,7 @@ never city, postal code, lat/long, ASN, or the raw IP. The legacy opt-in ping
 did not persist IP either. Re-check any time:
 
 ```bash
-git show 9cd0b3d:infra/telemetry-worker/index.js | grep -n 'handleDownload\|CF-Connecting-IP'
+git show fb1c0e37:infra/telemetry-worker/index.js | grep -n 'handleDownload\|CF-Connecting-IP'
 ```
 
 The opt-in daily ping (and its consent banner) is retired as of 2026-09-28;
