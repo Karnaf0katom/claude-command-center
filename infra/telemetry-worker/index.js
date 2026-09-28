@@ -262,13 +262,14 @@ async function handleDownload(env) {
   return new Response(null, { status: 204 });
 }
 
-// Minimum-count suppression: any bucket with fewer than `minCount` beacons
+// Minimum-count suppression: any bucket with fewer than `minCount` installs
 // is folded into a single "other" bucket instead of being returned by
-// name, so a country or state with exactly one beacon can never be read
-// off the public stats page as "this one person is here." Buckets already
-// come from a query with no NULLs and no per-row identity — this just
-// keeps small groups from being singled out.
-function suppressSmallBuckets(rows, key, countKey, minCount) {
+// name, so a country or state with one or two installs can never be read
+// off the public stats page as "this one person is here." `keys` lists the
+// field(s) that identify a bucket (e.g. ["country"] or ["country","region"])
+// — all of them are set to "other" on the folded row so a suppressed region
+// can't be paired back up with a real country.
+function suppressSmallBuckets(rows, keys, countKey, minCount) {
   const kept = [];
   let otherCount = 0;
   for (const r of rows) {
@@ -276,7 +277,11 @@ function suppressSmallBuckets(rows, key, countKey, minCount) {
     if (n >= minCount) kept.push(r);
     else otherCount += n;
   }
-  if (otherCount > 0) kept.push({ [key]: "other", [countKey]: otherCount });
+  if (otherCount > 0) {
+    const other = { [countKey]: otherCount };
+    for (const k of keys) other[k] = "other";
+    kept.push(other);
+  }
   return kept;
 }
 
@@ -372,41 +377,73 @@ async function handleStats(_request, env) {
       "GROUP BY install_id ORDER BY last_seen DESC LIMIT 50"
     ).all()).results;
 
+    // ISO week (UTC, Monday-Sunday) boundaries via SQLite's 'weekday N'
+    // modifier: 'weekday 1' advances a date forward to the next Monday, or
+    // leaves it unchanged if it's already Monday. Starting from (now - 6
+    // days) therefore always lands on the Monday of the ISO week containing
+    // "now", for any weekday "now" falls on (verified with the sqlite3 CLI
+    // for a Monday, Wednesday and Sunday "now" substitute — see
+    // ../README.md). first_this_week is set once per ISO week, so counting
+    // it over a *trailing 7-day* window (the old approach) double-counted
+    // any install that beaconed in both the tail of last week and the start
+    // of this one; matching the exact Monday boundary fixes that.
+    const weekBounds = await env.DB.prepare(
+      "SELECT date('now','-6 days','weekday 1') AS this_monday, " +
+      "       date(date('now','-6 days','weekday 1'), '-7 days') AS prev_monday"
+    ).first();
+    const thisMonday = weekBounds.this_monday;
+    const prevMonday = weekBounds.prev_monday;
+
     // Weekly/monthly active installs, derived from the beacon-v2
     // first_this_week / first_this_month flags — each is true on exactly
     // one beacon per install per period, so counting flagged rows in the
-    // matching window counts installs, not install-days, without ever
-    // storing an id. The 7-day window approximates the ISO week the client
-    // used to set the flag; the month match is exact (calendar month via
-    // strftime). v1 beacons (pre-2026-09-28) left these columns NULL and
-    // are correctly excluded.
+    // matching period counts installs, not install-days, without ever
+    // storing an id. "prev" is the last *complete* period. v1 beacons
+    // (pre-2026-09-28) left these columns NULL and are correctly excluded.
     const weeklyMonthly = await env.DB.prepare(
       "SELECT " +
-      `  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= date('now','-6 days') AND ${NODEV}) AS weekly_new_installs, ` +
-      "  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= date('now','-6 days')) AS weekly_new_installs_all, " +
-      `  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now') AND ${NODEV}) AS monthly_new_installs, ` +
-      "  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now')) AS monthly_new_installs_all"
-    ).first();
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= ? AND ${NODEV}) AS weekly_active_installs, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= ?) AS weekly_active_installs_all, " +
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= ? AND received_at < ? AND ${NODEV}) AS weekly_active_installs_prev, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_week = 1 AND received_at >= ? AND received_at < ?) AS weekly_active_installs_prev_all, " +
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now') AND ${NODEV}) AS monthly_active_installs, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now')) AS monthly_active_installs_all, " +
+      `  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now','start of month','-1 day') AND ${NODEV}) AS monthly_active_installs_prev, ` +
+      "  (SELECT COUNT(*) FROM opens WHERE first_this_month = 1 AND strftime('%Y-%m', received_at) = strftime('%Y-%m','now','start of month','-1 day')) AS monthly_active_installs_prev_all"
+    ).bind(thisMonday, thisMonday, prevMonday, thisMonday, prevMonday, thisMonday).first();
 
-    // Coarse geography, last 7 days, dev rows excluded. Small buckets are
-    // rolled into "other" below so a single beacon from a rare country or
-    // state is never individually visible on the public page.
+    // Coarse geography, over one complete-ish ISO week, counting
+    // *installs* (first_this_week = 1 rows), not beacons — an install that
+    // beacons every day from the same rare state must count once, not 7
+    // times, or it clears minimum-count suppression it should never clear.
+    // Use the previous complete ISO week if it has any qualifying rows (so
+    // the numbers are stable and not still filling in), else fall back to
+    // the current, still-in-progress week so the card isn't empty from day
+    // one. Dev rows excluded from both the "which week" check and the data.
+    const prevWeekCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM opens WHERE first_this_week = 1 AND received_at >= ? AND received_at < ? AND ${NODEV}`
+    ).bind(prevMonday, thisMonday).first();
+    const usePrevWeek = (prevWeekCount.n || 0) > 0;
+    const geoWeekStart = usePrevWeek ? prevMonday : thisMonday;
+    const geoWeekEndClause = usePrevWeek ? "AND received_at < ?" : "";
+    const geoWeekEndParams = usePrevWeek ? [thisMonday] : [];
+
     const countriesRaw = (await env.DB.prepare(
-      "SELECT country, COUNT(*) AS beacons FROM opens " +
-      `WHERE received_at >= date('now','-6 days') AND country IS NOT NULL AND ${NODEV} ` +
-      "GROUP BY country ORDER BY beacons DESC LIMIT 50"
-    ).all()).results;
+      "SELECT country, COUNT(*) AS installs FROM opens " +
+      `WHERE first_this_week = 1 AND received_at >= ? ${geoWeekEndClause} AND country IS NOT NULL AND ${NODEV} ` +
+      "GROUP BY country ORDER BY installs DESC LIMIT 50"
+    ).bind(geoWeekStart, ...geoWeekEndParams).all()).results;
     const regionsRaw = (await env.DB.prepare(
-      "SELECT region, COUNT(*) AS beacons FROM opens " +
-      `WHERE received_at >= date('now','-6 days') AND region IS NOT NULL AND ${NODEV} ` +
-      "GROUP BY region ORDER BY beacons DESC LIMIT 25"
-    ).all()).results;
+      "SELECT country, region, COUNT(*) AS installs FROM opens " +
+      `WHERE first_this_week = 1 AND received_at >= ? ${geoWeekEndClause} AND region IS NOT NULL AND ${NODEV} ` +
+      "GROUP BY country, region ORDER BY installs DESC LIMIT 25"
+    ).bind(geoWeekStart, ...geoWeekEndParams).all()).results;
     const usVsIntl = await env.DB.prepare(
       "SELECT " +
       "  SUM(CASE WHEN country = 'US' THEN 1 ELSE 0 END) AS us, " +
       "  SUM(CASE WHEN country IS NOT NULL AND country != 'US' THEN 1 ELSE 0 END) AS intl " +
-      `FROM opens WHERE received_at >= date('now','-6 days') AND ${NODEV}`
-    ).first();
+      `FROM opens WHERE first_this_week = 1 AND received_at >= ? ${geoWeekEndClause} AND ${NODEV}`
+    ).bind(geoWeekStart, ...geoWeekEndParams).first();
 
     const body = JSON.stringify({
       generated_at: new Date().toISOString(),
@@ -417,9 +454,13 @@ async function handleStats(_request, env) {
       versions,
       versions_7d: versions7d,
       platforms,
-      countries_7d: suppressSmallBuckets(countriesRaw, "country", "beacons", 3),
-      regions_7d: suppressSmallBuckets(regionsRaw, "region", "beacons", 3),
-      us_vs_intl_7d: { us: usVsIntl.us || 0, intl: usVsIntl.intl || 0 },
+      geo_week: {
+        week_start: geoWeekStart,
+        countries: suppressSmallBuckets(countriesRaw, ["country"], "installs", 3),
+        regions: suppressSmallBuckets(regionsRaw, ["country", "region"], "installs", 3),
+        us: usVsIntl.us || 0,
+        intl: usVsIntl.intl || 0,
+      },
       sessions_today_per_install: sessionsToday.map(r => ({
         install_id_prefix: r.install_id.slice(0, 8),
         latest_sessions_today: r.latest_sessions_today,
