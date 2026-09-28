@@ -842,4 +842,208 @@ def test_graph_health_before_any_sync_is_still_a_valid_shape(mock_graph_env):
     assert isinstance(health["commits_rows"], int)
 
 
+# MEMORY-6 (multi-machine S1): background origin freshness -- gate key
+# becomes (HEAD, origin/<default>), a periodic thread keeps repos.fetched_at
+# warm, and is_shipped()/`ccc shipped` surface how stale that knowledge is.
+
+def _add_origin_remote(repo_dir, tmp_path, name="origin-bare"):
+    """Real bare remote + push, so refs/remotes/origin/main exists for the
+    fast no-subprocess readers to find."""
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "remote", "add", "origin", str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "push", "-u", "origin", "main"], check=True, capture_output=True)
+    return bare
+
+
+def test_default_branch_and_origin_head_fast_no_subprocess(mock_graph_env, tmp_path):
+    env = mock_graph_env
+    _add_origin_remote(env["repo_dir"], tmp_path)
+
+    assert ship_graph._default_branch_name_fast(str(env["repo_dir"])) == "main"
+    origin_head = ship_graph._get_origin_head_fast(str(env["repo_dir"]), "main")
+    assert origin_head == env["commit_sha"]
+
+
+def test_get_origin_head_fast_empty_without_a_fetched_remote(mock_graph_env):
+    """No origin remote configured yet -> no refs/remotes/origin/* to read."""
+    env = mock_graph_env
+    assert ship_graph._get_origin_head_fast(str(env["repo_dir"]), "main") == ""
+
+
+def test_sync_git_repos_gate_reacts_to_origin_move_without_local_head_change(mock_graph_env, tmp_path):
+    """The gate key is (HEAD, origin_head): a bare `git fetch` that moves
+    refs/remotes/origin/main -- with local HEAD untouched -- must still be
+    picked up on the next sync, or a background-refreshed origin would be
+    silently ignored forever (the bug this slice fixes)."""
+    env = mock_graph_env
+    bare = _add_origin_remote(env["repo_dir"], tmp_path)
+    conn = ship_graph._get_connection()
+    ship_graph._init_db(conn)
+    roots = {"test-repo": str(env["repo_dir"])}
+
+    ship_graph._sync_git_repos(conn, roots, days=45)
+    row = conn.execute(
+        "SELECT head_sha, origin_head_sha, origin_ref FROM repos WHERE path = ?",
+        (str(env["repo_dir"]),),
+    ).fetchone()
+    assert row == (env["commit_sha"], env["commit_sha"], "origin/main")
+
+    # A second pass with nothing changed must not touch the row (no new head).
+    ship_graph._sync_git_repos(conn, roots, days=45)
+
+    # Advance origin from a second clone, then fetch (not pull/merge) so the
+    # local `main` branch and HEAD never move -- only refs/remotes/origin/main.
+    other_clone = tmp_path / "other-clone"
+    subprocess.run(["git", "clone", str(bare), str(other_clone)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=other_clone, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=other_clone, check=True)
+    (other_clone / "app.py").write_text("# from upstream", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=other_clone, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(sync): upstream-only change"], cwd=other_clone, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=other_clone, check=True)
+    subprocess.run(["git", "-C", str(env["repo_dir"]), "fetch", "origin"], check=True, capture_output=True)
+
+    new_origin_head = subprocess.run(
+        ["git", "-C", str(env["repo_dir"]), "rev-parse", "origin/main"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert new_origin_head != env["commit_sha"]
+
+    ship_graph._sync_git_repos(conn, roots, days=45)
+    row2 = conn.execute(
+        "SELECT head_sha, origin_head_sha FROM repos WHERE path = ?",
+        (str(env["repo_dir"]),),
+    ).fetchone()
+    assert row2 == (env["commit_sha"], new_origin_head)
+
+
+def test_check_and_fetch_origin_skips_fetch_when_already_current(mock_graph_env, tmp_path, monkeypatch):
+    env = mock_graph_env
+    _add_origin_remote(env["repo_dir"], tmp_path)
+    subprocess.run(["git", "-C", str(env["repo_dir"]), "fetch", "origin"], check=True, capture_output=True)
+
+    calls = []
+    real_run = subprocess.run
+
+    def spy_run(args, **kwargs):
+        calls.append(args)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(ship_graph.subprocess, "run", spy_run)
+    result = ship_graph._check_and_fetch_origin(str(env["repo_dir"]))
+    assert result is not None
+    origin_ref, origin_head_sha, fetched_at = result
+    assert origin_ref == "origin/main"
+    assert origin_head_sha == env["commit_sha"]
+    assert not any("fetch" in c for c in calls)
+
+
+def test_check_and_fetch_origin_fetches_when_origin_moved(mock_graph_env, tmp_path):
+    env = mock_graph_env
+    bare = _add_origin_remote(env["repo_dir"], tmp_path)
+    subprocess.run(["git", "-C", str(env["repo_dir"]), "fetch", "origin"], check=True, capture_output=True)
+
+    other_clone = tmp_path / "other-clone-2"
+    subprocess.run(["git", "clone", str(bare), str(other_clone)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=other_clone, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=other_clone, check=True)
+    (other_clone / "app.py").write_text("# from upstream 2", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=other_clone, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(sync): another upstream-only change"], cwd=other_clone, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=other_clone, check=True)
+
+    result = ship_graph._check_and_fetch_origin(str(env["repo_dir"]))
+    assert result is not None
+    origin_ref, origin_head_sha, fetched_at = result
+    assert origin_ref == "origin/main"
+    assert origin_head_sha != env["commit_sha"]
+    # The local tracking ref must reflect the fetch this call performed.
+    assert ship_graph._get_origin_head_fast(str(env["repo_dir"]), "main") == origin_head_sha
+
+
+def test_repo_is_active_reflects_recent_commit_ts(mock_graph_env):
+    env = mock_graph_env
+    ship_graph.is_shipped("biometric webauthn login")  # populate commits table
+    conn = ship_graph._get_connection()
+    now = time.time()
+    assert ship_graph._repo_is_active(conn, "test-repo", now) is True
+    assert ship_graph._repo_is_active(conn, "nonexistent-repo", now) is False
+
+
+def test_repo_due_for_freshness_check_uses_active_vs_idle_window(mock_graph_env):
+    env = mock_graph_env
+    ship_graph.is_shipped("biometric webauthn login")
+    conn = ship_graph._get_connection()
+    repo_path = str(env["repo_dir"])
+    now = time.time()
+
+    # Never checked -- always due regardless of activity.
+    assert ship_graph._repo_due_for_freshness_check(conn, "test-repo", repo_path, now) is True
+
+    conn.execute("UPDATE repos SET fetched_at = ? WHERE path = ?", (now - 60, repo_path))
+    conn.commit()
+    # Active repo (recent commit), checked 1 min ago: not due (window=15min).
+    assert ship_graph._repo_due_for_freshness_check(conn, "test-repo", repo_path, now) is False
+
+    conn.execute("UPDATE repos SET fetched_at = ? WHERE path = ?", (now - 20 * 60, repo_path))
+    conn.commit()
+    # Checked 20 min ago: overdue for an active repo.
+    assert ship_graph._repo_due_for_freshness_check(conn, "test-repo", repo_path, now) is True
+
+
+def test_origin_freshness_tick_persists_result_and_skips_when_not_due(mock_graph_env, monkeypatch):
+    env = mock_graph_env
+    ship_graph.is_shipped("biometric webauthn login")
+    conn = ship_graph._get_connection()
+    repo_path = str(env["repo_dir"])
+
+    fetched_now = time.time()
+    monkeypatch.setattr(
+        ship_graph, "_check_and_fetch_origin",
+        lambda p: ("origin/main", "deadbeef", fetched_now),
+    )
+    checked = ship_graph._origin_freshness_tick(conn)
+    assert checked == 1
+    row = conn.execute(
+        "SELECT origin_ref, origin_head_sha, fetched_at FROM repos WHERE path = ?", (repo_path,)
+    ).fetchone()
+    assert row == ("origin/main", "deadbeef", fetched_now)
+
+    # Freshly checked -- a second tick should find nothing due.
+    calls = []
+    monkeypatch.setattr(ship_graph, "_check_and_fetch_origin", lambda p: calls.append(p))
+    checked2 = ship_graph._origin_freshness_tick(conn)
+    assert checked2 == 0
+    assert calls == []
+
+
+def test_is_shipped_reports_origin_freshness_when_known(mock_graph_env, tmp_path):
+    env = mock_graph_env
+    _add_origin_remote(env["repo_dir"], tmp_path)
+    topic = "Did we ship biometric webauthn login in test-repo?"
+    ship_graph.is_shipped(topic)  # syncs repos row
+
+    repo_path = ship_graph.discover_repo_roots()["test-repo"]
+    conn = ship_graph._get_connection()
+    conn.execute(
+        "UPDATE repos SET origin_ref = 'origin/main', fetched_at = ? WHERE path = ?",
+        (time.time() - 90, repo_path),
+    )
+    conn.commit()
+
+    res = ship_graph.is_shipped(topic)
+    freshness = res.get("origin_freshness")
+    assert freshness is not None
+    assert freshness["origin_ref"] == "origin/main"
+    assert freshness["age_s"] >= 90
+
+
+def test_is_shipped_omits_origin_freshness_when_never_fetched(mock_graph_env):
+    """A repo with no origin remote (or never background-checked) reports no
+    origin_freshness rather than a stale/zero placeholder."""
+    res = ship_graph.is_shipped("Did we ship biometric webauthn login in test-repo?")
+    assert res.get("origin_freshness") is None
+
+
 

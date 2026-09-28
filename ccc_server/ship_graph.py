@@ -512,6 +512,77 @@ def _get_repo_head_fast(path_str: str) -> str:
     return ""
 
 
+def _resolve_git_dir(path_str: str) -> Path:
+    """Resolve a checkout's `.git` entry to the real git dir, following
+    `gitdir:` indirection (linked worktrees) -- shared by the HEAD and
+    origin-ref fast-readers below."""
+    git_entry = Path(path_str) / ".git"
+    if git_entry.is_file():
+        try:
+            txt = git_entry.read_text(encoding="utf-8").strip()
+            if txt.startswith("gitdir:"):
+                p = Path(txt.split(":", 1)[1].strip())
+                return p if p.is_absolute() else (git_entry.parent / p).resolve()
+        except Exception:
+            pass
+    return git_entry
+
+
+def _read_ref_sha_fast(git_dir: Path, ref_path: str) -> str:
+    """Read one ref's SHA (loose, worktree commondir, or packed-refs) --
+    no subprocess. `ref_path` is relative to `git_dir`, e.g.
+    'refs/remotes/origin/main'."""
+    target = git_dir / ref_path
+    if target.exists():
+        try:
+            return target.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    commondir_file = git_dir / "commondir"
+    common_p = git_dir
+    if commondir_file.exists():
+        try:
+            cd_txt = commondir_file.read_text(encoding="utf-8").strip()
+            common_p = (git_dir / cd_txt).resolve()
+            target_c = common_p / ref_path
+            if target_c.exists():
+                return target_c.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    for base in (git_dir, common_p):
+        packed = base / "packed-refs"
+        if packed.exists():
+            try:
+                for line in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line.startswith("#") or line.startswith("^"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] == ref_path:
+                        return parts[0]
+            except Exception:
+                pass
+    return ""
+
+
+def _default_branch_name_fast(path_str: str) -> str:
+    """Best-guess default branch, no subprocess: whichever of main/master has
+    a local origin-tracking ref, else 'main'."""
+    git_dir = _resolve_git_dir(path_str)
+    for name in ("main", "master"):
+        if _read_ref_sha_fast(git_dir, f"refs/remotes/origin/{name}"):
+            return name
+    return "main"
+
+
+def _get_origin_head_fast(path_str: str, default_branch: str) -> str:
+    """Local-only read of `refs/remotes/origin/<default_branch>` -- the SHA
+    as of the last fetch, not a live network check. No subprocess."""
+    if not default_branch:
+        return ""
+    return _read_ref_sha_fast(_resolve_git_dir(path_str), f"refs/remotes/origin/{default_branch}")
+
+
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS meta (
@@ -523,7 +594,10 @@ def _init_db(conn: sqlite3.Connection) -> None:
             path TEXT PRIMARY KEY,
             name TEXT,
             head_sha TEXT,
-            indexed_at REAL
+            indexed_at REAL,
+            origin_ref TEXT DEFAULT '',
+            origin_head_sha TEXT DEFAULT '',
+            fetched_at REAL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS commits (
@@ -624,6 +698,14 @@ def _init_db(conn: sqlite3.Connection) -> None:
     if "on_main" not in cols:
         conn.execute("ALTER TABLE commits ADD COLUMN on_main INTEGER DEFAULT 0")
 
+    repo_cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    if "origin_ref" not in repo_cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN origin_ref TEXT DEFAULT ''")
+    if "origin_head_sha" not in repo_cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN origin_head_sha TEXT DEFAULT ''")
+    if "fetched_at" not in repo_cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN fetched_at REAL DEFAULT 0")
+
     sm_cols = {r[1] for r in conn.execute("PRAGMA table_info(session_meta)")}
     if "continuation_origin" not in sm_cols:
         conn.execute("ALTER TABLE session_meta ADD COLUMN continuation_origin TEXT DEFAULT ''")
@@ -654,14 +736,16 @@ def _get_connection() -> sqlite3.Connection:
 
 
 def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float) -> None:
-    cur = conn.execute("SELECT path, head_sha FROM repos")
-    have_heads = dict(cur.fetchall())
+    cur = conn.execute("SELECT path, head_sha, origin_head_sha FROM repos")
+    have = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
 
     for repo_name, repo_path in roots.items():
         current_head = _get_repo_head_fast(repo_path)
         if not current_head:
             continue
-        if have_heads.get(repo_path) == current_head:
+        default_branch = _default_branch_name_fast(repo_path)
+        current_origin_head = _get_origin_head_fast(repo_path, default_branch)
+        if have.get(repo_path) == (current_head, current_origin_head):
             continue
 
         # HEAD changed or new repo: batch git log once
@@ -749,8 +833,18 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
                 ticket_edges,
             )
             conn.execute(
-                "INSERT OR REPLACE INTO repos VALUES (?,?,?,?)",
-                (repo_path, repo_name, current_head, time.time()),
+                """
+                INSERT INTO repos (path, name, head_sha, indexed_at, origin_ref, origin_head_sha)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(path) DO UPDATE SET
+                    name=excluded.name,
+                    head_sha=excluded.head_sha,
+                    indexed_at=excluded.indexed_at,
+                    origin_ref=excluded.origin_ref,
+                    origin_head_sha=excluded.origin_head_sha
+                """,
+                (repo_path, repo_name, current_head, time.time(),
+                 f"origin/{default_branch}", current_origin_head),
             )
 
     # Prune repos that disappeared from discovery (e.g. hidden-path clones)
@@ -1333,10 +1427,126 @@ def _start_background_sync() -> None:
     threading.Thread(target=_worker, daemon=True, name="ship-graph-warm").start()
 
 
+_ORIGIN_FRESHNESS_LOCK = threading.Lock()
+_ORIGIN_FRESHNESS_STARTED = False
+_ORIGIN_FRESHNESS_TICK_INTERVAL_S = 60
+_ORIGIN_FRESHNESS_ACTIVE_WINDOW_S = 15 * 60
+_ORIGIN_FRESHNESS_IDLE_WINDOW_S = 24 * 60 * 60
+_ORIGIN_FRESHNESS_ACTIVITY_DAYS = 30
+_ORIGIN_FRESHNESS_MAX_WORKERS = 4
+
+
+def _repo_is_active(conn: sqlite3.Connection, repo_name: str, now: float) -> bool:
+    """True if repo had a commit in the last 30 days, per the already-
+    indexed commits table -- no git subprocess."""
+    cutoff = now - _ORIGIN_FRESHNESS_ACTIVITY_DAYS * 86400
+    row = conn.execute(
+        "SELECT 1 FROM commits WHERE repo = ? AND ts >= ? LIMIT 1", (repo_name, cutoff)
+    ).fetchone()
+    return row is not None
+
+
+def _repo_due_for_freshness_check(conn: sqlite3.Connection, repo_name: str, repo_path: str, now: float) -> bool:
+    row = conn.execute("SELECT fetched_at FROM repos WHERE path = ?", (repo_path,)).fetchone()
+    fetched_at = row[0] if row and row[0] else 0.0
+    window = _ORIGIN_FRESHNESS_ACTIVE_WINDOW_S if _repo_is_active(conn, repo_name, now) else _ORIGIN_FRESHNESS_IDLE_WINDOW_S
+    return (now - fetched_at) >= window
+
+
+def _check_and_fetch_origin(repo_path: str) -> tuple[str, str, float] | None:
+    """`ls-remote` first so an unchanged remote costs one small round trip
+    and no fetch; only `git fetch` when origin actually moved. Runs on a
+    worker thread -- no sqlite access here, the caller persists the result.
+    Returns (origin_ref, origin_head_sha, fetched_at), or None on failure."""
+    default_branch = _default_branch_name_fast(repo_path)
+    if not default_branch:
+        return None
+    try:
+        lr = subprocess.run(
+            ["git", "-C", repo_path, "ls-remote", "origin", f"refs/heads/{default_branch}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        remote_sha = lr.stdout.split()[0] if lr.returncode == 0 and lr.stdout.strip() else ""
+    except Exception:
+        remote_sha = ""
+
+    now = time.time()
+    local_origin_sha = _get_origin_head_fast(repo_path, default_branch)
+    if remote_sha and remote_sha == local_origin_sha:
+        return (f"origin/{default_branch}", local_origin_sha, now)
+
+    try:
+        subprocess.run(
+            ["git", "-C", repo_path, "fetch", "--quiet", "--no-tags",
+             "--no-write-fetch-head", "origin", default_branch],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        return None
+
+    new_origin_sha = _get_origin_head_fast(repo_path, default_branch)
+    return (f"origin/{default_branch}", new_origin_sha, now)
+
+
+def _origin_freshness_tick(conn: sqlite3.Connection) -> int:
+    """One pass over discovered repos: check+fetch every repo that's due
+    (bounded concurrency), persist results. Returns how many repos were
+    checked, for tests."""
+    roots = discover_repo_roots()
+    now = time.time()
+    due = [(name, path) for name, path in roots.items()
+           if _repo_due_for_freshness_check(conn, name, path, now)]
+    if not due:
+        return 0
+    with ThreadPoolExecutor(max_workers=_ORIGIN_FRESHNESS_MAX_WORKERS) as pool:
+        results = list(pool.map(lambda nr: _check_and_fetch_origin(nr[1]), due))
+    with conn:
+        for (_name, path), result in zip(due, results):
+            if result is None:
+                continue
+            origin_ref, origin_head_sha, fetched_at = result
+            conn.execute(
+                "UPDATE repos SET origin_ref = ?, origin_head_sha = ?, fetched_at = ? WHERE path = ?",
+                (origin_ref, origin_head_sha, fetched_at, path),
+            )
+    return len(due)
+
+
+def _run_origin_freshness_loop() -> None:
+    """Background daemon modeled on _start_usage_limit_watcher (usage_limit.py):
+    keeps each active repo's knowledge of origin/<default> fresh so the
+    request path (is_shipped) never has to spawn ls-remote/fetch itself.
+    Started once from warm_start(); idempotent while already running."""
+    global _ORIGIN_FRESHNESS_STARTED
+    with _ORIGIN_FRESHNESS_LOCK:
+        if _ORIGIN_FRESHNESS_STARTED:
+            return
+        _ORIGIN_FRESHNESS_STARTED = True
+
+    def _worker() -> None:
+        try:
+            conn = _connect(_get_db_path())
+            try:
+                _init_db(conn)
+                while True:
+                    try:
+                        _origin_freshness_tick(conn)
+                    except Exception:
+                        pass
+                    time.sleep(_ORIGIN_FRESHNESS_TICK_INTERVAL_S)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True, name="ship-graph-origin-freshness").start()
+
+
 def warm_start() -> None:
     """Call once at process/server start to begin warming the graph in the
     background before the first real request arrives."""
     _start_background_sync()
+    _run_origin_freshness_loop()
 
 
 def graph_health() -> dict:
@@ -1606,16 +1816,34 @@ def _clone_behind_count(repo_path: str) -> int | None:
     return behind
 
 
+def _origin_freshness_info(repo_path: str) -> dict | None:
+    """No-subprocess read of ship_graph.sqlite's cached view of how fresh our
+    knowledge of origin/<default> is -- what `ccc shipped` prints. Populated
+    by the background loop (_run_origin_freshness_loop), never by this call."""
+    conn = _get_connection()
+    row = conn.execute(
+        "SELECT origin_ref, fetched_at FROM repos WHERE path = ?", (repo_path,)
+    ).fetchone()
+    if not row or not row[0] or not row[1]:
+        return None
+    origin_ref, fetched_at = row
+    return {"origin_ref": origin_ref, "fetched_at": fetched_at, "age_s": max(0.0, time.time() - fetched_at)}
+
+
 def is_shipped(topic: str) -> dict:
     """Determine whether a topic has been shipped. Wraps `_is_shipped_impl`
     to annotate a NOT SHIPPED verdict with clone staleness, since a behind
-    local clone and 'never shipped' look identical to the search below."""
+    local clone and 'never shipped' look identical to the search below, and
+    every verdict with how fresh our knowledge of origin is."""
     result = _is_shipped_impl(topic)
-    if not result.get("shipped"):
-        roots = discover_repo_roots()
-        detected_repo, _ = detect_named_repo((topic or "").strip(), roots)
-        repo_path = roots.get(detected_repo) if detected_repo else None
-        if repo_path:
+    roots = discover_repo_roots()
+    detected_repo, _ = detect_named_repo((topic or "").strip(), roots)
+    repo_path = roots.get(detected_repo) if detected_repo else None
+    if repo_path:
+        freshness = _origin_freshness_info(repo_path)
+        if freshness:
+            result["origin_freshness"] = freshness
+        if not result.get("shipped"):
             behind = _clone_behind_count(repo_path)
             if behind:
                 result["stale_clone"] = {"repo": detected_repo, "behind": behind}
