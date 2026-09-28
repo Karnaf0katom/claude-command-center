@@ -50,6 +50,9 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(kimi_dir))
     monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(gemini_dir))
     monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(cursor_dir))
+    # Isolate the Hermes messages_fts channel (S9) -- see test_session_fts.py.
+    monkeypatch.setattr(server, "HERMES_STATE_DB", tmp_path / "hermes" / "state.db")
+    monkeypatch.setattr(server, "HERMES_PROFILES_DIR", tmp_path / "hermes" / "profiles")
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     monkeypatch.setenv("CCC_SESSION_FTS_EMBED", "0")
