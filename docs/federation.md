@@ -81,7 +81,17 @@ Anywhere a `session_id` is accepted, a global reference
   owner and relay the result.
 - `GET /api/sessions?federated=1` returns one list across all nodes with
   per-node health; unreachable peers serve their last known rows **labeled
-  stale**, never silently.
+  stale**, never silently. Each peer entry in `nodes` also carries `web_url`
+  (its browser-reachable address, from its Tailscale Serve entry) and
+  `web_url_state` (`ok`, `none`, `pin`, or `unknown`); `peers_only=1` skips
+  the local rows.
+- **Sidebar**: peer sessions appear under "Other machines" in the Coding tab
+  with a machine chip. Clicking one embeds that peer's own CCC
+  (`<web_url>/?ccc_popout=conversation&conv=<id>`) over the main pane, so the
+  peer needs a web address (Settings > Phone access, or a `tailscale serve`
+  root that proxies to CCC). A peer with no address, or one with a Phone
+  access PIN (its cookie cannot ride a cross-site frame), is listed but not
+  openable.
 - Group chats carry a `host_node`. Remote participants are nudged with the
   chat's uuid + host reference and read/post through their own CCC, which
   proxies to the host. If the host is unreachable, reads fail truthfully
