@@ -68002,7 +68002,10 @@
     // Perf metric 1 start (archive_load): first placeholder render this page
     // load wins the clock. Guarded so a later re-show (search-cleared,
     // window-switch) doesn't restart the timer for an already-loaded archive.
-    if (_perfArchiveT0 === null) {
+    // Reader-only popouts render this into a hidden #convList and never kick
+    // the archive fetch, so the clock ran until some unrelated refresh landed
+    // (CCC-1208: a conversation popout reported a 35s "cold" archive_load).
+    if (_perfArchiveT0 === null && !READER_ONLY_POPOUT) {
       try { _perfArchiveT0 = performance.now(); } catch (_) {}
     }
     return '<div class="archive-empty-state archive-loading-placeholder">'

@@ -146,3 +146,13 @@ test('a page that loads hidden subtracts time until it is first shown', () => {
   p.setNow(3600000); p.show();         // shown an hour later
   assert.equal(p.active(0, 3601000), 1000);
 });
+
+test('reader-only popouts never start the archive_load clock', () => {
+  // CCC-1208: a conversation popout renders the archive placeholder into a
+  // hidden #convList without fetching the archive, so the clock ran until an
+  // unrelated refresh landed (35s "cold" archive_load).
+  const at = app.indexOf('function _archiveLoadingPlaceholderHtml(');
+  assert.ok(at > 0);
+  const body = app.slice(at, app.indexOf('return ', at));
+  assert.match(body, /if \(_perfArchiveT0 === null && !READER_ONLY_POPOUT\)/);
+});

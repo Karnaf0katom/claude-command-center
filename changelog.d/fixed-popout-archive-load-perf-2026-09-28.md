@@ -1,0 +1,1 @@
+- Conversation popout windows no longer report false slow "archive load" perf samples; the popout has no visible sidebar, so its archive clock no longer runs.
