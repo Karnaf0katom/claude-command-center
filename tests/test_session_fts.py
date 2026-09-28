@@ -608,3 +608,29 @@ def test_kimi_sid_migration_rekeys_existing_rows(fts_env):
     assert conn.execute("SELECT COUNT(*) FROM sdoc WHERE sid = ?", (bare_sid,)).fetchone()[0] == 1
     results = session_fts.search_sessions("quokka migration")
     assert results[0]["session_id"] == bare_sid
+
+
+def test_candidate_files_default_window_covers_a_year_not_45_days(fts_env, monkeypatch):
+    """MEMORY-19: a real hand-verified question's answer session (Codex, 68
+    days old) was silently unindexable under the old 45-day default -- no
+    ranking fix can recover a candidate _candidate_files() never returns.
+    The default must cover at least ~68 days (measured) and still respect
+    *some* cutoff (not literally unbounded) at ~a year+1."""
+    monkeypatch.delenv("CCC_SESSION_FTS_DAYS", raising=False)
+
+    recent_sid = "11111111-0000-0000-0000-000000000001"
+    old_sid = "22222222-0000-0000-0000-000000000002"
+    ancient_sid = "33333333-0000-0000-0000-000000000003"
+    for sid, days_ago in ((recent_sid, 1), (old_sid, 68), (ancient_sid, 400)):
+        f = fts_env["projects"] / "repo" / f"{sid}.jsonl"
+        _write_claude_jsonl(f, sid, [
+            {"type": "user", "cwd": "/repo", "message": {"role": "user", "content": "windowtest marker"}},
+        ])
+        ts = time.time() - days_ago * 86400
+        os.utime(f, (ts, ts))
+
+    found = {(eng, path) for eng, path, _mt, _sz in session_fts._candidate_files()}
+    found_sids = {Path(p).stem for _eng, p in found}
+    assert recent_sid in found_sids, "a 1-day-old session must always be a candidate"
+    assert old_sid in found_sids, "a 68-day-old session regressed past the old 45-day cutoff"
+    assert ancient_sid not in found_sids, "the window must still have *some* bound, not be unbounded"

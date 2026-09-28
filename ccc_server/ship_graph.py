@@ -260,9 +260,12 @@ def _get_codex_dir() -> Path:
 
 def _get_days() -> float:
     try:
-        return float(os.environ.get("CCC_SHIP_GRAPH_DAYS", os.environ.get("BENCH_DAYS", "45")))
+        # MEMORY-19: was "45" -- see session_fts._candidate_files()'s longer
+        # note; same 68-day-old real transcript was also invisible to this
+        # module's own session_meta (repo/date) sync at the old default.
+        return float(os.environ.get("CCC_SHIP_GRAPH_DAYS", os.environ.get("BENCH_DAYS", "365")))
     except ValueError:
-        return 45.0
+        return 365.0
 
 
 def _stem(w: str) -> str:

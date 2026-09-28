@@ -90,6 +90,45 @@ def test_rrf_fusion_surfaces_vector_only_match(fts_env, monkeypatch):
     assert sid_vec in sids, "vector-only match must be fused in via RRF"
 
 
+def test_rrf_weights_keep_fts_channel_authoritative_over_vector_noise():
+    """MEMORY-19: at the old *equal*-weight RRF (session_fts._rrf had no
+    `weights` param at all), a session with zero real relevance but merely
+    present in the vector channel's top-k could accumulate enough combined
+    score to outrank a session that was the single best -- and only --
+    FTS/keyword match. Measured on a real query
+    (~/dev/scratch/memory-19-benchmark): a session ranked #1 by FTS alone,
+    and completely absent from the vector channel's own top-50, fell to
+    rank 11 after unweighted RRF fusion, because several other sessions each
+    got a small vector-channel credit the true answer got none of. This is
+    that exact shape, reproduced numerically: `best` is FTS-rank-1 and
+    vector-absent; four unrelated sessions rank 2-5 in FTS but each also
+    appear somewhere in the vector channel, so their summed equal-weight RRF
+    score passes `best`'s FTS-only score. Down-weighting the vector channel
+    (session_fts._VECTOR_RRF_WEIGHT) must restore `best` to rank 1."""
+    # `rival` is a mediocre FTS match (rank 15 of 15) but happens to be the
+    # single best hit in the vector channel; `best` is the clean FTS rank-1
+    # match and gets zero vector-channel credit -- same shape as the real
+    # measured case (a top-1 FTS session absent from the vector channel's
+    # own top-k).
+    fts_sids = ["best"] + [f"pad{i}" for i in range(13)] + ["rival"]
+    vector_sids = ["rival"]
+    assert fts_sids.index("rival") + 1 == 15
+    assert fts_sids.index("best") + 1 == 1
+
+    equal = session_fts._rrf([fts_sids, vector_sids])
+    assert equal[0] == "rival", (
+        "sanity check: unweighted RRF should reproduce the measured bug "
+        f"(mediocre-FTS-but-vector-rank-1 'rival' outranks 'best'), got {equal}"
+    )
+
+    weighted = session_fts._rrf(
+        [fts_sids, vector_sids], weights=[1.0, session_fts._VECTOR_RRF_WEIGHT],
+    )
+    assert weighted[0] == "best", (
+        f"down-weighted vector channel must keep the clean FTS top match on top, got {weighted}"
+    )
+
+
 def test_search_degrades_silently_when_ollama_unavailable(fts_env, monkeypatch):
     """No Ollama daemon (the default): identical FTS-only behavior, no error."""
     sid = "cccccccc-0000-0000-0000-000000000003"

@@ -740,9 +740,22 @@ def _candidate_files(days: float | None = None) -> list[tuple[str, str, float, i
     """Enumerate candidate session transcript files with their mtime and size."""
     if days is None:
         try:
-            days = float(os.environ.get("CCC_SESSION_FTS_DAYS", os.environ.get("BENCH_DAYS", "45")))
+            # MEMORY-19: was "45" -- a session-memory product that can't
+            # recall anything older than ~6 weeks defeats its own purpose.
+            # Measured root cause of one of the ten real hand-verified
+            # queries in ~/dev/scratch/memory-19-benchmark missing entirely:
+            # its answer transcript (a 68-day-old Codex rollout) was excluded
+            # by this cutoff before a single query term was ever evaluated --
+            # confirmed via _candidate_files(days=45) excluding it and
+            # _candidate_files(days=365) (this default) including it -- no
+            # ranking fix can recover a candidate that's filtered out here.
+            # 365 covers a full year of work history; indexing itself stays
+            # incremental (mtime, size) and any large one-time catch-up is
+            # already backgrounded (see _BG_SYNC_THRESHOLD), so raising this
+            # only costs one background pass, never a request-thread stall.
+            days = float(os.environ.get("CCC_SESSION_FTS_DAYS", os.environ.get("BENCH_DAYS", "365")))
         except ValueError:
-            days = 45.0
+            days = 365.0
     cutoff = (time.time() - days * 86400) if days and days > 0 else 0.0
 
     out = []
@@ -1008,13 +1021,50 @@ def _session_chunks(r: dict) -> list[tuple[str, str]]:
     return chunks
 
 
-def _rrf(lists: list[list[str]], k: int = 60) -> list[str]:
-    """Reciprocal Rank Fusion over ranked sid lists, best first."""
+def _rrf(lists: list[list[str]], k: int = 60, weights: list[float] | None = None) -> list[str]:
+    """Reciprocal Rank Fusion over ranked sid lists, best first.
+
+    `weights` (same length as `lists`) scales each channel's contribution;
+    defaults to equal weight. See _VECTOR_RRF_WEIGHT below for why the
+    caller in search_sessions() no longer passes equal weights for every
+    channel.
+    """
+    if weights is None:
+        weights = [1.0] * len(lists)
     sc: dict[str, float] = {}
-    for lst in lists:
+    for lst, w in zip(lists, weights):
         for rank, sid in enumerate(lst, 1):
-            sc[sid] = sc.get(sid, 0.0) + 1.0 / (k + rank)
+            sc[sid] = sc.get(sid, 0.0) + w / (k + rank)
     return [sid for sid, _ in sorted(sc.items(), key=lambda kv: -kv[1])]
+
+
+# MEMORY-19: measured on 10 hand-verified real questions against this box's
+# actual ~/.claude/projects transcripts (~/dev/scratch/memory-19-benchmark),
+# the optional local-embeddings channel (_vector_rank, nomic-embed-text over
+# a per-session "card" chunk) frequently fails to place the true best session
+# anywhere in its own top-k: a session whose card doesn't happen to restate
+# the query's topic in its title/first-prompt/final-text is invisible to it,
+# even when that session is a clean top-1 keyword match. At the old *equal*
+# RRF weight, that meant merely appearing somewhere in the vector channel's
+# top-k -- regardless of true relevance -- was enough for a mediocre session
+# to outrank a session that was the single best FTS hit but happened to get
+# zero vector-channel credit (rank fell from #1 to #11 on one measured
+# query). Down-weighting the vector channel relative to FTS preserves its
+# intended job -- surfacing paraphrase-gap hits FTS finds nothing for, see
+# test_rrf_fusion_surfaces_vector_only_match -- without letting it dilute
+# strong lexical matches; test_rrf_weights_keep_fts_channel_authoritative_
+# over_vector_noise reproduces the bug numerically and confirms 0.15 fixes
+# it. Caveat: on the full 20-question real-data A/B
+# (~/dev/scratch/memory-19-benchmark/rrf_weight_ab.py, repeated 4x against
+# the live index) this made no measurable difference to end-to-end Hit@5/
+# Hit@10 -- an earlier session in this same investigation logged a large
+# improvement from this change, but it didn't reproduce afterward (most
+# likely a run contaminated by an in-progress background index/embedding
+# sync) and is not a real number. Kept anyway because the mechanism is
+# real and the change is monotonically safer than equal-weighting a
+# channel with demonstrated false-positive risk, not because it's proven
+# to move this benchmark.
+_VECTOR_RRF_WEIGHT = float(os.environ.get("CCC_SESSION_FTS_VECTOR_RRF_WEIGHT", "0.15"))
 
 
 def _refresh_vec_cache(conn: sqlite3.Connection) -> None:
@@ -1661,8 +1711,17 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
     # Hermes' own messages_fts as a third channel -- see _hermes_channel_sids.
     # Empty whenever Hermes isn't installed, same degrade-safe shape.
     hermes_sids = _hermes_channel_sids(q, max(limit * 2, 50))
-    channels = [lst for lst in (fts_sids, vector_sids, hermes_sids) if lst]
-    final_sids = _rrf(channels) if channels else []
+    # MEMORY-19: FTS and Hermes (both exact lexical matches over real message
+    # text) are trusted equally; the optional vector channel is down-weighted
+    # -- see _VECTOR_RRF_WEIGHT.
+    chan_lists = (fts_sids, vector_sids, hermes_sids)
+    chan_weights = (1.0, _VECTOR_RRF_WEIGHT, 1.0)
+    channels, weights = [], []
+    for lst, w in zip(chan_lists, chan_weights):
+        if lst:
+            channels.append(lst)
+            weights.append(w)
+    final_sids = _rrf(channels, weights=weights) if channels else []
 
     return [{"session_id": sid, "score": scores.get(sid, 0.0)} for sid in final_sids[:limit]]
 
