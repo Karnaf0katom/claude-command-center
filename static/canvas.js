@@ -1,6 +1,6 @@
 /* Pipeline Canvas — the fleet-topology node graph.
  *
- * Spec: docs/superpowers/specs/2026-09-15-pipeline-canvas-design.md.
+ * Spec: private design doc (pipeline canvas, 2026-09-15).
  *
  * One canvas, two node populations:
  *   - runtime nodes: every WatchTower queue, rendered from /api/canvas/state

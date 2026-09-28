@@ -21,7 +21,7 @@ jobs:
             exit 1
           fi
           if git grep -n -E 'docs/superpowers/|finish-report-2026-07-16\.md' -- \
-            ':!.github/workflows/ci.yml' ':!AGENTS.md' ':!CLAUDE.md'; then
+            ':!.github/workflows/ci.yml' ':!AGENTS.md' ':!CLAUDE.md' ':!docs/agent-rules.md'; then
             echo "stale private-document reference in public checkout" >&2
             exit 1
           fi

@@ -1,6 +1,6 @@
 """Pipeline Canvas — read-only fleet topology for the canvas surface.
 
-Spec: docs/superpowers/specs/2026-09-15-pipeline-canvas-design.md.
+Spec: private design doc (pipeline canvas, 2026-09-15).
 
 The canvas renders REAL WatchTower truth — queue definitions from
 ``queue-config.json`` and live per-queue health from

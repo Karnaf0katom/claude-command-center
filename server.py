@@ -25250,8 +25250,8 @@ _adopt_ccc_module("decision_extraction")
 _adopt_ccc_module("spawn_ledger")
 
 # Pipeline Canvas — read-only fleet topology (/api/canvas/state) plus the
-# canvas view-state document (/api/canvas/layout). See
-# docs/superpowers/specs/2026-09-15-pipeline-canvas-design.md.
+# canvas view-state document (/api/canvas/layout). Design spec lives in
+# the private docs repo (pipeline canvas, 2026-09-15).
 _adopt_ccc_module("pipeline_canvas")
 
 # ---------------------------------------------------------------------------
