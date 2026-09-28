@@ -13742,6 +13742,53 @@
       .replace(ANNOTATION_IMG_RE, (_m, path) => pastedImageTag(path));
   }
 
+  // Peer (child -> parent) reports arrive as one dense blob:
+  // "STATUS: ...\nSUMMARY: (1) ... (2) ... Needs Amir: ...\nFILES: a, b, c".
+  // Give it breathing room without restyling: each LABEL: line is its own
+  // block, "(N)" items and "Needs X:" callouts start new paragraphs, and
+  // FILES lists one path per line. Returns '' when there's no structure,
+  // so ordinary peer chatter keeps the plain rendering.
+  const PEER_LABEL_RE = /^([A-Z][A-Z0-9 _/-]{1,30}):[ \t]*(.*)$/;
+  function splitTopLevelCommas(s) {
+    const out = [];
+    let depth = 0, cur = '';
+    for (const ch of s) {
+      if (ch === '{' || ch === '(' || ch === '[') depth++;
+      else if ((ch === '}' || ch === ')' || ch === ']') && depth > 0) depth--;
+      if (ch === ',' && depth === 0) { if (cur.trim()) out.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+  function formatPeerMessageHtml(text) {
+    const lines = String(text || '').split('\n');
+    if (!lines.some(l => PEER_LABEL_RE.test(l.trim()))) return '';
+    const fmt = s => linkifyPastedImages(escapeHtml(s));
+    const paras = body => body
+      .split(/\s+(?=\(\d+\)\s)|\s+(?=Needs [A-Z][\w-]*:)/)
+      .map(p => p.trim()).filter(Boolean)
+      .map(p => '<p class="peer-para">' + fmt(p)
+        .replace(/^(\(\d+\))/, '<strong>$1</strong>')
+        .replace(/^(Needs [A-Z][\w-]*:)/, '<strong>$1</strong>') + '</p>')
+      .join('');
+    let html = '';
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      const m = line.match(PEER_LABEL_RE);
+      if (!m) { html += paras(line); continue; }
+      const label = m[1], body = m[2];
+      const items = /^FILES?$/.test(label) ? splitTopLevelCommas(body) : null;
+      html += '<div class="peer-section"><span class="peer-section-label">' + escapeHtml(label) + ':</span>'
+        + (items && items.length > 1
+          ? '<ul class="peer-list">' + items.map(i => '<li>' + fmt(i) + '</li>').join('') + '</ul>'
+          : (body ? ' ' + (/^\(\d+\)\s/.test(body) || body.length > 160 ? paras(body) : fmt(body)) : ''))
+        + '</div>';
+    }
+    return '<div class="peer-structured">' + html + '</div>';
+  }
+
   function renderImageDescriptors(images) {
     if (!Array.isArray(images) || !images.length) return '';
     let html = '';
@@ -60159,7 +60206,8 @@
               + _imagesHtml
               + '</div>';
           } else {
-            textHtml = '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(cleanedText) + '">' + bridgeSenderHtml + (_codexPane ? renderCodexUserText(cleanedText) : linkifyPastedImages(escapeHtml(cleanedText))) + '</div>';
+            const _peerHtml = (ev.peer && !_codexPane) ? formatPeerMessageHtml(cleanedText) : '';
+            textHtml = '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(cleanedText) + '">' + bridgeSenderHtml + (_peerHtml || (_codexPane ? renderCodexUserText(cleanedText) : linkifyPastedImages(escapeHtml(cleanedText)))) + '</div>';
           }
         } else {
           textHtml = bridgeSenderHtml ? '<div class="user-msg" dir="auto" data-raw-text="">' + bridgeSenderHtml + '</div>' : '';

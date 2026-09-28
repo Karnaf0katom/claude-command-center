@@ -1,0 +1,1 @@
+- Peer reports from child sessions (STATUS/SUMMARY/FILES) now render with section breaks, one paragraph per numbered item or "Needs ...:" callout, and one file per line.
