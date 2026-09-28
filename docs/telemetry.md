@@ -116,9 +116,10 @@ request's IP at the moment it arrives — the raw IP is never stored (see
 transiently, in the same request, by Cloudflare's infrastructure rather
 than ours.
 
-The public stats page shows country and US-state breakdowns from this data
-with small buckets suppressed (see
-[`/v1/stats` aggregation](#v1stats-aggregation)) so an individual beacon
+The public stats page shows country and region breakdowns from this data,
+one ISO week at a time, counted per install (not per beacon) with small
+buckets suppressed (see
+[`/v1/stats` aggregation](#v1stats-aggregation)) so an individual install
 from a rare country or state is never singled out.
 
 ## The IP hash
@@ -165,23 +166,41 @@ because the beacon carries no identity to withdraw consent for.
 existing ones are never renamed or removed. Beyond the existing totals and
 30/90-day daily buckets, it now includes:
 
-- `totals.weekly_new_installs` / `totals.weekly_new_installs_all` — count
-  of beacons with `first_this_week = 1` in roughly the current week (a
-  trailing 7-day SQL window approximating the ISO week each client used),
-  without and with the maintainer's own machine.
-- `totals.monthly_new_installs` / `totals.monthly_new_installs_all` — same
-  idea, scoped to the current UTC calendar month exactly.
-- `countries_7d` — `[{country, beacons}, ...]` for the last 7 days,
-  dev rows excluded.
-- `regions_7d` — `[{region, beacons}, ...]` for the last 7 days, dev rows
-  excluded.
-- `us_vs_intl_7d` — `{us, intl}` beacon counts for the last 7 days.
+- `totals.weekly_active_installs` / `totals.weekly_active_installs_all` —
+  count of beacons with `first_this_week = 1` since the current ISO week's
+  Monday (UTC), without and with the maintainer's own machine.
+  `totals.weekly_active_installs_prev` / `_all` is the same count for the
+  last *complete* ISO week (last Monday up to, not including, this Monday).
+  The boundary is exact — a trailing 7-day window would double-count any
+  install that beacons both in the tail of last week and the start of this
+  one, since `first_this_week` is set once per ISO week, not once per
+  rolling 7 days.
+- `totals.monthly_active_installs` / `_all` — same idea, scoped to the
+  current UTC calendar month exactly; `totals.monthly_active_installs_prev`
+  / `_all` is the previous complete calendar month.
+- `geo_week` — `{week_start, countries, regions, us, intl}`, one full ISO
+  week of coarse geo, counting **installs**, not beacons: only rows with
+  `first_this_week = 1` are included, so an install beaconing every day
+  from the same place counts once, not up to 7 times. `week_start` is the
+  Monday (UTC, `YYYY-MM-DD`) of the week the data covers — the previous
+  complete ISO week if it already has any qualifying rows, otherwise the
+  current in-progress week (so the card isn't empty on day one, and then
+  becomes stable once a full week has passed). `countries` is
+  `[{country, installs}, ...]`; `regions` is
+  `[{country, region, installs}, ...]` (keyed by both fields, so e.g. the
+  US state of Georgia and the country of Georgia are never merged); `us`
+  and `intl` are beacon-country totals over the same week. Dev rows are
+  excluded from all four.
 
-**Minimum-count suppression.** In `countries_7d` and `regions_7d`, any
-country or region with fewer than 3 beacons in the window is folded into a
-single `{country: "other", ...}` / `{region: "other", ...}` bucket instead
-of being named. A single beacon from a rare country or a small state can
-never be read off the public page as "this one person is here."
+**Minimum-count suppression.** In `geo_week.countries` and
+`geo_week.regions`, any bucket with fewer than 3 installs in the week is
+folded into a single row with every key field set to `"other"` (so a
+suppressed region can never be paired back up with a real country) instead
+of being named. An install from a rare country or a small state can never
+be read off the public page as "this one person is here" — and because
+suppression counts distinct installs rather than beacon volume, an install
+that beacons daily from a rare state can't out-beacon its way past the
+threshold either.
 
 These fields fill in gradually as the fleet updates to this build — a
 v1-only beacon (pre-2026-09-28) stores `NULL` for `first_this_week` /

@@ -21,10 +21,12 @@ lives here so every persisted value is auditable.
 - Accepts an empty `POST /v1/download`; it never receives the request object
   and writes only receive time, `ccc.dmg`, and `landing-hero`.
 - Serves aggregate-only `GET /v1/stats`, additive-only: totals, 30-day daily
-  buckets, weekly/monthly new-install counts derived from
-  `first_this_week`/`first_this_month`, `countries_7d`/`regions_7d` (buckets
-  under 3 beacons folded into `"other"`), `us_vs_intl_7d`, and site download
-  clicks.
+  buckets, weekly/monthly active-install counts derived from
+  `first_this_week`/`first_this_month` bound to exact ISO-week/calendar-month
+  boundaries (current and previous complete period, never a double-counting
+  trailing window), and `geo_week` — one ISO week of country/region
+  breakdown counted per install, buckets under 3 installs folded into
+  `"other"` — plus site download clicks.
 - Drops any unknown fields silently. Rejects requests where the listed
   fields fail type validation.
 - **Drops the source IP** before writing anywhere durable. The Worker
@@ -87,29 +89,44 @@ ORDER BY date DESC;
 
 The open beacon carries no identifier, so its weekly/monthly "installs"
 figures come from each client's own `first_this_week` / `first_this_month`
-flag instead of a `COUNT(DISTINCT ...)`:
+flag instead of a `COUNT(DISTINCT ...)`. The window is the exact ISO week
+(Monday-Sunday UTC), not a trailing 7 days — `first_this_week` is set once
+per ISO week, so a rolling window double-counts any install active in both
+the tail of last week and the start of this one. SQLite's `'weekday 1'`
+modifier gives the Monday of the ISO week containing a date (verified with
+the `sqlite3` CLI against a Monday, Wednesday and Sunday "now" substitute:
+`date('2026-09-28','-6 days','weekday 1')`,
+`date('2026-09-30','-6 days','weekday 1')`, and
+`date('2026-10-04','-6 days','weekday 1')` all resolve to `2026-09-28`, the
+Monday of that ISO week):
 
 ```sql
-SELECT COUNT(*) AS weekly_new_installs
+SELECT COUNT(*) AS weekly_active_installs
 FROM opens
 WHERE first_this_week = 1
-  AND received_at >= date('now', '-6 days');
+  AND received_at >= date('now', '-6 days', 'weekday 1');
 ```
 
-Geo breakdowns group by the sanitized `country` / `region` columns and are
-suppressed below a minimum count before they ever reach `/v1/stats`:
+Geo breakdowns count **installs**, not beacons: only `first_this_week = 1`
+rows are included, over one ISO week (`geo_week.week_start` in the
+response), grouped by the sanitized `country` + `region` columns together
+(so the US state "Georgia" and the country "Georgia" never merge), and
+suppressed below a minimum install count before they ever reach
+`/v1/stats`:
 
 ```sql
-SELECT country, COUNT(*) AS beacons
+SELECT country, region, COUNT(*) AS installs
 FROM opens
-WHERE received_at >= date('now', '-6 days') AND country IS NOT NULL
-GROUP BY country
-ORDER BY beacons DESC;
+WHERE first_this_week = 1
+  AND received_at >= :week_start AND received_at < :week_end
+  AND region IS NOT NULL
+GROUP BY country, region
+ORDER BY installs DESC;
 ```
 
 No per-install or per-beacon rows are ever published; `/v1/stats` returns
-aggregates only, with small geo buckets folded into `"other"`
-(`suppressSmallBuckets` in `index.js`).
+aggregates only, with small geo buckets folded into a single row with every
+key field set to `"other"` (`suppressSmallBuckets` in `index.js`).
 
 ## Why this lives in the same repo
 

@@ -46,13 +46,18 @@ beacon, which needs no opt-in. The kill switch in
 — new fields are added over time, existing ones are never renamed or
 removed. As of the migration above it also returns:
 
-- Weekly and monthly new-install counts (`weekly_new_installs`,
-  `monthly_new_installs`, and `_all` variants including the maintainer's own
-  machine), derived from the `first_this_week` / `first_this_month` flags
-  each beacon computes locally — no identifier involved.
-- `countries_7d` / `regions_7d` — beacon counts by country / US region over
-  the last 7 days, with any bucket under 3 beacons folded into `"other"`.
-- `us_vs_intl_7d` — US vs. non-US beacon counts over the last 7 days.
+- Weekly and monthly active-install counts (`weekly_active_installs`,
+  `monthly_active_installs`, `_prev` variants for the last complete
+  period, and `_all` variants including the maintainer's own machine),
+  derived from the `first_this_week` / `first_this_month` flags each
+  beacon computes locally — no identifier involved. The weekly figures are
+  bound to the exact ISO week (Monday-Sunday UTC), not a trailing 7-day
+  window, so an install active across a week boundary is never counted
+  twice.
+- `geo_week` — one ISO week of country/region breakdown, counted per
+  **install** (only `first_this_week = 1` rows), with any country or
+  region under 3 installs folded into `"other"`. `week_start` says which
+  Monday the numbers cover.
 
 Legacy opt-in install counts use `COUNT(DISTINCT install_id)` and only cover
 activity from before the retirement. Download clicks use simple counts
