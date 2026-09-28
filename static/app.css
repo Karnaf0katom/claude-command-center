@@ -28429,11 +28429,15 @@ body.status-pos-right .status-rail-pane[data-rail-pane="metadata"] > .files-pane
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 6px 0 10px;
+  padding: 12px 14px 10px;
+  margin: -12px -14px 0;
   position: sticky;
-  top: 0;
-  z-index: 1;
-  background: inherit;
+  top: -12px;
+  z-index: 2;
+  /* .ask-log is transparent, so `inherit` let scrolled answers show through
+     the pinned strip. Match the pane's base colour instead. */
+  background: color-mix(in srgb, var(--surface, #242b35) 65%, #3f8fc6);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 }
 .ask-quick-prompts .ask-prompt-chip {
   padding: 5px 9px;
@@ -28635,8 +28639,53 @@ body.status-pos-right .status-rail-pane[data-rail-pane="metadata"] > .files-pane
   padding-left: 18px;
 }
 .ask-turn-body li {
-  margin-bottom: 3px;
+  margin-bottom: 6px;
 }
+/* Topic labels ("**CCC feature work** — …") carry the answer; chips are footnotes. */
+.ask-turn-body strong {
+  font-weight: 700;
+  color: var(--text-strong, #fff);
+}
+.ask-turn-body li > strong:first-child,
+.ask-turn-body li > p:first-child > strong:first-child {
+  font-size: 13px;
+}
+.ask-turn-body .ask-session-chip {
+  max-width: 200px;
+  padding: 0 6px;
+  gap: 4px;
+  margin: 0 1px;
+  font-size: 10.5px;
+  line-height: 16px;
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted, #8b949e);
+}
+.ask-turn-body .ask-session-chip:hover { color: var(--text, #e6edf3); }
+.ask-turn-body .ask-session-chip .ask-dot { width: 5px; height: 5px; }
+
+/* What Mazkir looked at, above the answer: debugging aid, kept quiet. */
+.ask-trace {
+  list-style: disc;
+  margin: 0 0 8px;
+  padding: 0 0 6px 14px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-muted, #8b949e);
+}
+.ask-trace li { overflow-wrap: anywhere; }
+.ask-trace-tool { color: var(--text, #c9d1d9); opacity: .85; }
+.ask-more-sources > summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--text-muted, #8b949e);
+}
+.ask-more-sources > summary::-webkit-details-marker { display: none; }
+.ask-more-sources .ask-session-chip { max-width: 240px; font-size: 11px; padding: 1px 7px; }
 
 /* Assistant Action Toolbar */
 .ask-turn-a .assistant-message-actions {

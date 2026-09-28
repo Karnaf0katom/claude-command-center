@@ -165,11 +165,17 @@ class WarmProcess:
         self._send(prompt)
         self.requests += 1
         ttft_ms = None
+        tool_calls: dict[str, dict] = {}  # tool_use id -> {name, input}, in call order
         while True:
             ev = self._next(deadline)
             typ = ev.get("type")
             if typ == "system" and ev.get("subtype") == "init":
                 self._note_session(ev)
+            elif typ == "assistant":
+                for block in (ev.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_calls.setdefault(str(block.get("id") or len(tool_calls)),
+                                              {"name": block.get("name") or "?", "input": block.get("input") or {}})
             elif typ == "stream_event" and ttft_ms is None:
                 delta = (ev.get("event") or {}).get("delta") or {}
                 if delta.get("type") == "text_delta" and delta.get("text"):
@@ -184,6 +190,7 @@ class WarmProcess:
                     "duration_ms": ev.get("duration_ms"),
                     "claude_session_id": ev.get("session_id"),
                     "ttft_ms": ttft_ms,
+                    "tool_calls": list(tool_calls.values()),
                 }
 
     def clear(self, timeout: float = CLEAR_TIMEOUT_SEC) -> bool:

@@ -4,7 +4,7 @@
 Answers every user line with init + one text delta + result, keeping its own
 conversation history so tests can see whether /clear isolated requests.
 Special inputs: "/clear" resets (unless FAKE_NO_RESET=1), "CRASH" exits,
-"HANG" never answers. Arguments are ignored.
+"HANG" never answers, "TOOL..." emits one tool_use first. Arguments are ignored.
 """
 import json
 import os
@@ -39,6 +39,12 @@ for line in sys.stdin:
     if text == "HANG":
         time.sleep(3600)
     emit({"type": "system", "subtype": "init", "session_id": sid})
+    if text.startswith("TOOL"):
+        # One tool round, emitted twice as partial messages repeat blocks.
+        block = {"type": "tool_use", "id": "tu_1", "name": "mcp__claude-index__search_sessions",
+                 "input": {"query": "mazkir chips"}}
+        emit({"type": "assistant", "message": {"content": [block]}})
+        emit({"type": "assistant", "message": {"content": [block]}})
     emit({"type": "stream_event", "event": {"type": "content_block_delta",
                                             "delta": {"type": "text_delta", "text": "n"}}})
     answer = f"n={len(history)} pid={os.getpid()}"

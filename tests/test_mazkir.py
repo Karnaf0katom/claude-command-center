@@ -264,8 +264,6 @@ class OutsideUserDefaultsTest(unittest.TestCase):
         self.assertRegex(out[0]["last_ts"], r"^\d{4}-\d{2}-\d{2}$")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 CHECKIN_MD = """# Daily check-in agenda
@@ -321,3 +319,59 @@ class DailyCheckinTest(unittest.TestCase):
         body = json.loads(r["result"]["content"][0]["text"])
         self.assertIn("open_count", body)
         self.assertIn("path", body)
+
+
+class SourceHygieneTest(unittest.TestCase):
+    def test_clean_title_strips_preamble_and_names_continuations(self):
+        self.assertEqual(mazkir.clean_title(
+            "Heads-up: this may already be shipped: feat(x): thing (ccc abc123), 2 days ago. "
+            "Verify before rebuilding. Add resume-from-session"), "Add resume-from-session")
+        self.assertEqual(mazkir.clean_title(
+            "Continue session 3dc24eb9 ('Second brain: entity pages'), which was idle"),
+            "Continue: Second brain: entity pages")
+        self.assertEqual(mazkir.clean_title("continuing 5e8dbbee-b2e0-49bf-aa59-a83b34e9a210 ok we got cards"),
+                         "ok we got cards")
+        long = mazkir.clean_title("word " * 40)
+        self.assertLessEqual(len(long), mazkir.TITLE_MAX)
+        self.assertTrue(long.endswith("…"))
+
+    def test_prepare_candidates_hides_evals_merges_loops_prefers_ccc_titles(self):
+        cands = [
+            {"session_id": "a1", "title": "Drain the MEMORY queue and keep it empty."},
+            {"session_id": "e1", "title": "Should I raise Meta budget? (Evaluation run r09. READ-ONLY)"},
+            {"session_id": "a2", "title": "Drain the MEMORY queue and keep it empty."},
+            {"session_id": "b1", "title": "You are the COORDINATOR of the sprint"},
+        ]
+        out, stats = mazkir.prepare_candidates(cands, "what are we working on", {"b1": "Thursday Blast coordinator"})
+        self.assertEqual([c["session_id"] for c in out], ["a1", "b1"])
+        self.assertEqual(out[0]["runs"], 2)
+        self.assertEqual(out[1]["title"], "Thursday Blast coordinator")
+        self.assertEqual(stats, {"evals_hidden": 1, "runs_merged": 1})
+        self.assertIn("runs=2", mazkir._fmt_candidate(1, out[0]))
+        kept, _ = mazkir.prepare_candidates(cands, "how did the eval runs go", {})
+        self.assertIn("e1", [c["session_id"] for c in kept])
+
+    def test_titles_cut_inside_a_preamble_use_the_first_message(self):
+        cut = "Heads-up: this may already be shipped: feat(x): y (wt 1), confidence 0.9. Verify before rebuilding. You ar"
+        out, _ = mazkir.prepare_candidates(
+            [{"session_id": "s1", "title": cut}], "q",
+            full_title=lambda ids: {i: cut[:-6] + " You are the BYM UX worker" for i in ids})
+        self.assertEqual(out[0]["title"], "You are the BYM UX worker")
+
+    def test_build_trace_names_servers_and_args(self):
+        trace = mazkir.build_trace("claude-index · sessions search", 8, 5, 900,
+                                   {"evals_hidden": 2, "runs_merged": 1},
+                                   [{"name": "mcp__ccc-state__daily_brief", "input": {}},
+                                    {"name": "mcp__claude-index__search_sessions", "input": {"query": "bym ads"}}])
+        self.assertEqual(trace[0]["detail"], "8 candidates, 5 kept (2 eval runs hidden, 1 repeat run merged) · 0.9s")
+        self.assertEqual(trace[2], {"tool": "ccc-state · daily_brief", "detail": ""})
+        self.assertEqual(trace[3], {"tool": "claude-index · search_sessions", "detail": '"bym ads"'})
+
+    def test_sources_flag_which_were_cited(self):
+        cands = [{"session_id": "aaaaaa1", "title": "One"}, {"session_id": "bbbbbb2", "title": "Two"}]
+        sources, cited, _ = mazkir.assemble_sources("see [[session:bbbbbb2]]", cands, "/nonexistent.db")
+        self.assertEqual([(s["id"], s["cited"]) for s in sources], [("bbbbbb2", True), ("aaaaaa1", False)])
+
+
+if __name__ == "__main__":
+    unittest.main()

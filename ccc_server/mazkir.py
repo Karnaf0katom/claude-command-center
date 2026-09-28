@@ -603,6 +603,8 @@ Method:
 
 Answer format (plain text, no markdown headers):
 - Lead with the answer in one or two sentences, then 1-4 short supporting lines.
+- When the answer spans several threads of work, make it a numbered list: each item starts with a **bold 2-5 word topic**, then one short line, then its citations and date at the end of that same line.
+- Skip evaluation/test runs (prompts marked "Evaluation run") unless the user asks about them. Treat repeated runs of the same loop or worker prompt as one thread and cite its most recent run once.
 - Name up to 3 distinct sessions that actually did the work (skip near-duplicates like a continuation of a session you already named), each with its date, ranked best match first — not just the most recent.
 - Cite every session you rely on inline as [[session:SESSION_ID]] using the exact id from the tool output or the candidate list. Cite Gmail threads the same way with the thread id.
 - Give dates as YYYY-MM-DD and name the harness (Claude, Codex, Kimi, Antigravity, Gmail) when it is not Claude.
@@ -719,8 +721,9 @@ def _fmt_candidate(i: int, s: dict) -> str:
     when = first if first == last or not last else f"{first}..{last}"
     title = " ".join(str(s.get("title") or "").split())[:140]
     snip = " ".join(str(s.get("best_snippet") or s.get("snippet") or "").split())[:220]
+    runs = f" runs={s['runs']}" if (s.get("runs") or 1) > 1 else ""
     out = (f"{i}. [[session:{s['session_id']}]] {s.get('harness') or 'claude'} {when} "
-           f"hits={s.get('hits', '?')} cwd={s.get('cwd') or '?'}\n"
+           f"hits={s.get('hits', '?')}{runs} cwd={s.get('cwd') or '?'}\n"
            f"   title: {title}\n   match: {snip}")
     for e in (s.get("excerpts") or [])[:3]:
         if not isinstance(e, dict):
@@ -819,6 +822,29 @@ def _harness_from_project_dir(pd: str | None) -> str:
     return {"_codex": "codex", "_kimi": "kimi", "_antigravity": "antigravity", "_gmail": "gmail"}.get(pd or "", "claude")
 
 
+def _first_user_message(conn, sid: str) -> str:
+    t = conn.execute(
+        "SELECT content FROM messages WHERE session_id=? AND type='user' "
+        "AND LTRIM(content) NOT LIKE '<%' ORDER BY ts_unix LIMIT 1", (sid,)).fetchone()
+    # Generous cap: an injected preamble can run past the index's 200-char
+    # title before the real ask starts; clean_title strips it.
+    return " ".join(str(t[0] if t else "")[:2000].split())
+
+
+def full_titles(ids: list[str], db_path: str = INDEX_DB) -> dict[str, str]:
+    """First user message per session, for index titles cut off inside a preamble."""
+    if not ids:
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            return {sid: t for sid in ids if (t := _first_user_message(conn, sid))}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+
+
 def lookup_sessions(ids: list[str], db_path: str = INDEX_DB) -> dict[str, dict]:
     """Read-only lookup for cited ids that were not in the pre-fetched set."""
     if not ids:
@@ -835,11 +861,8 @@ def lookup_sessions(ids: list[str], db_path: str = INDEX_DB) -> dict[str, dict]:
                 if r is None:
                     continue
                 d = dict(r)
-                if not d.get("title"):
-                    t = conn.execute(
-                        "SELECT content FROM messages WHERE session_id=? AND type='user' "
-                        "AND LTRIM(content) NOT LIKE '<%' ORDER BY ts_unix LIMIT 1", (sid,)).fetchone()
-                    d["title"] = " ".join(str(t[0] if t else "").split())[:200]
+                if not d.get("title") or _needs_full_title(d["title"]):
+                    d["title"] = _first_user_message(conn, sid) or d.get("title") or ""
                 d["harness"] = _harness_from_project_dir(d.get("project_dir"))
                 out[sid] = d
         finally:
@@ -859,9 +882,115 @@ def _ts_unix(ts: str | None) -> float | None:
         return None
 
 
+# CCC injects these preambles into prompts; as a source label they bury the ask.
+_PREAMBLE_RES = (
+    re.compile(r"^Heads-up: this may already be shipped:.*?Verify before rebuilding\.\s*", re.I),
+    re.compile(r"^Heads-up: this may already be shipped:\s*", re.I),
+    re.compile(r"^continu(?:e|ing) (?:session )?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}[\s:,.-]*", re.I),
+)
+_CONTINUE_RE = re.compile(r"^Continue (?:the work from )?session [0-9a-f-]{6,}\S*\s*\((['\"])(.+?)\1\).*", re.I)
+_EVAL_RE = re.compile(r"\bEvaluation run\s+r?\d+", re.I)
+TITLE_MAX = 80
+
+
+def clean_title(title: str | None, limit: int = TITLE_MAX) -> str:
+    """A short human label for a session: drop injected preambles, name a
+    continuation after what it continues, cut at a word boundary."""
+    t = " ".join(str(title or "").split())
+    for rx in _PREAMBLE_RES:
+        t = rx.sub("", t)
+    m = _CONTINUE_RE.match(t)
+    if m:
+        t = "Continue: " + m.group(2)
+    if len(t) > limit:
+        cut = t[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,.;:-(")
+        t = (cut or t[: limit - 1]) + "…"
+    return t
+
+
+def _needs_full_title(title: str | None) -> bool:
+    return any(rx.match(" ".join(str(title or "").split())) for rx in _PREAMBLE_RES)
+
+
+def is_eval_run(s: dict) -> bool:
+    return bool(_EVAL_RE.search(f"{s.get('title') or ''} {s.get('best_snippet') or ''}"))
+
+
+def prepare_candidates(cands: list[dict], question: str, titles: dict | None = None,
+                       full_title=None) -> tuple[list[dict], dict]:
+    """Label, filter and merge pre-fetched candidates before Mazkir sees them.
+
+    CCC's own session titles win over the index's (often a raw first prompt).
+    Eval runs are dropped unless the question is about evals, and repeated
+    runs of one loop prompt collapse into the best-ranked run (`runs=N`) so
+    one worker loop can't fill every slot."""
+    titles = dict(titles or {})
+    if full_title:
+        cut = [c["session_id"] for c in cands
+               if not titles.get(c["session_id"]) and _needs_full_title(c.get("title"))]
+        titles.update(full_title(cut) if cut else {})
+    keep_evals = bool(re.search(r"\beval", question or "", re.I))
+    out: list[dict] = []
+    by_title: dict[str, dict] = {}
+    stats = {"evals_hidden": 0, "runs_merged": 0}
+    for c in cands:
+        c = dict(c)
+        raw = c.get("title") or ""
+        if not keep_evals and (is_eval_run(c) or _EVAL_RE.search(raw)):
+            stats["evals_hidden"] += 1
+            continue
+        c["title"] = clean_title(titles.get(c["session_id"]) or raw)
+        key = c["title"].lower()
+        if key and key in by_title:
+            by_title[key]["runs"] = by_title[key].get("runs", 1) + 1
+            stats["runs_merged"] += 1
+            continue
+        if key:
+            by_title[key] = c
+        out.append(c)
+    return out, stats
+
+
+def _short_args(inp) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("query", "q", "question", "session_id", "queue", "state"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            v = " ".join(v.split())
+            return f'"{v[:57]}…"' if len(v) > 58 else f'"{v}"'
+    return ""
+
+
+def build_trace(prefetch_src: str, n_raw: int, n_kept: int, prefetch_ms: int, stats: dict,
+                tool_calls: list | None) -> list[dict]:
+    """What Mazkir looked at, in order, for the small trace above the answer."""
+    detail = f"{n_raw} candidates"
+    if n_kept != n_raw:
+        detail += f", {n_kept} kept"
+    extra = []
+    if stats.get("evals_hidden"):
+        extra.append(f"{stats['evals_hidden']} eval run{'s' if stats['evals_hidden'] > 1 else ''} hidden")
+    if stats.get("runs_merged"):
+        extra.append(f"{stats['runs_merged']} repeat run{'s' if stats['runs_merged'] > 1 else ''} merged")
+    if extra:
+        detail += " (" + ", ".join(extra) + ")"
+    trace = [{"tool": prefetch_src, "detail": f"{detail} · {prefetch_ms / 1000:.1f}s"},
+             {"tool": "ccc-state · fleet snapshot", "detail": "census"}]
+    for call in tool_calls or []:
+        name = str(call.get("name") or "?")
+        if name.startswith("mcp__"):
+            server, _, tool = name[5:].partition("__")
+            name = f"{server} · {tool}" if tool else server
+        trace.append({"tool": name, "detail": _short_args(call.get("input"))})
+    if not tool_calls:
+        trace.append({"tool": "no tool calls", "detail": "answered from the pre-search"})
+    return trace
+
+
 def source_row(s: dict, live_ids: set | None = None) -> dict:
     sid = s.get("session_id")
-    title = " ".join(str(s.get("title") or "").split())[:120]
+    title = clean_title(s.get("title"))
     harness = s.get("harness") or "claude"
     if harness != "claude" and title:
         title = f"[{harness}] {title}"
@@ -889,8 +1018,8 @@ def assemble_sources(answer: str, candidates: list[dict], db_path: str = INDEX_D
     missing = [sid for sid in cited if sid not in by_id]
     by_id.update(lookup_sessions(missing, db_path))
     valid = [sid for sid in cited if sid in by_id]
-    sources = [source_row(by_id[sid], live_ids) for sid in valid]
-    sources += [source_row(c, live_ids) for c in candidates if c["session_id"] not in valid]
+    sources = [dict(source_row(by_id[sid], live_ids), cited=True) for sid in valid]
+    sources += [dict(source_row(c, live_ids), cited=False) for c in candidates if c["session_id"] not in valid]
     actions = [{"kind": "spawn-continue", "session_id": sid}
                for sid in _ACTION_RE.findall(answer or "") if sid in by_id]
     return sources, valid, actions
@@ -921,6 +1050,9 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
     # the "live" status badge on sources below.
     live_ids = _live_ids()
 
+    prefetch_info: dict = {"raw": 0, "stats": {}}
+    ccc_titles = _ccc_titles()
+
     def do_prefetch() -> tuple[list[dict], str]:
         # The census fetch and the index search are independent; overlap them
         # (round 3 lost 12 s on Q3 waiting for a restarting CCC).
@@ -933,6 +1065,9 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
                                           exclude_session_ids=live_ids)
             else:
                 cands = builtin_prefetch(question, range_key, exclude_session_ids=live_ids)
+            prefetch_info["raw"] = len(cands)
+            cands, prefetch_info["stats"] = prepare_candidates(
+                cands, question, ccc_titles, full_title=lambda ids: full_titles(ids, db_path))
             try:
                 snap = snap_f.result(timeout=SNAPSHOT_TIMEOUT_SEC + 1)
             except Exception:
@@ -1015,7 +1150,14 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
         return {"ok": False, "code": "ask_engine_unauthenticated", "error": NOT_SIGNED_IN}, 401
     answer = res["answer"] or "(no answer)"
     sources, cited, actions = assemble_sources(answer, candidates, db_path, live_ids)
+    for src in sources:  # sessions cited from a mid-answer search skipped prepare_candidates
+        if src.get("harness") == "claude" and ccc_titles.get(src["id"]):
+            src["title"] = clean_title(ccc_titles[src["id"]])
     confirm_actions = collect_confirm_actions(answer, t0)
+    prefetch_src = ("claude-index · sessions search" if (INDEX_BIN or prefetch_runner is not None)
+                    else "CCC built-in session search")
+    trace = build_trace(prefetch_src, prefetch_info["raw"], len(candidates), prefetch_ms,
+                        prefetch_info["stats"], res.get("tool_calls"))
     return {
         "ok": True,
         "answer": answer,
@@ -1025,6 +1167,7 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
         "cited": cited,
         "actions": actions,
         "confirm_actions": confirm_actions,
+        "trace": trace,
         "engine": "claude",
         "model": MAZKIR_MODEL,
         "agent": "mazkir",
@@ -1117,6 +1260,15 @@ def _mark_spawn(session_id: str) -> None:
         _core._write_spawn_marker(session_id, lane="other", kind="assistant", spawned_via="ccc-ask")
     except Exception:
         pass
+
+
+def _ccc_titles() -> dict:
+    """CCC's auto-titles (warm, cached map); empty when CCC isn't importable."""
+    try:
+        from ccc_server import core as _core
+        return _core._auto_titled_session_ids() or {}
+    except Exception:
+        return {}
 
 
 def _live_ids() -> set:

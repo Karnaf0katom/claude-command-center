@@ -43,6 +43,12 @@ class WarmPoolTest(unittest.TestCase):
         self.assertIsNotNone(b["ttft_ms"])
         self.assertEqual(self.pool.stats["spawns"], 1)
 
+    def test_records_each_tool_call_once(self):
+        res = self.pool.ask(ARGV, "TOOL please", 10)
+        self.assertEqual(res["tool_calls"], [{"name": "mcp__claude-index__search_sessions",
+                                              "input": {"query": "mazkir chips"}}])
+        self.assertEqual(self.pool.ask(ARGV, "plain", 10)["tool_calls"], [])
+
     def test_unconfirmed_clear_retires_the_process(self):
         with mock.patch.dict(os.environ, {"FAKE_NO_RESET": "1"}):
             a = self.pool.ask(ARGV, "first", 10, env=dict(os.environ))
@@ -167,6 +173,8 @@ class RunMazkirWarmTest(unittest.TestCase):
         self.assertIsNotNone(two["ttft_ms"])
         self.assertTrue(two["answer"].startswith("n=0"))
         self.assertEqual(two["confirm_actions"], [])
+        self.assertEqual([s["tool"] for s in two["trace"]],
+                         ["claude-index · sessions search", "ccc-state · fleet snapshot", "no tool calls"])
 
 
 class ActionStoreTest(unittest.TestCase):
