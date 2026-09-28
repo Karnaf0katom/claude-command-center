@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ccc_server import lineage as _lineage
+from ccc_server import sandbox_harvest as _sandbox_harvest
 from ccc_server import ship_graph as _sg
 
 # Query sanitization reuse from history_search
@@ -193,6 +194,10 @@ def _get_cursor_dir() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".cursor" / "projects"
+
+
+def _get_harvested_dir() -> Path:
+    return _sandbox_harvest._get_harvested_dir()
 
 
 def _repo_of(cwd: str) -> str:
@@ -779,6 +784,26 @@ def _candidate_files(days: float | None = None) -> list[tuple[str, str, float, i
                 continue
             if st.st_size > 0 and st.st_mtime >= cutoff:
                 out.append(("cursor", str(p), st.st_mtime, st.st_size))
+
+    # Harvested worker-sandbox transcripts (multi-machine S8b): copies land
+    # here preserving the source's .claude/projects or .codex/sessions
+    # shape, so the same glob patterns as above apply one level deeper.
+    harvested_dir = _get_harvested_dir()
+    if harvested_dir.exists():
+        for p in harvested_dir.glob("*/.claude/projects/*/*.jsonl"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size > 0 and st.st_mtime >= cutoff:
+                out.append(("claude", str(p), st.st_mtime, st.st_size))
+        for p in harvested_dir.glob("*/.codex/sessions/**/*.jsonl"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if st.st_size > 0 and st.st_mtime >= cutoff:
+                out.append(("codex", str(p), st.st_mtime, st.st_size))
     return out
 
 
