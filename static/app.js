@@ -2404,7 +2404,9 @@
   const _bootUrlParams = new URLSearchParams(window.location.search || '');
   const CONV_POPOUT_MODE = _bootUrlParams.get('ccc_popout') === 'conversation'
     || _bootUrlParams.get('popout') === 'conversation';
-  const CONV_POPOUT_TARGET = (
+  // `let`: an embedding CCC can switch this popout to another conversation in
+  // place (see wireEmbedHostMessages) instead of reloading the whole app.
+  let CONV_POPOUT_TARGET = (
     _bootUrlParams.get('conv')
     || _bootUrlParams.get('conversation')
     || _bootUrlParams.get('session_id')
@@ -19169,6 +19171,67 @@
     return true;
   }
 
+  // Another machine's CCC embeds this popout in its main pane (federated
+  // sidebar). Booting a fresh app per click cost 1.5-3s, so the host keeps one
+  // frame per machine alive and asks it to switch conversations in place.
+  // The only accepted command is "show conversation <id>": it never sends
+  // input. It is honored only from the direct parent window, and only when that
+  // parent is a CCC dashboard we'd trust: this origin, loopback, a tailnet
+  // (100.64/10) address, or a host on this machine's own *.ts.net tailnet.
+  function embedHostOriginTrusted(origin) {
+    if (!origin || origin === 'null') return false;
+    if (origin === window.location.origin) return true;
+    let host;
+    try { host = new URL(origin).hostname; } catch (_) { return false; }
+    if (host === '127.0.0.1' || host === 'localhost' || host === '[::1]') return true;
+    if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    const tailnet = window.location.hostname.match(/\.[a-z0-9-]+\.ts\.net$/i);
+    return !!(tailnet && host.toLowerCase().endsWith(tailnet[0].toLowerCase()));
+  }
+  function switchPopoutConversation(conv) {
+    if (conv === CONV_POPOUT_TARGET && currentConversation === conv) return;
+    CONV_POPOUT_TARGET = conv;
+    ['conv', 'conversation', 'session_id', 'source', 'title', 'cwd', 'repo_path'].forEach(k => _bootUrlParams.delete(k));
+    _bootUrlParams.set('conv', conv);
+    try {
+      const u = new URL(window.location.href);
+      u.search = _bootUrlParams.toString();
+      history.replaceState(history.state, '', u.toString());
+    } catch (_) {}
+    document.body.classList.toggle('subagent-readonly', conv.includes(':agent-'));
+    _popoutMissingShown = false;
+    const row = buildSyntheticPopoutRow();
+    installSyntheticPopoutRow(row);
+    setPopoutTitle(row);
+    updatePaneHeader(activePaneId(), row, { category: paneCategoryForRow(row), title: paneTitleForRow(row) });
+    Promise.resolve(selectConversation(row.id, activePaneId())).catch(err => {
+      const view = getConvView();
+      if (view) {
+        view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load conversation: '
+          + escapeHtml(err && err.message ? err.message : String(err))
+          + '</div>';
+      }
+    });
+  }
+  function wireEmbedHostMessages() {
+    if (!CONV_POPOUT_MODE || window.parent === window) return;
+    window.addEventListener('message', (ev) => {
+      if (ev.source !== window.parent || !embedHostOriginTrusted(ev.origin)) return;
+      const d = ev.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'ccc:embed-hello') {
+        window.parent.postMessage({ type: 'ccc:embed-hello', open: true }, ev.origin);
+        return;
+      }
+      if (d.type !== 'ccc:embed-open') return;
+      const conv = typeof d.conv === 'string' ? d.conv.trim() : '';
+      if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(conv) || conv === '__new__') return;
+      switchPopoutConversation(conv);
+      window.parent.postMessage({ type: 'ccc:embed-opened', conv }, ev.origin);
+    });
+  }
+  wireEmbedHostMessages();
+
   // CCC-147: the conversation popout has no live-status poller — its
   // currentSession is per-pane and the reader boot path leaves it unset, so the
   // dashboard's refreshLiveStatus/updateConvProcessIndicator never run here and
@@ -19182,11 +19245,11 @@
     // resolve that id, so the pills would always read off. Dozens of lanes
     // polling every 5s for nothing was a measurable server load.
     if (String(CONV_POPOUT_TARGET).includes(':agent-')) return;
-    const sid = popoutParam('session_id') || CONV_POPOUT_TARGET;
     const cwd = popoutParam('cwd') || CONV_POPOUT_REPO_PATH || '';
     const src = popoutParam('source') || 'interactive';
     const tick = async () => {
       if (document.hidden) return;
+      const sid = popoutParam('session_id') || CONV_POPOUT_TARGET;  // per tick: the embed can switch targets
       const slot = document.querySelector('[data-role="pane-proc"]');
       if (!slot) return;
       if (src === 'backlog' || src === 'pkood' || !sid) { slot.innerHTML = ''; return; }
@@ -39946,7 +40009,8 @@
         // Same for another machine's conversation embedded over the pane
         // (federated-sidebar.js): the local row is still "current" underneath,
         // so a click must bring it back, not start a rename.
-        const _fedEmbedShowing = !!document.getElementById('fedEmbed');
+        const _fedEmbedEl = document.getElementById('fedEmbed');
+        const _fedEmbedShowing = !!(_fedEmbedEl && !_fedEmbedEl.hidden);
         const alreadyActive = !_gcReaderShowing && !_fedEmbedShowing
           && (item.classList.contains('active') || currentConversation === item.dataset.id);
         // On touch the title is the primary tap target for ENTERING a session

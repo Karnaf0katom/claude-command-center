@@ -29759,3 +29759,4 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
 }
 .fed-embed-frame { flex: 1; width: 100%; min-height: 0; border: none; background: var(--fed-row-bg, #2a1824); }
+.fed-embed[hidden], .fed-embed-frame[hidden] { display: none; }

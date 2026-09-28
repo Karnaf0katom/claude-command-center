@@ -177,7 +177,8 @@
         try { localStorage.setItem(ROW_BG_KEY, item.id); } catch (_) {}
         applyRowBg();
         closePalette();
-        if (openRef) openRow(openRef); // reload the embed with the new color
+        resetFrames();   // the color is a URL param: reload the kept frames
+        if (openRef) openRow(openRef);
       });
       pop.appendChild(b);
     });
@@ -315,13 +316,74 @@
 
   // ---- embed ---------------------------------------------------------------
 
+  // One frame per machine, kept alive while hidden: booting the peer's app
+  // costs 1.5-3s, so after the first open a switch is a postMessage asking the
+  // same frame to show another conversation. A peer whose CCC predates that
+  // never answers the hello and keeps getting a full reload per click.
+  var frames = {};   // node_id -> { frame, origin, live }
+
+  function embedShowing() {
+    var host = $('fedEmbed');
+    return !!(host && !host.hidden);
+  }
+
   function closeEmbed() {
     var host = $('fedEmbed');
-    if (host) host.remove();
+    if (host) host.hidden = true;
     var main = document.querySelector('.main');
     if (main) main.classList.remove('fed-embed-host');
     openRef = '';
     render();
+  }
+
+  // Drop every kept frame (e.g. after a color change: the color rides the URL).
+  function resetFrames() {
+    Object.keys(frames).forEach(function (k) { frames[k].frame.remove(); });
+    frames = {};
+  }
+
+  function ensureHost(main) {
+    var host = $('fedEmbed');
+    if (host) return host;
+    host = el('div', 'fed-embed');
+    host.id = 'fedEmbed';
+    var bar = el('div', 'fed-embed-bar');
+    bar.appendChild(el('span', 'fed-chip'));
+    bar.appendChild(el('span', 'fed-embed-title'));
+    var close = el('button', 'fed-embed-close', 'Close');
+    close.type = 'button';
+    close.setAttribute('data-role', 'fed-embed-close');
+    close.addEventListener('click', closeEmbed);
+    bar.appendChild(close);
+    host.appendChild(bar);
+    main.appendChild(host);
+    return host;
+  }
+
+  function frameFor(host, node, url) {
+    var entry = frames[node.node_id];
+    if (entry && entry.origin === new URL(url).origin) return entry;
+    if (entry) entry.frame.remove();
+    var frame = document.createElement('iframe');
+    frame.className = 'fed-embed-frame';
+    frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+    entry = { frame: frame, origin: new URL(url).origin, live: false };
+    frame.addEventListener('load', function () {
+      entry.live = false;
+      try { frame.contentWindow.postMessage({ type: 'ccc:embed-hello' }, entry.origin); } catch (_) {}
+    });
+    host.appendChild(frame);
+    frames[node.node_id] = entry;
+    return entry;
+  }
+
+  function onFrameMessage(ev) {
+    var d = ev.data;
+    if (!d || typeof d !== 'object' || d.type !== 'ccc:embed-hello') return;
+    Object.keys(frames).forEach(function (k) {
+      var e = frames[k];
+      if (e.frame.contentWindow === ev.source && e.origin === ev.origin) e.live = true;
+    });
   }
 
   function openRow(ref) {
@@ -332,32 +394,23 @@
     if (blockedReason(node)) return;
     var main = document.querySelector('.main');
     if (!main) return;
-    var host = $('fedEmbed');
-    if (!host) {
-      host = el('div', 'fed-embed');
-      host.id = 'fedEmbed';
-      var bar = el('div', 'fed-embed-bar');
-      bar.appendChild(el('span', 'fed-chip'));
-      bar.appendChild(el('span', 'fed-embed-title'));
-      var close = el('button', 'fed-embed-close', 'Close');
-      close.type = 'button';
-      close.setAttribute('data-role', 'fed-embed-close');
-      close.addEventListener('click', closeEmbed);
-      bar.appendChild(close);
-      host.appendChild(bar);
-      var frame = document.createElement('iframe');
-      frame.className = 'fed-embed-frame';
-      frame.setAttribute('allow', 'clipboard-read; clipboard-write');
-      host.appendChild(frame);
-      main.appendChild(host);
-      main.classList.add('fed-embed-host');
-    }
+    var host = ensureHost(main);
+    host.hidden = false;
+    main.classList.add('fed-embed-host');
     host.querySelector('.fed-chip').textContent = row.node_name || node.name || 'peer';
     host.querySelector('.fed-embed-title').textContent = rowTitle(row);
-    var f = host.querySelector('.fed-embed-frame');
-    f.title = 'Conversation on ' + (row.node_name || 'peer');
     var url = buildEmbedUrl(node, row);
-    if (f.getAttribute('src') !== url) f.setAttribute('src', url);
+    var entry = frameFor(host, node, url);
+    var f = entry.frame;
+    Object.keys(frames).forEach(function (k) { frames[k].frame.hidden = frames[k] !== entry; });
+    f.title = 'Conversation on ' + (row.node_name || 'peer');
+    if (entry.live && f.contentWindow) {
+      f.contentWindow.postMessage({ type: 'ccc:embed-open', conv: row.session_id }, entry.origin);
+      f.setAttribute('data-conv', row.session_id);
+    } else if (f.getAttribute('data-conv') !== row.session_id || !f.getAttribute('src')) {
+      f.setAttribute('data-conv', row.session_id);
+      f.setAttribute('src', url);
+    }
     openRef = row.ref;
     render();
   }
@@ -393,7 +446,8 @@
     var search = $('convSearch');
     if (search) search.addEventListener('input', render);
     // Opening any local conversation dismisses the embed.
-    window.addEventListener('ccc:conversation-selected', function () { if ($('fedEmbed')) closeEmbed(); });
+    window.addEventListener('ccc:conversation-selected', function () { if (embedShowing()) closeEmbed(); });
+    window.addEventListener('message', onFrameMessage);
   }
 
   // ---- polling -------------------------------------------------------------
@@ -434,7 +488,7 @@
     poll();
     document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
     window.addEventListener('storage', function (e) { if (e.key === 'ccc-sidebar-tab') render(); });
-    window.cccFederatedSidebar = { render: render, state: function () { return state; }, open: openRow, close: closeEmbed };
+    window.cccFederatedSidebar = { render: render, state: function () { return state; }, open: openRow, close: closeEmbed, frames: function () { return frames; } };
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
