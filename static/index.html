@@ -994,6 +994,13 @@
           <span class="upd-pill-dot"></span>
           <span id="workerCompatPillText">Worker outdated</span>
         </button>
+        <!-- Agent config access (static/config-consent.js): changes to the
+             user's hooks/skills waiting for approval, or live status off
+             because the Claude Code hooks were declined. -->
+        <button type="button" id="configConsentPill" class="upd-pill" hidden title="Review what CCC may add to your agent config">
+          <span class="upd-pill-dot"></span>
+          <span id="configConsentPillText">Config changes to review</span>
+        </button>
         <button type="button" id="todayToggleBtn" class="bug-link today-toggle-btn" title="Toggle the Today's projects tray - a lightweight list of the sessions you're working on today." aria-label="Toggle Today's projects" aria-pressed="false">
           <span aria-hidden="true">&#9788;</span><span class="sh-action-label">Today</span>
         </button>
@@ -2961,6 +2968,16 @@
               </div>
             </div>
 
+            <div class="settings-row" data-keywords="agent config access hooks skills settings.json consent permission uninstall remove revoke codex claude">
+              <div class="settings-row-main">
+                <div class="settings-row-label">Agent config access</div>
+                <div class="settings-row-desc">What CCC may add to your Claude Code / Codex config (hooks, skills), with the exact diff. Approve, decline, or remove it all.</div>
+              </div>
+              <div class="settings-row-control">
+                <button type="button" class="settings-action-btn" id="configConsentBtn">Review…</button>
+              </div>
+            </div>
+
             <div class="settings-row" data-keywords="restart server 8090 reboot reload">
               <div class="settings-row-main">
                 <div class="settings-row-label">Restart dashboard</div>
@@ -3437,6 +3454,7 @@
 </script>
 <script src="/static/claude-reauth.js"></script>
 <script src="/static/phone-access.js"></script>
+<script src="/static/config-consent.js"></script>
 <script src="/static/q2-worker-idle.js"></script>
 <script src="/static/wt-log-bursts.js"></script>
 <script src="/static/ticket-prose.js"></script>

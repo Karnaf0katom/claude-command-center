@@ -234,8 +234,15 @@ def _detect_indent(text, default):
 
 
 def render_json(data, original_text, default_indent):
-    indent = _detect_indent(original_text, default_indent)
-    out = json.dumps(data, indent=indent, ensure_ascii=False)
+    body = (original_text or "").strip()
+    if body and "\n" not in body and len(body) > 2:
+        # One-line file: stay on one line, with its own separator spacing.
+        spaced = '": ' in body or '", ' in body
+        out = json.dumps(data, ensure_ascii=False,
+                         separators=(", ", ": ") if spaced else (",", ":"))
+    else:
+        indent = _detect_indent(original_text, default_indent)
+        out = json.dumps(data, indent=indent, ensure_ascii=False)
     if original_text is None or original_text.endswith("\n"):
         out += "\n"
     return out
@@ -256,6 +263,66 @@ def _backup(ctx, real_path, data):
     except OSError:
         pass
     return dest
+
+
+CREATED_FILE_NAME = "config-consent-created.json"
+
+
+def _created_paths(ctx):
+    try:
+        data = json.loads((ctx.state_dir / CREATED_FILE_NAME).read_text(encoding="utf-8"))
+        return set(data) if isinstance(data, list) else set()
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+
+def _save_created_paths(ctx, paths):
+    ctx.state_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.state_dir / CREATED_FILE_NAME).write_text(json.dumps(sorted(paths), indent=2) + "\n")
+
+
+def _note_created(ctx, real):
+    """Remember files/dirs CCC created, so revoke can remove them again
+    (only while empty) instead of leaving a stray {} or empty folder."""
+    created = []
+    p = real
+    while not p.exists():
+        created.append(str(p))
+        if p.parent == p:
+            break
+        p = p.parent
+    if created:
+        with _LOCK:
+            _save_created_paths(ctx, _created_paths(ctx) | set(created))
+
+
+def cleanup_created(ctx, path):
+    """After a revoke: remove `path` and its parents if CCC created them and
+    they are now empty (a file that is only `{}` counts as empty)."""
+    with _LOCK:
+        created = _created_paths(ctx)
+        if not created:
+            return
+        p = Path(os.path.realpath(path))
+        changed = False
+        while str(p) in created:
+            try:
+                if p.is_file():
+                    text = p.read_text(encoding="utf-8").strip()
+                    if text not in ("", "{}"):
+                        break
+                    p.unlink()
+                elif p.is_dir():
+                    if any(p.iterdir()):
+                        break
+                    p.rmdir()
+            except (OSError, UnicodeDecodeError):
+                break
+            created.discard(str(p))
+            changed = True
+            p = p.parent
+        if changed:
+            _save_created_paths(ctx, created)
 
 
 def write_config_text(ctx, path, new_text):
@@ -279,6 +346,7 @@ def write_config_text(ctx, path, new_text):
             mode = real.stat().st_mode & 0o777
         else:
             mode = 0o644
+            _note_created(ctx, real)
         real.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(real.parent), prefix=f".{real.name}.", suffix=".ccc-tmp")
         with os.fdopen(fd, "wb") as fh:
@@ -531,7 +599,10 @@ class ClaudeHooks:
                                 self.default_indent)
 
     def revoke(self, ctx):
-        return _json_hook_write(ctx, ctx.claude_settings, strip_ccc_hooks, self.default_indent)
+        err = _json_hook_write(ctx, ctx.claude_settings, strip_ccc_hooks, self.default_indent)
+        if not err:
+            cleanup_created(ctx, ctx.claude_settings)
+        return err
 
 
 class CodexHooks(ClaudeHooks):
@@ -560,7 +631,10 @@ class CodexHooks(ClaudeHooks):
                                 self.default_indent)
 
     def revoke(self, ctx):
-        return _json_hook_write(ctx, ctx.codex_hooks, strip_ccc_hooks, self.default_indent)
+        err = _json_hook_write(ctx, ctx.codex_hooks, strip_ccc_hooks, self.default_indent)
+        if not err:
+            cleanup_created(ctx, ctx.codex_hooks)
+        return err
 
 
 class BundledSkill:
@@ -642,6 +716,7 @@ class BundledSkill:
                 dst.unlink()
                 if dst_dir.is_dir() and not any(dst_dir.iterdir()):
                     dst_dir.rmdir()
+                    cleanup_created(ctx, dst_dir.parent)
             except OSError as e:
                 errors.append(f"could not remove {display_path(dst, ctx.home)}: {e}")
         return "; ".join(errors) or None

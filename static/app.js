@@ -64623,6 +64623,7 @@
       _moveToHome('updPill', $topAlerts);
       _moveToHome('runawayWatchPill', $topAlerts);
       _moveToHome('workerCompatPill', $topAlerts);
+      _moveToHome('configConsentPill', $topAlerts);
     }
     if ($settingsSlot) {
       _moveToHome('termToggleBtn',     $settingsSlot);

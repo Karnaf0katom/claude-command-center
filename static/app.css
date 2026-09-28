@@ -11675,6 +11675,50 @@
     white-space: pre-wrap; word-break: break-word; }
   .upd-error.visible { display: block; }
 
+  /* ── Agent config access (static/config-consent.js) ─────── */
+  .cfgc-dialog { width: min(760px, 94vw); max-height: 88vh; overflow: hidden; }
+  .cfgc-intro { font-size: 12.5px; color: var(--text-muted); line-height: 1.55; }
+  .cfgc-intro code, .cfgc-files code { font-size: 11px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .cfgc-body { overflow-y: auto; min-height: 0; flex: 1 1 auto;
+    display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+  .cfgc-sec-title { font-size: 12px; font-weight: 600; color: var(--text);
+    text-transform: uppercase; letter-spacing: 0.4px; }
+  .cfgc-sec-note { font-size: 12px; color: var(--text-muted); margin: 2px 0 6px; }
+  .cfgc-section { display: flex; flex-direction: column; gap: 8px; }
+  .cfgc-item { border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px; }
+  .cfgc-item.cfgc-focus { border-color: var(--accent); }
+  .cfgc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .cfgc-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .cfgc-badge { font-size: 10px; padding: 1px 7px; border-radius: 9px;
+    border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+  .cfgc-badge-new, .cfgc-badge-changed { color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .cfgc-badge-on { color: #3fb950; border-color: rgba(63,185,80,0.45); }
+  .cfgc-choices { margin-left: auto; display: inline-flex; gap: 12px; }
+  .cfgc-choice { font-size: 12px; color: var(--text); display: inline-flex;
+    align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+  .cfgc-summary, .cfgc-depends, .cfgc-note, .cfgc-muted { font-size: 12px;
+    line-height: 1.5; color: var(--text-muted); }
+  .cfgc-depends strong { color: var(--text); font-weight: 600; }
+  .cfgc-note { color: var(--text); }
+  .cfgc-files { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cfgc-err { font-size: 12px; color: var(--red); }
+  .cfgc-details summary { font-size: 12px; color: var(--accent); cursor: pointer; }
+  .cfgc-diff { margin: 6px 0 0; max-height: 260px; overflow: auto;
+    font-size: 11px; line-height: 1.45; padding: 8px; border-radius: 6px;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-muted); white-space: pre; }
+  .cfgc-d-add { color: #3fb950; }
+  .cfgc-d-del { color: #f85149; }
+  .cfgc-d-hunk { color: var(--accent); }
+  .cfgc-d-file { color: var(--text); font-weight: 600; }
+  .cfgc-actions { align-items: center; }
+  .cfgc-spacer { flex: 1 1 auto; }
+  .cfgc-revoke-all { color: #f85149; }
+
   /* ── Share Command Center modal ─────── */
   .share-ccc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   .share-ccc-row { display: flex; gap: 8px; }

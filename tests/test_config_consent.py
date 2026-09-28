@@ -270,6 +270,44 @@ class Revoke(ConsentTestBase):
         self.assertEqual(json.loads(hooks.read_text()), other)
 
 
+class CleanUninstall(ConsentTestBase):
+    def test_one_line_json_stays_one_line(self):
+        self.ctx.codex_present = True
+        hooks = self.home / ".codex" / "hooks.json"
+        hooks.parent.mkdir(parents=True)
+        original = '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"other.sh"}]}]}}\n'
+        hooks.write_text(original)
+        cc.decide({"codex-hooks": "approve"}, ctx=self.ctx)
+        self.assertEqual(hooks.read_text().count("\n"), 1)
+        cc.revoke(["codex-hooks"], ctx=self.ctx)
+        self.assertEqual(hooks.read_text(), original)
+
+    def test_files_and_dirs_ccc_created_are_removed_on_revoke(self):
+        self.ctx.codex_present = True
+        (self.home / ".codex").mkdir()
+        cc.decide({"claude-hooks": "approve", "codex-hooks": "approve",
+                   "skill:fleet-verify": "approve"}, ctx=self.ctx)
+        self.assertTrue(self.settings.exists())
+        self.assertTrue((self.home / ".codex" / "skills" / "fleet-verify" / "SKILL.md").exists())
+        cc.revoke(ctx=self.ctx)
+        self.assertFalse(self.settings.exists())
+        self.assertFalse((self.home / ".codex" / "hooks.json").exists())
+        self.assertFalse((self.home / ".claude" / "skills").exists())
+        self.assertFalse((self.home / ".codex" / "skills").exists())
+        self.assertTrue((self.home / ".codex").is_dir())  # the user's, not ours
+
+    def test_users_own_empty_skills_dir_and_edited_file_are_kept(self):
+        skills = self.home / ".claude" / "skills"
+        skills.mkdir(parents=True)
+        cc.decide({"skill:fleet-verify": "approve", "claude-hooks": "approve"}, ctx=self.ctx)
+        data = json.loads(self.settings.read_text())
+        data["model"] = "sonnet"  # user edits the file CCC created
+        self.settings.write_text(json.dumps(data, indent=2) + "\n")
+        cc.revoke(ctx=self.ctx)
+        self.assertTrue(skills.is_dir())
+        self.assertEqual(json.loads(self.settings.read_text()), {"model": "sonnet"})
+
+
 class ExistingInstalls(ConsentTestBase):
     def seed_existing_install(self):
         existing = json.loads(json.dumps(USER_SETTINGS))

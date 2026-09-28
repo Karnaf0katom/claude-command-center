@@ -32,6 +32,10 @@ command, without opening the dashboard:
     ccc brief <session>                         # where a session left off + how to resume it
     ccc where <session|query>                   # plain-language status + human checklist + continue
 
+    ccc consent                                 # what CCC may write into your agent config
+    ccc consent show <item>                     # exact diff for one item
+    ccc consent approve <item...|all>           # or: decline / revoke <item...|all>
+
     ccc brain <subcmd> ...    # passthrough to an optional private plugin (no-op if unconfigured)
 
 <session> is a session id, a unique id prefix, or a (unique, case-
@@ -67,7 +71,7 @@ PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
                "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where",
-               "brain")
+               "brain", "consent")
 
 BRAIN_CONFIG_FILE = os.path.expanduser("~/.claude/command-center/brain-plugin.json")
 
@@ -1187,6 +1191,108 @@ def cmd_quota(args):
     return 0
 
 
+_CONSENT_STATUS_LABEL = {
+    "enabled": "approved",
+    "changed": "CHANGED - review",
+    "pending": "NEEDS APPROVAL",
+    "declined": "declined",
+}
+
+
+def _print_consent_item(item, with_diff):
+    status = "skipped (CCC_SKIP_SKILL_INSTALL)" if item.get("skipped_by_env") \
+        else _CONSENT_STATUS_LABEL.get(item["status"], item["status"])
+    print(f"{item['id']:<32} {status}")
+    if not with_diff:
+        return
+    print(f"  {item['summary']}")
+    print(f"  Needed for: {item['depends']}")
+    if item.get("error"):
+        print(f"  ! {item['error']}")
+    blocks = item.get("changes") if item["status"] != "enabled" else []
+    if item["status"] in ("enabled", "declined") and item.get("installed"):
+        print("  Revoking would change:")
+        blocks = item.get("removal") or []
+    elif blocks:
+        print("  Approving would change:")
+    for block in blocks or []:
+        for line in (block.get("diff") or "").splitlines():
+            print(f"    {line}")
+    print()
+
+
+def cmd_consent(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(
+            "ccc: no server found — is CCC running? "
+            f"(looked for --server, $CCC_SERVER, {PORT_FILE})",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        view = _get_json(base, "/api/config-consent", timeout=30)
+    except OSError as e:
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    items = view.get("items") or []
+    by_id = {i["id"]: i for i in items}
+    action = args.action or "list"
+
+    if action in ("list", "show"):
+        if args.json:
+            if action == "show":
+                view = {"items": [by_id[i] for i in args.items if i in by_id]}
+            print(json.dumps(view, indent=2))
+            return 0
+        chosen = items if action == "list" else [by_id[i] for i in args.items if i in by_id]
+        unknown = [i for i in args.items if i not in by_id] if action == "show" else []
+        for i in unknown:
+            print(f"ccc: unknown item {i!r} (see `ccc consent`)", file=sys.stderr)
+        for item in chosen:
+            _print_consent_item(item, with_diff=(action == "show" or args.diff))
+        if action == "list":
+            pending = view.get("needs_review") or 0
+            if pending:
+                print(f"\n{pending} item(s) need your decision. "
+                      "Details: ccc consent show <item>; then ccc consent approve|decline <item...|all>")
+            print(f"Backups of every file CCC edits: {view.get('backups_dir')}")
+        return 1 if unknown else 0
+
+    targets = list(args.items)
+    if not targets:
+        print(f"ccc: consent {action} needs item ids or 'all'", file=sys.stderr)
+        return 2
+    if targets == ["all"]:
+        if action == "approve":
+            targets = [i["id"] for i in items if i.get("needs_review")]
+        elif action == "decline":
+            targets = [i["id"] for i in items if i.get("needs_review")]
+        else:
+            targets = [i["id"] for i in items]
+        if not targets:
+            print("nothing to do")
+            return 0
+    unknown = [t for t in targets if t not in by_id]
+    if unknown:
+        print(f"ccc: unknown item(s): {', '.join(unknown)} (see `ccc consent`)", file=sys.stderr)
+        return 2
+    if action == "revoke":
+        status, result = _post_json(base, "/api/config-consent/revoke", {"ids": targets, "via": "cli"})
+    else:
+        choice = "approve" if action == "approve" else "decline"
+        status, result = _post_json(base, "/api/config-consent/decide",
+                                    {"decisions": {t: choice for t in targets}, "via": "cli"})
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        for item_id, r in (result.get("results") or {}).items():
+            print(f"{item_id:<32} {'ok' if r.get('ok') else 'FAILED: ' + str(r.get('error'))}")
+        if result.get("error"):
+            print(f"ccc: {result['error']}", file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
 def _print_continue_from_result(result, status, args):
     if args.json:
         print(json.dumps(result, indent=2))
@@ -1730,6 +1836,22 @@ def main(argv=None):
                    help="only this child (session id/prefix/name, or its rr_ route id)")
     p.add_argument("--json", action="store_true", help="raw rebind result JSON")
     p.set_defaults(func=cmd_rebind_report_to)
+
+    p = sub.add_parser(
+        "consent",
+        help="review/approve what CCC writes into your agent config (hooks, skills)",
+        description="CCC only edits files outside ~/.claude/command-center "
+                    "(Claude/Codex hooks, skills folders) after you approve each "
+                    "item. list (default) shows each item; show prints the exact "
+                    "diff; approve/decline decide; revoke removes what CCC "
+                    "installed. Declining an installed item removes it.",
+    )
+    p.add_argument("action", nargs="?", default="list",
+                   choices=("list", "show", "approve", "decline", "revoke"))
+    p.add_argument("items", nargs="*", help="item ids from `ccc consent`, or 'all'")
+    p.add_argument("--diff", action="store_true", help="list: include each item's details and diff")
+    p.add_argument("--json", action="store_true", help="raw JSON")
+    p.set_defaults(func=cmd_consent)
 
     p = sub.add_parser(
         "brain",
