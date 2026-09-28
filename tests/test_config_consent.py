@@ -171,6 +171,18 @@ class Approve(ConsentTestBase):
         self.assertEqual((other / "SKILL.md").read_text(), "theirs\n")
 
 
+class OwnedByAnotherTool(ConsentTestBase):
+    def test_skill_linked_everywhere_by_another_tool_is_not_offered(self):
+        other = self.home / "wt" / "fleet-verify"
+        other.mkdir(parents=True)
+        skills = self.home / ".claude" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "fleet-verify").symlink_to(other)
+        ids = {i["id"] for i in cc.overview(self.ctx)["items"]}
+        self.assertNotIn("skill:fleet-verify", ids)
+        self.assertIn("skill:ccc-orchestration", ids)
+
+
 class Decline(ConsentTestBase):
     def test_declined_item_is_never_written(self):
         original = self.write_settings(USER_SETTINGS)

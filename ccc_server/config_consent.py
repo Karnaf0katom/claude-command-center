@@ -652,7 +652,10 @@ class BundledSkill:
         return ctx.ccc_root / "skills" / f"{self.name}.md"
 
     def applicable(self, ctx):
-        return self._source(ctx).is_file()
+        # Not offered when every destination is another tool's symlink
+        # (WatchTower ships its own group-chat-checkin): nothing to write.
+        return self._source(ctx).is_file() and any(
+            not dst_dir.is_symlink() for _, dst_dir, _ in self._dests(ctx))
 
     def _dests(self, ctx):
         return [(label, root / self.name, root / self.name / "SKILL.md")
