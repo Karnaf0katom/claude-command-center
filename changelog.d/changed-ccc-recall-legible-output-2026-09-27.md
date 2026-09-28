@@ -1,0 +1,1 @@
+- `ccc recall` output is easier to scan: numbered results, short ids, bold titles, a dim repo/date line, one snippet per result fitted to the terminal width, and CCC's own "Heads-up: may already be shipped" preamble stripped.

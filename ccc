@@ -51,6 +51,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -480,16 +481,39 @@ def cmd_recall(args):
         else:
             print(f"(no sessions found for {text!r})")
         return 0
-    for r in results:
-        meta = " | ".join(x for x in (r.get("title"), r.get("repo"), r.get("date")) if x)
+    tty = sys.stdout.isatty()
+    width = shutil.get_terminal_size((100, 20)).columns if tty else 100
+    bold = (lambda t: f"\033[1m{t}\033[0m") if tty else (lambda t: t)
+    dim = (lambda t: f"\033[2m{t}\033[0m") if tty else (lambda t: t)
+
+    def _clean(t):
+        # Drop CCC's own injected preambles so the snippet shows the ask itself.
+        t = " ".join(str(t or "").split())
+        t = re.sub(r"^Heads-up: this may already be shipped:.*?Verify before rebuilding\.\s*", "", t)
+        return t
+
+    def _fit(t, room):
+        return t if len(t) <= room else t[: max(room - 1, 0)].rstrip() + "…"
+
+    for i, r in enumerate(results, 1):
+        sid = str(r.get("session_id") or "?")
+        short = sid.removeprefix("session_")[:8]
+        title = _clean(r.get("title")) or "(untitled)"
+        head = f"{i:>2}. {short}  "
+        print(head + bold(_fit(title, width - len(head))))
         collapsed = r.get("chain_collapsed") or 0
-        suffix = f"  (+{collapsed} earlier)" if collapsed else ""
-        print(f"{r.get('session_id') or '?':<38} {meta}{suffix}")
-        if r.get("snippet"):
-            print(f"  {r['snippet']}")
-        m = r.get("match")
-        if m and m.get("snippet"):
-            print(f"  @turn {m.get('turn')}: {m['snippet']}")
+        meta = "  ·  ".join(x for x in (r.get("repo"), r.get("date"),
+                                        f"+{collapsed} related" if collapsed else "") if x)
+        pad = " " * len(head)
+        print(pad + dim(meta))
+        m = r.get("match") or {}
+        snip = _clean(m.get("snippet") if m.get("snippet") else r.get("snippet"))
+        if snip and not title.startswith(snip[:40]):
+            label = f"turn {m.get('turn')}: " if m.get("snippet") else ""
+            print(pad + _fit(label + snip, width - len(pad)))
+        print()
+    if results:
+        print(dim(f"full id / resume: ccc brief <id>   ·   raw: --json"))
     if payload.get("indexing"):
         print("(indexing: true — still warming up, results may be incomplete)")
     return 0
