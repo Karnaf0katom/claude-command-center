@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ccc_server import hermes as _hermes
 from ccc_server import lineage as _lineage
 from ccc_server import sandbox_harvest as _sandbox_harvest
 from ccc_server import ship_graph as _sg
@@ -1010,6 +1011,23 @@ def _vector_rank(query: str, limit: int) -> list[str]:
     return [sid for sid, _ in ranked[:limit]]
 
 
+def _hermes_channel_hits(query: str, limit: int) -> list[dict]:
+    """Raw hits ({session_id, score, mtime, snippet}) from Hermes' own
+    `messages_fts` table (closes TODO(hermes-search) in ccc_server/hermes.py)
+    -- never CCC-parsed or CCC-cached, queried live and read-only on every
+    call. Degrades to an empty channel on any failure (Hermes not installed,
+    corrupt db, ...), same as the optional embeddings channel above."""
+    try:
+        return _hermes.search_hermes_messages(query, limit=limit)
+    except Exception:
+        return []
+
+
+def _hermes_channel_sids(query: str, limit: int) -> list[str]:
+    """Ranked Hermes-native session ids -- see _hermes_channel_hits."""
+    return [h["session_id"] for h in _hermes_channel_hits(query, limit)]
+
+
 def _drain_embeddings(conn: sqlite3.Connection, embed_jobs: list[tuple[str, list[tuple[str, str]]]]) -> None:
     """Embed newly-changed sessions plus a bounded slice of any backlog left
     over from a prior cycle where Ollama was unavailable or over-capacity."""
@@ -1543,8 +1561,10 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
             return []
         for sid, score in _section_scores(conn, q, max(limit * 4, 100)).items():
             explicit[sid] = min(explicit.get(sid, 0.0), score)
-        ranked = sorted(explicit, key=lambda s: explicit[s])[:limit]
-        return [{"session_id": sid, "score": explicit[sid]} for sid in ranked]
+        explicit_ranked = sorted(explicit, key=lambda s: explicit[s])
+        hermes_sids = _hermes_channel_sids(q, limit)
+        final = _rrf([explicit_ranked, hermes_sids]) if hermes_sids else explicit_ranked
+        return [{"session_id": sid, "score": explicit.get(sid, 0.0)} for sid in final[:limit]]
 
     terms = extract_history_terms(q, max_terms=25)
     if not terms:
@@ -1594,7 +1614,11 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
     # is the default for most users -- fts_sids alone is then the result,
     # identical to pre-embedding behavior.
     vector_sids = _vector_rank(q, max(limit * 2, 50)) if _ollama_available() else []
-    final_sids = _rrf([fts_sids, vector_sids]) if vector_sids else fts_sids
+    # Hermes' own messages_fts as a third channel -- see _hermes_channel_sids.
+    # Empty whenever Hermes isn't installed, same degrade-safe shape.
+    hermes_sids = _hermes_channel_sids(q, max(limit * 2, 50))
+    channels = [lst for lst in (fts_sids, vector_sids, hermes_sids) if lst]
+    final_sids = _rrf(channels) if channels else []
 
     return [{"session_id": sid, "score": scores.get(sid, 0.0)} for sid in final_sids[:limit]]
 
@@ -1613,7 +1637,13 @@ def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) ->
 
 def _meta_for_sids(conn: sqlite3.Connection, sids: list[str]) -> dict[str, dict]:
     """Batched (path, cwd, engine, mtime) lookup for already-indexed sids --
-    one bounded IN-clause query, no per-row file I/O."""
+    one bounded IN-clause query, no per-row file I/O.
+
+    A sid the Hermes messages_fts channel surfaced (see
+    _hermes_channel_sids) has no file_cache row -- CCC never parses Hermes
+    transcripts into sdoc/file_cache -- so any sid still missing afterward
+    falls back to hermes.hermes_meta_for_sids(), itself one bounded IN-clause
+    query over each Hermes DB's `sessions` table."""
     if not sids:
         return {}
     placeholders = ",".join("?" for _ in sids)
@@ -1624,10 +1654,16 @@ def _meta_for_sids(conn: sqlite3.Connection, sids: list[str]) -> dict[str, dict]
             f"WHERE sid IN ({placeholders}) AND indexed = 1",
             sids,
         )
+        for sid, path, cwd, engine, mtime in cur.fetchall():
+            out[sid] = {"path": path or "", "cwd": cwd or "", "engine": engine or "", "mtime": mtime or 0.0}
     except sqlite3.OperationalError:
-        return out
-    for sid, path, cwd, engine, mtime in cur.fetchall():
-        out[sid] = {"path": path or "", "cwd": cwd or "", "engine": engine or "", "mtime": mtime or 0.0}
+        pass
+    missing = [s for s in sids if s not in out]
+    if missing:
+        try:
+            out.update(_hermes.hermes_meta_for_sids(missing))
+        except Exception:
+            pass
     return out
 
 
@@ -1715,6 +1751,7 @@ def search_sessions_enriched(
     or_q = " OR ".join(f'"{t}"' for t in terms) if terms else ""
     marked = _snippet_for_sids(conn, sids, or_q)
     plain: dict[str, str] | None = None
+    hermes_snips: dict[str, str] | None = None
 
     cwd_filter = (cwd_like or "").strip()
     out = []
@@ -1734,6 +1771,16 @@ def search_sessions_enriched(
             if plain is None:
                 plain = _plain_snippets(conn, sids)
             snippet = plain.get(sid, "")
+        if not snippet and m.get("engine") == "hermes":
+            # Hermes sids have no sdoc row for _snippet_for_sids/_plain_snippets
+            # to read -- fall back to the matched-message snippet Hermes'
+            # own messages_fts already produced.
+            if hermes_snips is None:
+                hermes_snips = {
+                    hit["session_id"]: hit.get("snippet", "")
+                    for hit in _hermes_channel_hits(q, max(limit * 5, 100))
+                }
+            snippet = hermes_snips.get(sid, "")
         out.append({
             "uuid": f"{source}:{sid}",
             "session_id": sid,

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import server
 from ccc_server import session_fts
 
 
@@ -39,6 +40,12 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(cursor_dir))
     # Isolate the S8b harvested-sandbox root too -- same leak risk as above.
     monkeypatch.setenv("CCC_HARVESTED_ROOT", str(harvested_dir))
+    # Isolate the Hermes messages_fts channel (S9) too -- HERMES_STATE_DB is
+    # resolved once at server.py import time, so an env var alone would be
+    # too late; point the module attribute at a path that doesn't exist so
+    # search_sessions() never queries a real ~/.hermes/state.db on this box.
+    monkeypatch.setattr(server, "HERMES_STATE_DB", tmp_path / "hermes" / "state.db")
+    monkeypatch.setattr(server, "HERMES_PROFILES_DIR", tmp_path / "hermes" / "profiles")
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")  # disable cutoff for tests
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     # These tests exercise FTS mechanics, not the optional embeddings channel;

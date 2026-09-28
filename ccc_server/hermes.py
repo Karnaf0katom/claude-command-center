@@ -23,6 +23,7 @@ import time
 
 from ccc_server import core as _core
 from ccc_server import dbutil
+from ccc_server.history_search import extract_history_terms, _is_explicit_history_fts_query
 
 # ---------------------------------------------------------------------------
 # Hermes conversation ingestion (read-only).
@@ -31,10 +32,9 @@ from ccc_server import dbutil
 # legacy, so CCC reads SQLite directly and folds parent_session_id continuation
 # chains into one visible conversation row per lineage leaf.
 #
-# TODO(hermes-search): merge Hermes messages_fts into /api/search-history so
-# Hermes full-text hits surface alongside the claude-index results. Row/list and
-# transcript viewing are wired first because they do not require changing the
-# cross-provider search result contract.
+# search_hermes_messages()/hermes_meta_for_sids() below merge Hermes'
+# messages_fts into ccc_server.session_fts as another ranking channel, so
+# Hermes full-text hits surface alongside the claude-index results.
 # ---------------------------------------------------------------------------
 
 # Profile workers (e.g. the "chuckrealtor" / Becky agent that actually writes
@@ -1400,6 +1400,111 @@ def _hermes_session_row(session_id):
         return None
     finally:
         con.close()
+
+
+def _hermes_search_match_expr(query):
+    q = (query or "").strip()
+    if not q:
+        return ""
+    if _is_explicit_history_fts_query(q):
+        return q
+    terms = extract_history_terms(q, max_terms=25)
+    return " OR ".join(f'"{t}"' for t in terms) if terms else ""
+
+
+def search_hermes_messages(query, limit=50):
+    """FTS5 search over every Hermes state.db's own `messages_fts` table
+    (the gateway DB plus every profile worker DB) -- closes TODO(hermes-search)
+    above: `messages_fts` is Hermes' own index, built and kept current by
+    Hermes itself, so this only ever queries it read-only and live; CCC never
+    reparses or caches it separately.
+
+    Returns one row per matching session, best (lowest) bm25 first:
+    {"session_id", "score", "mtime", "snippet"}. Any per-db failure (Hermes
+    not installed, corrupt file, a schema without messages_fts) is skipped --
+    like the rest of Hermes ingestion, this must never raise into a caller's
+    search path.
+    """
+    match = _hermes_search_match_expr(query)
+    if not match:
+        return []
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    best = {}
+    for db in _hermes_db_paths():
+        con = _hermes_connect(db)
+        if con is None:
+            continue
+        try:
+            rows = con.execute(
+                "SELECT m.session_id, bm25(messages_fts) AS score, m.timestamp, "
+                "snippet(messages_fts, 0, '<mark>', '</mark>', '…', 20) "
+                "FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
+                "WHERE messages_fts MATCH ? ORDER BY score LIMIT ?",
+                (match, limit * 3),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        finally:
+            con.close()
+        for sid, score, ts, snippet in rows:
+            sid = str(sid or "").strip()
+            if not sid:
+                continue
+            if sid not in best or score < best[sid]["score"]:
+                best[sid] = {
+                    "session_id": sid,
+                    "score": score,
+                    "mtime": _hermes_epoch(ts),
+                    "snippet": snippet or "",
+                }
+    ranked = sorted(best.values(), key=lambda r: r["score"])
+    return ranked[:limit]
+
+
+def hermes_meta_for_sids(sids):
+    """Batched cwd/mtime lookup for Hermes-native session ids, for
+    session_fts's cross-provider search enrichment (a sid surfaced by
+    search_hermes_messages() has no sdoc/file_cache row to enrich from).
+    Bounded by `sids` via an IN clause on each DB's `sessions` table --
+    never a full-table scan."""
+    wanted = {str(s) for s in sids if s}
+    out = {}
+    if not wanted:
+        return out
+    for db in _hermes_db_paths():
+        if not wanted:
+            break
+        con = _hermes_connect(db)
+        if con is None:
+            continue
+        try:
+            cols = _hermes_columns(con, "sessions")
+            if "id" not in cols:
+                continue
+            placeholders = ",".join("?" for _ in wanted)
+            rows = con.execute(
+                f"SELECT * FROM sessions WHERE id IN ({placeholders})", list(wanted),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        finally:
+            con.close()
+        for row in rows:
+            row = dict(row)
+            sid = str(row.get("id") or "").strip()
+            if not sid:
+                continue
+            out[sid] = {
+                "path": "",
+                "cwd": row.get("cwd") or "",
+                "engine": "hermes",
+                "mtime": _hermes_session_epoch(row),
+            }
+            wanted.discard(sid)
+    return out
 
 
 def _hermes_lineage_chain_lazy(con, session_id):
