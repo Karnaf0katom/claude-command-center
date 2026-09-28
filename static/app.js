@@ -2457,6 +2457,11 @@
   // heavy INITIAL LOAD on this predicate instead of CONV_POPOUT_MODE alone.
   // (FLOW_POPOUT_MODE is intentionally excluded — Flow needs conversation data.)
   const READER_ONLY_POPOUT = CONV_POPOUT_MODE || GROUPCHAT_POPOUT_MODE;
+  // The startup read gate above waits for archive rows to paint, which a
+  // reader-only popout never does, so its session reads (usage -> model
+  // pill, workspace row) sat queued until the 20s timer or a first click
+  // (CCC-1209: popout showed no model name).
+  if (READER_ONLY_POPOUT) _releaseStartupApiReads();
   // Reader-on-right toggle for the flow popout — persisted across
   // popout reloads. Applied at boot so the layout doesn't flash from
   // full-width-flow → split on first paint.

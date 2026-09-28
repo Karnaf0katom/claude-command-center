@@ -1,0 +1,1 @@
+- Pop-out conversation windows show the model name and workspace row right away instead of after about 20 seconds or a first click.

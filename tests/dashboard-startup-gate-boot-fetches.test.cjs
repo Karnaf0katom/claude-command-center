@@ -75,3 +75,13 @@ test('released catalog reads survive the spawn-click pool abort', async () => {
   assert.ok(urls(ctx).includes('GET /api/repo/list'));
   assert.ok(urls(ctx).includes('POST /api/telemetry/heartbeat'));
 });
+
+test('reader-only popouts release the startup gate at boot', () => {
+  // CCC-1209: the gate waits for archive rows a conversation popout never
+  // paints, so its usage read (the model pill) sat queued for 20s.
+  const at = app.indexOf('  const READER_ONLY_POPOUT = ');
+  assert.ok(at > 0);
+  const after = app.slice(at, app.indexOf('\n\n', at));
+  assert.match(after, /if \(READER_ONLY_POPOUT\) _releaseStartupApiReads\(\);/);
+  assert.ok(app.indexOf('function _releaseStartupApiReads') < at, 'gate is defined before the popout release');
+});
