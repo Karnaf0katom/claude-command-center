@@ -1608,26 +1608,34 @@ def _raise_open_file_limit(min_soft=2048):
         print(f"  [limits] could not raise max open files ({e})")
 
 
-# ── Anonymous opt-in telemetry ──────────────────────────────────────────────
+# ── Anonymous open beacon ────────────────────────────────────────────────────
 #
-# Five fields. Off by default. Inspectable on disk. See docs/telemetry.md.
+# The opt-in daily ping (install_id, 5-9 fields, consent banner) was retired
+# from the app on 2026-09-28 — see docs/telemetry.md and
+# changelog.d/removed-telemetry-opt-in-ping-2026-09-28.md. What remains is
+# the anonymous open beacon below: no consent step because it carries no
+# identifier of any kind.
 #
 # WHAT IS SENT (the entire payload, no exceptions):
-#   1. install_id        — random UUIDv4, generated locally on first launch.
-#                          Never derived from machine identity (hostname,
-#                          MAC, username, git config, etc.). Stored at
-#                          ~/.config/claude-command-center/install-id (0600).
+#   1. schema_version    — 2. (v1, three fields, is still accepted by the
+#                          Worker for old clients; this build always sends v2.)
 #   2. version           — the __version__ string from this file.
 #   3. platform          — sys.platform value ("darwin", "linux", ...).
-#   4. engines           — comma-list of installed CLI engines among
-#                          {claude, codex, gemini, cursor, antigravity}, derived only from
-#                          "is the binary available" — NO usage signal,
-#                          NO per-engine counts, NO version probing.
-#   5. last_active_date  — ISO date only (YYYY-MM-DD) of the most recent
-#                          transcript mtime under ~/.claude/projects/.
-#                          NO clock time, NO session count, NO repo info.
+#   4. first_this_week   — true iff this is the first beacon this install
+#                          has sent in the current ISO week (UTC). Derived
+#                          purely from the locally stored last-beacon date;
+#                          no identifier, no history beyond "did I already
+#                          beacon this week."
+#   5. first_this_month  — same idea, current UTC calendar month.
 #
-# WHAT IS NEVER SENT (the trust anchor):
+# One optional field:
+#   dev                  — true only when CCC_TELEMETRY_DEV_MODE=1 or
+#                          ~/.config/claude-command-center/telemetry.json has
+#                          "dev": true. Marks the row "not-a-real-user" on
+#                          the public stats page. Adds no identity.
+#
+# WHAT IS NEVER SENT:
+#   - install_id or any other identifier — the whole point of this beacon.
 #   - Prompt content, transcripts, conversation events, tool calls.
 #   - Session counts, usage volume, per-session timing, token counts.
 #   - Repo paths, repo names, file paths, branch names, cwd.
@@ -1636,40 +1644,30 @@ def _raise_open_file_limit(min_soft=2048):
 #   - Anything from the dashboard UI: clicks, searches, navigation.
 #
 # Server-side: the receiving Cloudflare Worker drops the source IP before
-# logging. See docs/telemetry.md for the full contract. This guarantee is
-# not enforced from the client — auditors should read the Worker source
-# under infra/telemetry-worker/.
+# logging (it only ever sees a daily-salted hash) and additionally persists
+# coarse edge-computed geo (ISO-2 country + first-level region name only —
+# never city, postal code, lat/long, ASN, or the raw IP). See
+# docs/telemetry.md for the full contract; auditors should read the Worker
+# source under infra/telemetry-worker/.
 #
-# KILL SWITCHES (any one wins, checked at every fire):
-#   1. Env var CCC_TELEMETRY_DISABLED in {"1","true","yes","on"} — no code runs.
-#   2. ~/.config/claude-command-center/telemetry.json opt_in == false.
-#   3. Missing install-id file → skip the ping and re-show the opt-in bar.
+# KILL SWITCH: env var CCC_TELEMETRY_DISABLED in {"1","true","yes","on"} —
+# no code runs, no bytes leave the host. This is the only gate; there is no
+# consent step to bypass because the payload carries no identity.
 #
-# Cadence: once per UTC day. Background thread checks every hour. First
-# attempt is delayed 30s after server start so the dashboard loads first.
-# Fire-and-forget over urllib (stdlib only); 10s connect / 15s total timeout;
-# no retries. Offline / DNS-fail / non-200 → silent skip, no log spam.
+# Cadence: at most once per UTC day. Background thread checks every hour.
+# First attempt is delayed 30s after server start so the dashboard loads
+# first. Fire-and-forget over urllib (stdlib only); 10s connect / 15s total
+# timeout; no retries. Offline / DNS-fail / non-200 → silent skip.
 #
 # All telemetry log lines are tagged `[telemetry]` so users grepping the
 # server log can audit exactly when (and whether) anything fires.
 
-_TELEMETRY_SCHEMA_VERSION = 3
-# Heartbeat cadence (client beats every N seconds while the dashboard
-# tab is visible). Each accepted beat credits N seconds of "active"
-# time to today's bucket. Picked to be coarse enough that the count is
-# privacy-friendly (no per-action timing) but fine enough to be useful.
-_TELEMETRY_ACTIVE_HEARTBEAT_S = 30
-_TELEMETRY_DEFAULT_ENDPOINT = (
-    "https://telemetry.claude-command-center.workers.dev/v1/ping"
-)
-# Anonymous open beacon. Fires at most ONCE PER UTC DAY while the server
-# is running, not gated on opt-in (carries NO install_id and NO identity —
-# three fields total: schema, version, platform). Daily rather than
-# per-boot so the aggregate answers "how many installs ran today", which
-# a boot-only beacon cannot: an install left running under launchd for a
-# week produces zero boots. Restart-heavy machines now send *fewer* bytes
-# than before, not more. Still honors the CCC_TELEMETRY_DISABLED env var
-# so users have one switch that kills every wire byte from this process.
+_TELEMETRY_BEACON_SCHEMA_VERSION = 2
+# Anonymous open beacon endpoint. Fires at most ONCE PER UTC DAY while the
+# server is running, not gated on any consent step (carries no install_id
+# and no identity). Daily rather than per-boot so the aggregate answers
+# "how many installs ran today", which a boot-only beacon cannot: an
+# install left running under launchd for a week produces zero boots.
 _TELEMETRY_OPEN_DEFAULT_ENDPOINT = (
     "https://telemetry.claude-command-center.workers.dev/v1/open"
 )
@@ -1681,14 +1679,15 @@ _TELEMETRY_INITIAL_DELAY_S = 30
 _TELEMETRY_CHECK_INTERVAL_S = 3600  # 1 hour
 _TELEMETRY_CONNECT_TIMEOUT_S = 10
 _TELEMETRY_TOTAL_TIMEOUT_S = 15
-_TELEMETRY_STATE_LOCK = threading.Lock()
 
 
 def _telemetry_state_dir():
-    """Return the dir holding telemetry state (install-id, opt-in, last-ping).
+    """Return the dir holding telemetry state (legacy install-id/opt-in
+    files a pre-2026-09-28 install may still have, plus the beacon's own
+    last-open date).
 
-    Created on first use with mode 0700 so the install-id and consent record
-    aren't world-readable on a shared machine.
+    Created on first use with mode 0700 so nothing under it is
+    world-readable on a shared machine.
     """
     d = _TELEMETRY_STATE_DIR_PATH
     try:
@@ -1704,15 +1703,17 @@ def _telemetry_state_dir():
 
 
 def _telemetry_install_id_path():
+    # Legacy file from the retired opt-in ping. Read-only: this build never
+    # writes it, but an existing file on disk from an older install is left
+    # alone (see docs/telemetry.md).
     return _core._telemetry_state_dir() / "install-id"
 
 
 def _telemetry_state_path():
+    # Legacy opt-in JSON (also doubles as the maintainer dev-mode file —
+    # see _telemetry_dev_mode_file below). Read-only for the retired opt_in
+    # / asked_at / endpoint keys; "dev" is the one key still consulted live.
     return _core._telemetry_state_dir() / "telemetry.json"
-
-
-def _telemetry_last_ping_path():
-    return _core._telemetry_state_dir() / "telemetry-last-ping"
 
 
 def _telemetry_last_open_path():
@@ -1730,37 +1731,11 @@ def _telemetry_disabled_env():
     return v in ("1", "true", "yes", "on")
 
 
-def _telemetry_load_or_init_install_id():
-    """Return the UUIDv4 install-id, generating + writing if missing.
-
-    Returns the existing id when present (idempotent). If the file is
-    missing or unreadable, generates a fresh UUIDv4, writes it with mode
-    0600, and returns the new id. Returns None only if disk writes fail.
-    """
-    import uuid
-    p = _core._telemetry_install_id_path()
-    with _TELEMETRY_STATE_LOCK:
-        try:
-            if p.is_file():
-                txt = p.read_text(encoding="utf-8").strip()
-                if txt:
-                    return txt
-        except OSError:
-            pass
-        new_id = str(uuid.uuid4())
-        try:
-            p.write_text(new_id + "\n", encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-            return new_id
-        except OSError as e:
-            print(f"  [telemetry] could not write install-id ({e})")
-            return None
-
-
 def _telemetry_install_id_present():
+    """Legacy check: does a pre-2026-09-28 install-id file still exist.
+
+    Read-only — this build never creates one. Kept so /api/telemetry/status
+    can keep reporting the field for anything still reading it."""
     try:
         return _core._telemetry_install_id_path().is_file()
     except OSError:
@@ -1768,7 +1743,14 @@ def _telemetry_install_id_present():
 
 
 def _load_telemetry_state():
-    """Read the opt-in JSON. Returns a normalized dict; missing == 'not asked'."""
+    """Read the legacy opt-in JSON. Returns a normalized dict; every key is
+    None ("never asked" / "not set") on a fresh or missing file.
+
+    The opt-in ping this file used to gate was retired on 2026-09-28 — this
+    build never writes it. It stays read-only so /api/telemetry/status can
+    report what an older version of this install decided, instead of
+    silently forgetting the user's choice out from under them.
+    """
     p = _core._telemetry_state_path()
     try:
         raw = p.read_text(encoding="utf-8")
@@ -1792,299 +1774,93 @@ def _load_telemetry_state():
     return {"opt_in": opt_in, "asked_at": asked_at, "endpoint": endpoint}
 
 
-def _save_telemetry_state(state):
-    """Persist the opt-in JSON with mode 0600."""
-    p = _core._telemetry_state_path()
-    payload = {
-        "opt_in": state.get("opt_in"),
-        "asked_at": state.get("asked_at"),
-        "endpoint": state.get("endpoint"),
-    }
-    with _TELEMETRY_STATE_LOCK:
-        try:
-            _core._telemetry_state_dir()
-            p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-            return True
-        except OSError as e:
-            print(f"  [telemetry] could not write state ({e})")
-            return False
-
-
-def _telemetry_resolved_endpoint():
-    return (
-        (os.environ.get("CCC_TELEMETRY_ENDPOINT") or "").strip()
-        or _TELEMETRY_DEFAULT_ENDPOINT
-    )
-
-
-def _telemetry_detect_engines():
-    """List installed engines, in canonical order. 'is the binary available'
-    only — no version probe, no usage signal."""
-    out = []
-    try:
-        if _core._resolve_claude_bin().get("available"):
-            out.append("claude")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_codex_bin().get("available"):
-            out.append("codex")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_gemini_bin().get("available"):
-            out.append("gemini")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_cursor_bin().get("available"):
-            out.append("cursor")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_antigravity_bin().get("available"):
-            out.append("antigravity")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_kilo_bin().get("available"):
-            out.append("kilo")
-    except Exception:
-        pass
-    try:
-        if _core._resolve_opencode_bin().get("available"):
-            out.append("opencode")
-    except Exception:
-        pass
-    return out
-
-
-def _telemetry_last_active_date():
-    """Most recent transcript activity date (YYYY-MM-DD) under PROJECTS_ROOT.
-
-    Returns "" when no transcripts exist. Uses file mtime — no transcript
-    content is opened. Date only; no clock time goes into the payload.
-    """
-    root = _core.PROJECTS_ROOT
-    try:
-        if not root.is_dir():
-            return ""
-    except OSError:
-        return ""
-    newest = 0.0
-    try:
-        for project_dir in root.iterdir():
-            if not project_dir.is_dir():
-                continue
-            try:
-                for jsonl in project_dir.iterdir():
-                    if not jsonl.name.endswith(".jsonl"):
-                        continue
-                    try:
-                        m = jsonl.stat().st_mtime
-                    except OSError:
-                        continue
-                    if m > newest:
-                        newest = m
-            except OSError:
-                continue
-    except OSError:
-        return ""
-    if newest <= 0:
-        return ""
-    try:
-        return datetime.fromtimestamp(newest, tz=timezone.utc).strftime("%Y-%m-%d")
-    except (OSError, ValueError):
-        return ""
-
-
-def _telemetry_count_sessions_today():
-    """Count distinct JSONL transcripts modified in the last 24h.
-
-    Coarse "daily session count" proxy: scans PROJECTS_ROOT, returns the
-    number of *.jsonl files whose mtime falls in the last 24h. No content
-    is opened. Capped at 100000 to keep the payload bounded.
-    """
-    root = _core.PROJECTS_ROOT
-    try:
-        if not root.is_dir():
-            return 0
-    except OSError:
-        return 0
-    cutoff = time.time() - 86400
-    n = 0
-    try:
-        for project_dir in root.iterdir():
-            if not project_dir.is_dir():
-                continue
-            try:
-                for jsonl in project_dir.iterdir():
-                    if not jsonl.name.endswith(".jsonl"):
-                        continue
-                    try:
-                        if jsonl.stat().st_mtime >= cutoff:
-                            n += 1
-                            if n >= 100000:
-                                return n
-                    except OSError:
-                        continue
-            except OSError:
-                continue
-    except OSError:
-        return n
-    return n
-
-
-def _telemetry_count_total_sessions_managed():
-    """Count every JSONL transcript ever seen under PROJECTS_ROOT.
-
-    Lifetime "sessions CCC has indexed" proxy. Same scan shape as the
-    24h counter, just without the mtime cutoff. Capped at 10000000 to
-    keep the payload bounded; the dashboard cap on its own poll
-    rendering is far below that.
-    """
-    root = _core.PROJECTS_ROOT
-    try:
-        if not root.is_dir():
-            return 0
-    except OSError:
-        return 0
-    n = 0
-    try:
-        for project_dir in root.iterdir():
-            if not project_dir.is_dir():
-                continue
-            try:
-                for jsonl in project_dir.iterdir():
-                    if not jsonl.name.endswith(".jsonl"):
-                        continue
-                    n += 1
-                    if n >= 10_000_000:
-                        return n
-            except OSError:
-                continue
-    except OSError:
-        return n
-    return n
-
-
-def _telemetry_active_state_path():
-    return _core._telemetry_state_dir() / "telemetry-active.json"
-
-
-def _telemetry_today_utc():
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-
-
-def _telemetry_load_active_state():
-    """Read the rolling daily "active seconds" bucket. Resets on day
-    rollover. Stored under telemetry state dir alongside other opt-in
-    files; mode 0600."""
-    p = _telemetry_active_state_path()
-    today = _telemetry_today_utc()
-    try:
-        raw = p.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict) and data.get("date") == today:
-            seconds = data.get("seconds")
-            if isinstance(seconds, int) and 0 <= seconds <= 86400:
-                return {"date": today, "seconds": seconds}
-    except (OSError, ValueError, TypeError):
-        pass
-    return {"date": today, "seconds": 0}
-
-
-def _telemetry_record_heartbeat():
-    """Credit one heartbeat (_TELEMETRY_ACTIVE_HEARTBEAT_S seconds) to
-    today's active-seconds bucket. Honors CCC_TELEMETRY_DISABLED. Caps
-    at 86400 (full day). Returns the new bucket state."""
-    if _core._telemetry_disabled_env():
-        return {"date": _telemetry_today_utc(), "seconds": 0}
-    state = _telemetry_load_active_state()
-    state["seconds"] = min(86400, state["seconds"] + _TELEMETRY_ACTIVE_HEARTBEAT_S)
-    p = _telemetry_active_state_path()
-    with _TELEMETRY_STATE_LOCK:
-        try:
-            _core._telemetry_state_dir()
-            p.write_text(json.dumps(state) + "\n", encoding="utf-8")
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-        except OSError:
-            pass
-    return state
-
-
-def _telemetry_active_seconds_today():
-    return _telemetry_load_active_state()["seconds"]
-
-
-def _build_telemetry_payload():
-    """Assemble the schema-v3 dict. Returns None when no install-id is available."""
-    install_id = _core._telemetry_load_or_init_install_id()
-    if not install_id:
-        return None
-    payload = {
-        "schema_version": _TELEMETRY_SCHEMA_VERSION,
-        "install_id": install_id,
-        "version": _core.__version__,
-        "platform": sys.platform,
-        "engines": ",".join(_telemetry_detect_engines()),
-        "last_active_date": _telemetry_last_active_date(),
-        "sessions_today": _telemetry_count_sessions_today(),
-        "active_seconds_today": _telemetry_active_seconds_today(),
-        "total_sessions_managed": _telemetry_count_total_sessions_managed(),
-    }
-    # Same maintainer marker the anonymous beacon carries. Lets the public
-    # stats page report user counts both with and without the maintainer's
-    # own machine instead of quietly counting it as a user.
-    if _telemetry_dev_mode_env():
-        payload["dev"] = True
-    return payload
-
-
 def _telemetry_resolved_open_endpoint():
-    """Endpoint for the anonymous open beacon. Derive from the opt-in
-    endpoint if CCC_TELEMETRY_ENDPOINT is set (swap /v1/ping → /v1/open)
-    so forks / staging proxies just need one env var."""
+    """Endpoint for the anonymous open beacon. CCC_TELEMETRY_ENDPOINT can
+    override it directly; a value still ending in the old /v1/ping suffix
+    (from a fork/staging config written before the ping was retired) is
+    swapped to /v1/open so existing overrides keep working."""
     custom = (os.environ.get("CCC_TELEMETRY_ENDPOINT") or "").strip()
     if custom:
         if custom.endswith("/v1/ping"):
             return custom[: -len("/v1/ping")] + "/v1/open"
+        if custom.endswith("/v1/open"):
+            return custom
         return custom.rstrip("/") + "/v1/open"
     return _TELEMETRY_OPEN_DEFAULT_ENDPOINT
 
 
 def _telemetry_dev_mode_env():
-    """Maintainer's own-machine flag. When set, the beacon carries
-    dev:true so the public stats page can filter these rows out —
-    otherwise the maintainer's frequent restarts inflate boot counts.
+    """Maintainer's own-machine flag via env var. When set, the beacon
+    carries dev:true so the public stats page can filter these rows out —
+    otherwise the maintainer's frequent restarts inflate the counts.
     Adds no identity; the flag is a plain boolean stored server-side."""
     v = (os.environ.get("CCC_TELEMETRY_DEV_MODE") or "").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 
-def _send_telemetry_open_beacon():
+def _telemetry_dev_mode_file():
+    """Maintainer's own-machine flag via disk: "dev": true in the legacy
+    telemetry.json state file. Lets the maintainer self-exclude without an
+    env var on every launch path (a LaunchAgent plist, a Dock double-click,
+    a Mac .app bundle) — set it once and every future launch picks it up."""
+    p = _core._telemetry_state_path()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and data.get("dev") is True
+
+
+def _telemetry_dev_mode():
+    """Either self-exclusion mechanism marks this install as dev."""
+    return _core._telemetry_dev_mode_env() or _core._telemetry_dev_mode_file()
+
+
+def _telemetry_iso_week(date_str):
+    """Return the (ISO year, ISO week number) pair for a YYYY-MM-DD string."""
+    y, m, d = (int(x) for x in date_str.split("-"))
+    iso = datetime(y, m, d, tzinfo=timezone.utc).isocalendar()
+    return (iso[0], iso[1])
+
+
+def _telemetry_compute_first_flags(last_date_str, today_str):
+    """Derive (first_this_week, first_this_month) from the previously
+    recorded beacon date, entirely from data already on disk — no history
+    beyond "when did I last beacon" is kept or sent.
+
+    A missing/empty last date (first run ever) counts as first for both.
+    Otherwise first_this_week is true iff last_date_str falls in an earlier
+    ISO week (UTC) than today; first_this_month is true iff it falls in an
+    earlier UTC calendar month.
+    """
+    if not last_date_str:
+        return True, True
+    try:
+        first_week = _telemetry_iso_week(last_date_str) != _telemetry_iso_week(today_str)
+    except ValueError:
+        first_week = True
+    first_month = last_date_str[:7] != today_str[:7]
+    return first_week, first_month
+
+
+def _send_telemetry_open_beacon(first_this_week=False, first_this_month=False):
     """Fire-and-forget POST of the anonymous open beacon.
 
-    Not gated on opt-in by design: the payload carries NO install_id and
-    NO identifying data, so the privacy contract holds without per-user
-    consent. The CCC_TELEMETRY_DISABLED env var still kills it; that is
+    Not gated on any consent step by design: the payload carries NO
+    install_id and NO identifying data, so the privacy contract holds
+    without one. The CCC_TELEMETRY_DISABLED env var still kills it; that is
     the single switch users have for the whole process.
     """
     if _core._telemetry_disabled_env():
         return False
     payload = {
-        "schema_version": 1,
+        "schema_version": _TELEMETRY_BEACON_SCHEMA_VERSION,
         "version": _core.__version__,
         "platform": sys.platform,
+        "first_this_week": bool(first_this_week),
+        "first_this_month": bool(first_this_month),
     }
-    if _telemetry_dev_mode_env():
+    if _core._telemetry_dev_mode():
         payload["dev"] = True
     try:
         data = json.dumps(payload).encode("utf-8")
@@ -2095,7 +1871,7 @@ def _send_telemetry_open_beacon():
         "User-Agent": f"claude-command-center/{_core.__version__} (telemetry-open)",
     }
     req = urllib.request.Request(
-        _telemetry_resolved_open_endpoint(), data=data, headers=headers, method="POST"
+        _core._telemetry_resolved_open_endpoint(), data=data, headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=_TELEMETRY_TOTAL_TIMEOUT_S) as resp:
@@ -2141,16 +1917,17 @@ def _maybe_send_telemetry_open_beacon():
     last = _core._telemetry_read_last_open_date()
     if last and last >= today:
         return "already-today"
-    if _core._send_telemetry_open_beacon():
+    first_week, first_month = _core._telemetry_compute_first_flags(last, today)
+    if _core._send_telemetry_open_beacon(first_week, first_month):
         _core._telemetry_write_last_open_date(today)
         return "sent"
     return "failed"
 
 
 def _telemetry_open_beacon_loop():
-    """Daemon thread target. Sleeps the same initial delay as the opt-in
-    loop so the dashboard paints first, then fires the beacon at most once
-    per UTC day for as long as this process lives.
+    """Daemon thread target. Sleeps an initial delay so the dashboard paints
+    first, then fires the beacon at most once per UTC day for as long as
+    this process lives.
 
     The at-most-once-a-day gate is a date file in the telemetry state dir,
     so a restart (or twenty) inside the same day sends nothing extra."""
@@ -2162,114 +1939,6 @@ def _telemetry_open_beacon_loop():
         try:
             if _core._maybe_send_telemetry_open_beacon() == "sent":
                 print("  [telemetry] anonymous daily beacon sent")
-        except Exception:
-            # Defensive: never crash the daemon thread.
-            pass
-        try:
-            time.sleep(_TELEMETRY_CHECK_INTERVAL_S)
-        except Exception:
-            return
-
-
-def _telemetry_read_last_ping_date():
-    try:
-        s = _telemetry_last_ping_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    # Stored as YYYY-MM-DD; reject anything else.
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
-        return s
-    return ""
-
-
-def _telemetry_write_last_ping_date(date_str):
-    try:
-        _core._telemetry_state_dir()
-        _telemetry_last_ping_path().write_text(date_str + "\n", encoding="utf-8")
-        try:
-            os.chmod(_telemetry_last_ping_path(), 0o600)
-        except OSError:
-            pass
-        return True
-    except OSError:
-        return False
-
-
-def _send_telemetry_ping(payload, endpoint=None):
-    """POST the payload. Fire-and-forget; returns True on 2xx, False otherwise.
-
-    No retries, no log spam. Network failures / DNS errors / non-200 all
-    return False silently so a missing Worker doesn't fill the log.
-    """
-    if not payload:
-        return False
-    url = endpoint or _core._telemetry_resolved_endpoint()
-    try:
-        data = json.dumps(payload).encode("utf-8")
-    except (TypeError, ValueError):
-        return False
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": f"claude-command-center/{_core.__version__} (telemetry)",
-    }
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=_TELEMETRY_TOTAL_TIMEOUT_S) as resp:
-            status = getattr(resp, "status", 0) or 0
-            return 200 <= status < 300
-    except Exception:
-        return False
-
-
-def _maybe_send_telemetry():
-    """Send a daily ping if (and only if) every gate passes.
-
-    Returns one of: "disabled-env", "no-opt-in", "no-install-id",
-    "already-today", "sent", "failed". The string is used by the
-    background loop for log routing only.
-    """
-    if _core._telemetry_disabled_env():
-        return "disabled-env"
-    state = _core._load_telemetry_state()
-    if state.get("opt_in") is not True:
-        return "no-opt-in"
-    if not _core._telemetry_install_id_present():
-        # Treat missing id as "user reset" — fall back to never-asked
-        # behavior. The state JSON is intentionally left alone so the user
-        # can re-opt-in via the dashboard; we just don't ping.
-        return "no-install-id"
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    last = _core._telemetry_read_last_ping_date()
-    if last and last >= today:
-        return "already-today"
-    payload = _core._build_telemetry_payload()
-    if not payload:
-        return "no-install-id"
-    ok = _core._send_telemetry_ping(payload)
-    if ok:
-        _telemetry_write_last_ping_date(today)
-        return "sent"
-    return "failed"
-
-
-def _telemetry_loop():
-    """Background daemon: initial delay, then hourly check + maybe-send.
-
-    Quietly no-ops when telemetry is disabled or the user hasn't opted in.
-    """
-    try:
-        time.sleep(_TELEMETRY_INITIAL_DELAY_S)
-    except Exception:
-        return
-    while True:
-        try:
-            result = _core._maybe_send_telemetry()
-            if result == "sent":
-                print("  [telemetry] daily ping sent")
-            elif result == "failed":
-                # Don't log every failure — that's log spam if the Worker
-                # isn't deployed. We'd just retry next hour anyway.
-                pass
         except Exception:
             # Defensive: never crash the daemon thread.
             pass

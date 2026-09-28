@@ -26005,18 +26005,32 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/telemetry/status":
-            # Anonymous-telemetry opt-in state. Drives the dashboard bar:
-            # only render when opt_in is null (never asked) AND not env-disabled.
+            # Public API (see CLAUDE.md) — additive only. The opt-in daily
+            # ping this endpoint used to gate was retired 2026-09-28; all
+            # that remains is the anonymous open beacon, which has no
+            # consent step. Old keys stay with sensible values so nothing
+            # that already reads this endpoint breaks: opt_in/asked_at
+            # report a pre-retirement install's old decision if one exists
+            # (read-only, never re-created), install_id_present reports
+            # whether that install's legacy id file is still on disk, and
+            # schema_version is null because the ping schema no longer
+            # applies. New callers should use `retired` and
+            # `beacon_schema_version`. Also used to gate the star-nudge
+            # bar's "wait for the telemetry decision" timing in app.js, so
+            # this must stay fast and side-effect-free.
             state = _load_telemetry_state()
             env_disabled = _telemetry_disabled_env()
             self.send_json({
                 "opt_in": state.get("opt_in"),
+                "opted_in": False,
+                "retired": True,
                 "asked_at": state.get("asked_at"),
                 "install_id_present": _telemetry_install_id_present(),
                 "env_disabled": env_disabled,
-                "endpoint": _telemetry_resolved_endpoint(),
+                "endpoint": None,
                 "docs_url": _TELEMETRY_DOCS_URL,
-                "schema_version": _TELEMETRY_SCHEMA_VERSION,
+                "schema_version": None,
+                "beacon_schema_version": _TELEMETRY_BEACON_SCHEMA_VERSION,
             })
         elif path == "/api/term/cwd":
             try:
@@ -30369,52 +30383,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             saved = _save_feature_flag(payload.get("name"), payload.get("on"))
             self.send_json(saved, 200 if saved.get("ok") else 400)
             return
-        if path == "/api/telemetry/opt-in":
-            # User clicked Enable / Skip / toggled from Settings. Persists
-            # opt_in (true|false) and asked_at. Same-origin already checked.
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length) if length > 0 else b""
-            try:
-                payload = json.loads(body) if body else {}
-            except json.JSONDecodeError:
-                self.send_json({"error": "invalid JSON"}, 400)
-                return
-            if not isinstance(payload, dict):
-                self.send_json({"error": "expected JSON object"}, 400)
-                return
-            enable = payload.get("enable")
-            if not isinstance(enable, bool):
-                self.send_json({"error": "enable must be a boolean"}, 400)
-                return
-            state = _load_telemetry_state()
-            state["opt_in"] = enable
-            state["asked_at"] = datetime.now(tz=timezone.utc).isoformat()
-            state["endpoint"] = _telemetry_resolved_endpoint()
-            if enable:
-                # Ensure the install-id exists so the next ping has something
-                # to send. Generated locally; never derived from machine ID.
-                _telemetry_load_or_init_install_id()
-            saved = _save_telemetry_state(state)
-            tag = "enabled" if enable else "disabled"
-            print(f"  [telemetry] opt-in {tag} via dashboard")
-            self.send_json({
-                "ok": bool(saved),
-                "opt_in": state["opt_in"],
-                "asked_at": state["asked_at"],
-                "install_id_present": _telemetry_install_id_present(),
-                "env_disabled": _telemetry_disabled_env(),
-            })
-            return
-        if path == "/api/telemetry/heartbeat":
-            # Dashboard heartbeat — fires every 30s while the tab is
-            # visible. Credits one _TELEMETRY_ACTIVE_HEARTBEAT_S bucket
-            # to today's active-seconds counter. Honors the env kill
-            # switch; does NOT require opt-in (the bucket is only read
-            # when the daily ping fires, which is opt-in-gated). Always
-            # returns 204 — no state leak to a watching network user.
-            _telemetry_record_heartbeat()
-            self.send_response(204)
-            self.end_headers()
+        if path in ("/api/telemetry/opt-in", "/api/telemetry/heartbeat"):
+            # Retired 2026-09-28 with the opt-in daily ping. Kept as no-ops
+            # because /api/* is public API and dashboard tabs opened before
+            # the upgrade keep calling these until they reload.
+            if path == "/api/telemetry/heartbeat":
+                self.send_response(204)
+                self.end_headers()
+            else:
+                self.send_json({"ok": True, "retired": True, "opt_in": False})
             return
         if path == "/api/self-update":
             # Pull the latest main into the install dir and restart the server
@@ -39665,11 +39642,6 @@ def main():
         daemon=True,
         name="ccc-engine-maintenance",
     ).start()
-    # Anonymous opt-in telemetry — defaults OFF. The loop self-gates on
-    # CCC_TELEMETRY_DISABLED and the per-user opt-in JSON; starting the
-    # thread here is unconditional but no bytes leave the host unless the
-    # user clicks "Enable" on the dashboard bar. See _telemetry_loop docs.
-    threading.Thread(target=_telemetry_loop, daemon=True, name="ccc-telemetry").start()
     _start_plan_usage_poller()
     threading.Thread(
         target=run_presence_sampler,
@@ -39678,10 +39650,12 @@ def main():
         name="ccc-productivity-presence",
     ).start()
     # Anonymous open beacon — fires at most ONCE PER UTC DAY while running.
-    # NOT opt-in, but carries no install_id and no identity (3 fields:
-    # schema, version, platform). The CCC_TELEMETRY_DISABLED env var kills
-    # it; that single switch is the user's guarantee that nothing leaves
-    # the host. See docs/telemetry.md#anonymous-open-beacon.
+    # No consent step, but carries no install_id and no identity (schema v2:
+    # schema_version, version, platform, first_this_week, first_this_month).
+    # The CCC_TELEMETRY_DISABLED env var kills it; that single switch is the
+    # user's guarantee that nothing leaves the host. The opt-in daily ping
+    # that used to run alongside this was retired 2026-09-28. See
+    # docs/telemetry.md#anonymous-open-beacon.
     threading.Thread(target=_telemetry_open_beacon_loop, daemon=True, name="ccc-telemetry-open").start()
     # Idle auto-update to the newest release tag (managed installs only,
     # opt-in via CCC_AUTO_UPDATE=1 for now; see _auto_update_enabled).

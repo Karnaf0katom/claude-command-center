@@ -898,7 +898,7 @@ For more depth: [`docs/architecture.md`](docs/architecture.md),
 | `CCC_SPAWN_IDLE_TTL_HOURS` | `3` | Hours of total inactivity (spawn log, stdin FIFO, and session transcript all quiet, no running tool) before a CCC-spawned persistent headless worker is retired with a graceful SIGTERM. Their FIFO stdin means finished workers never exit on their own; retired sessions stay resumable. Set `0` to disable the sweep. |
 | `CCC_ORG_PATTERNS` | *(empty)* | Multi-tenant org-tagger. Format: `Label1:pat1a\|pat1b;Label2:pat2`. Each issue body is scanned and tagged with the first matching label so the UI can group backlog by org. |
 | `VERCEL_PROJECT` | *(unset)* | Vercel project name. Leave empty to disable deploy polling. |
-| `CCC_TELEMETRY_DISABLED` | *(unset)* | Set to `1` to hard-disable the anonymous opt-in daily ping at the process level. Telemetry is **off by default** — the env var is the corporate / CI kill switch that also hides the consent banner. Full contract: [`docs/telemetry.md`](docs/telemetry.md). |
+| `CCC_TELEMETRY_DISABLED` | *(unset)* | Set to `1` to hard-disable the anonymous daily open beacon at the process level — no consent step to bypass, since the beacon carries no identifier. This is the corporate / CI kill switch. Full contract: [`docs/telemetry.md`](docs/telemetry.md). |
 
 Default models have a `CCC_*_MODEL` env var per engine; default **reasoning
 effort** deliberately does not. It lives in one place, **Settings → Spawn

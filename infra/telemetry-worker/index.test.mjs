@@ -66,12 +66,19 @@ test("stats exposes aggregate clicks without event rows", async () => {
     DB: {
       prepare(sql) {
         queries.push(sql);
-        return {
+        const stmt = {
+          bind(...values) {
+            stmt._values = values;
+            return stmt;
+          },
           first: async () => ({
             total_opens: 3,
             total_pings: 2,
             distinct_installs: 1,
             total_downloads: 7,
+            this_monday: "2026-09-28",
+            prev_monday: "2026-09-21",
+            n: 0,
           }),
           all: async () => ({
             results: sql.includes("FROM downloads")
@@ -79,6 +86,7 @@ test("stats exposes aggregate clicks without event rows", async () => {
               : [],
           }),
         };
+        return stmt;
       },
     },
   };
@@ -140,4 +148,249 @@ test("an unknown engine name never rejects the ping", async () => {
   assert.ok(ping, "ping row written");
   // Unknown name filtered out, known ones kept in client order.
   assert.equal(ping.values[4], "claude,opencode");
+});
+
+
+function fakeDb(writes) {
+  return {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          writes.push({ sql, values });
+          return { run: async () => ({ success: true }) };
+        },
+      };
+    },
+  };
+}
+
+test("open beacon v1 stores NULL for the week/month flags and geo", async () => {
+  const writes = [];
+  const env = { DB: fakeDb(writes) };
+  const body = { schema_version: 1, version: "5.24.0", platform: "darwin" };
+  const request = new Request("https://telemetry.example/v1/open", {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.9" },
+    body: JSON.stringify(body),
+  });
+  request.cf = { country: "US", region: "California" };
+
+  const response = await worker.fetch(request, env);
+
+  assert.equal(response.status, 204);
+  const open = writes.find((w) => /INSERT INTO opens/.test(w.sql));
+  assert.ok(open, "open row written");
+  // received_at, version, platform, ip_hash, is_dev, first_this_week,
+  // first_this_month, country, region
+  assert.equal(open.values[5], null);
+  assert.equal(open.values[6], null);
+});
+
+test("open beacon v2 persists week/month flags and sanitized geo", async () => {
+  const writes = [];
+  const env = { DB: fakeDb(writes) };
+  const body = {
+    schema_version: 2,
+    version: "5.24.0",
+    platform: "darwin",
+    first_this_week: true,
+    first_this_month: false,
+  };
+  const request = new Request("https://telemetry.example/v1/open", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  request.cf = { country: "us", region: "California", city: "Cupertino", postalCode: "95014" };
+
+  const response = await worker.fetch(request, env);
+
+  assert.equal(response.status, 204);
+  const open = writes.find((w) => /INSERT INTO opens/.test(w.sql));
+  assert.equal(open.values[5], 1);
+  assert.equal(open.values[6], 0);
+  // country is upper-cased; only country + region persisted, never city/zip.
+  assert.equal(open.values[7], "US");
+  assert.equal(open.values[8], "California");
+  assert.doesNotMatch(JSON.stringify(writes), /Cupertino|95014/);
+});
+
+test("open beacon v2 requires the week/month booleans", async () => {
+  const env = { DB: fakeDb([]) };
+  const request = new Request("https://telemetry.example/v1/open", {
+    method: "POST",
+    body: JSON.stringify({ schema_version: 2, version: "5.24.0", platform: "darwin" }),
+  });
+
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 400);
+});
+
+test("open beacon geo sanitizer drops malformed or missing cf fields", async () => {
+  const writes = [];
+  const env = { DB: fakeDb(writes) };
+  const body = { schema_version: 1, version: "5.24.0", platform: "darwin" };
+  const request = new Request("https://telemetry.example/v1/open", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  request.cf = { country: "United States", region: "a".repeat(200) };
+
+  const response = await worker.fetch(request, env);
+
+  assert.equal(response.status, 204);
+  const open = writes.find((w) => /INSERT INTO opens/.test(w.sql));
+  assert.equal(open.values[7], null);
+  assert.equal(open.values[8], null);
+});
+
+test("open beacon with absent request.cf stores null geo instead of throwing", async () => {
+  const writes = [];
+  const env = { DB: fakeDb(writes) };
+  const request = new Request("https://telemetry.example/v1/open", {
+    method: "POST",
+    body: JSON.stringify({ schema_version: 1, version: "5.24.0", platform: "darwin" }),
+  });
+
+  const response = await worker.fetch(request, env);
+
+  assert.equal(response.status, 204);
+  const open = writes.find((w) => /INSERT INTO opens/.test(w.sql));
+  assert.equal(open.values[7], null);
+  assert.equal(open.values[8], null);
+});
+
+test("stats exposes weekly/monthly active installs at the exact ISO-week boundary", async () => {
+  const THIS_MONDAY = "2026-09-28";
+  const PREV_MONDAY = "2026-09-21";
+  const queries = [];
+  const env = {
+    DB: {
+      prepare(sql) {
+        queries.push(sql);
+        const stmt = {
+          bind(...values) {
+            stmt._values = values;
+            return stmt;
+          },
+          first: async () => {
+            if (sql.includes("AS this_monday")) {
+              return { this_monday: THIS_MONDAY, prev_monday: PREV_MONDAY };
+            }
+            if (sql.includes("AS weekly_active_installs")) {
+              return {
+                weekly_active_installs: 3, weekly_active_installs_all: 4,
+                weekly_active_installs_prev: 6, weekly_active_installs_prev_all: 7,
+                monthly_active_installs: 10, monthly_active_installs_all: 11,
+                monthly_active_installs_prev: 20, monthly_active_installs_prev_all: 21,
+              };
+            }
+            // The "does the previous complete ISO week have any data" probe.
+            if (sql.includes("SELECT COUNT(*) AS n FROM opens")) {
+              return { n: 9 };
+            }
+            if (sql.includes("SUM(CASE WHEN country = 'US'")) {
+              return { us: 5, intl: 2 };
+            }
+            return { total_opens: 1, total_pings: 1, distinct_installs: 1, distinct_installs_all: 1, total_downloads: 1 };
+          },
+          all: async () => {
+            if (sql.includes("GROUP BY country, region")) {
+              return { results: [
+                { country: "US", region: "California", installs: 4 },
+                { country: "US", region: "Ohio", installs: 1 },
+              ] };
+            }
+            if (sql.includes("GROUP BY country")) {
+              return { results: [
+                { country: "US", installs: 5 },
+                { country: "DE", installs: 2 },
+                { country: "FR", installs: 1 },
+              ] };
+            }
+            return { results: [] };
+          },
+        };
+        return stmt;
+      },
+    },
+  };
+
+  const response = await worker.fetch(new Request("https://telemetry.example/v1/stats"), env);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  // Old trailing-7-day double-counting field names must be gone entirely.
+  assert.equal(payload.totals.weekly_new_installs, undefined);
+  assert.equal(payload.totals.monthly_new_installs, undefined);
+  assert.equal(payload.countries_7d, undefined);
+  assert.equal(payload.regions_7d, undefined);
+  assert.equal(payload.us_vs_intl_7d, undefined);
+
+  assert.equal(payload.totals.weekly_active_installs, 3);
+  assert.equal(payload.totals.weekly_active_installs_all, 4);
+  assert.equal(payload.totals.weekly_active_installs_prev, 6);
+  assert.equal(payload.totals.weekly_active_installs_prev_all, 7);
+  assert.equal(payload.totals.monthly_active_installs, 10);
+  assert.equal(payload.totals.monthly_active_installs_prev, 20);
+
+  // Bound with the exact Monday, not a trailing 7-day window.
+  const weeklyQuery = queries.find(sql => sql.includes("AS weekly_active_installs"));
+  assert.match(weeklyQuery, /received_at >= \?/);
+  assert.doesNotMatch(weeklyQuery, /-6 days/);
+
+  // Previous complete week had data (n=9), so geo uses it, not the
+  // still-in-progress current week.
+  assert.deepEqual(payload.geo_week, {
+    week_start: PREV_MONDAY,
+    countries: [
+      { country: "US", installs: 5 },
+      { country: "other", installs: 3 },
+    ],
+    regions: [
+      { country: "US", region: "California", installs: 4 },
+      { country: "other", region: "other", installs: 1 },
+    ],
+    us: 5,
+    intl: 2,
+  });
+});
+
+test("stats falls back to the current ISO week for geo when the previous week is empty", async () => {
+  const THIS_MONDAY = "2026-09-28";
+  const PREV_MONDAY = "2026-09-21";
+  const env = {
+    DB: {
+      prepare(sql) {
+        const stmt = {
+          bind(...values) {
+            stmt._values = values;
+            return stmt;
+          },
+          first: async () => {
+            if (sql.includes("AS this_monday")) return { this_monday: THIS_MONDAY, prev_monday: PREV_MONDAY };
+            if (sql.includes("AS weekly_active_installs")) {
+              return {
+                weekly_active_installs: 0, weekly_active_installs_all: 0,
+                weekly_active_installs_prev: 0, weekly_active_installs_prev_all: 0,
+                monthly_active_installs: 0, monthly_active_installs_all: 0,
+                monthly_active_installs_prev: 0, monthly_active_installs_prev_all: 0,
+              };
+            }
+            if (sql.includes("SELECT COUNT(*) AS n FROM opens")) return { n: 0 };
+            if (sql.includes("SUM(CASE WHEN country = 'US'")) return { us: 0, intl: 0 };
+            return { total_opens: 0, total_pings: 0, distinct_installs: 0, distinct_installs_all: 0, total_downloads: 0 };
+          },
+          all: async () => ({ results: [] }),
+        };
+        return stmt;
+      },
+    },
+  };
+
+  const response = await worker.fetch(new Request("https://telemetry.example/v1/stats"), env);
+  const payload = await response.json();
+
+  assert.equal(payload.geo_week.week_start, THIS_MONDAY);
+  assert.deepEqual(payload.geo_week.countries, []);
+  assert.deepEqual(payload.geo_week.regions, []);
 });

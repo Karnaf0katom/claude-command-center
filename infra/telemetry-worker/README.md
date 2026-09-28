@@ -1,24 +1,37 @@
 # Telemetry Worker
 
-Minimal Cloudflare Worker for CCC's bounded daily ping, anonymous boot beacon,
-landing-page download-click counter, and public aggregate stats. See
+Minimal Cloudflare Worker for CCC's anonymous open beacon (schema 1 and 2),
+a legacy daily ping kept for old clients, a landing-page download-click
+counter, and public aggregate stats. See
 [`docs/telemetry.md`](../../docs/telemetry.md) for the full contract. The source
 lives here so every persisted value is auditable.
 
 ## What it does
 
-- Accepts `POST /v1/ping` with a JSON body matching the documented
-  5-field schema (plus `schema_version`).
-- Accepts `POST /v1/open` with the documented anonymous boot payload.
+- Accepts `POST /v1/open` with `schema_version` 1 or 2. Schema 2 adds
+  `first_this_week` / `first_this_month` (booleans, required when
+  `schema_version` is 2); schema 1 rows store `NULL` for those columns.
+  Both schemas accept an optional `dev` boolean.
+- Reads coarse geo from Cloudflare's own `request.cf` at insert time — never
+  from the request body — and persists only `country` (ISO-2) and `region`
+  (first-level subdivision name) after format validation. Never city,
+  postal code, lat/long, or ASN.
+- Accepts `POST /v1/ping` for installs on builds from before 2026-09-28;
+  current CCC builds no longer send it (see `docs/telemetry.md`).
 - Accepts an empty `POST /v1/download`; it never receives the request object
   and writes only receive time, `ccc.dmg`, and `landing-hero`.
-- Serves aggregate-only `GET /v1/stats`, including site download clicks.
+- Serves aggregate-only `GET /v1/stats`, additive-only: totals, 30-day daily
+  buckets, weekly/monthly active-install counts derived from
+  `first_this_week`/`first_this_month` bound to exact ISO-week/calendar-month
+  boundaries (current and previous complete period, never a double-counting
+  trailing window), and `geo_week` — one ISO week of country/region
+  breakdown counted per install, buckets under 3 installs folded into
+  `"other"` — plus site download clicks.
 - Drops any unknown fields silently. Rejects requests where the listed
   fields fail type validation.
 - **Drops the source IP** before writing anywhere durable. The Worker
-  reads `request.headers.get("CF-Connecting-IP")` only to ignore it.
-- Appends a row to a Cloudflare D1 table (or KV, depending on what we
-  end up provisioning at deploy time).
+  hashes it with a daily-rotating secret and stores only the hash.
+- Appends a row to a Cloudflare D1 table.
 - Returns `204 No Content` on success, `400` on shape errors, `405`
   on wrong method. Never returns row counts or any other state to the
   caller.
@@ -42,8 +55,16 @@ npm install -g wrangler                # one-time
 wrangler login                         # one-time, opens browser
 wrangler d1 create ccc-telemetry       # one-time, capture DB id
 wrangler d1 execute ccc-telemetry --remote --file migrations/0001-downloads.sql
+wrangler d1 execute ccc-telemetry --remote --file migrations/0002-pings-is-dev.sql
+wrangler d1 execute ccc-telemetry --remote --file migrations/0003-opens-weekly-monthly-geo.sql
 wrangler deploy
 ```
+
+Migrations run in filename order and are additive (`ALTER TABLE ... ADD
+COLUMN`) — safe to run against a live table. `0003` adds `first_this_week`,
+`first_this_month`, `country`, and `region` to `opens`; existing rows read
+back as `NULL` for all four, which the aggregate queries below treat as
+schema-1 data.
 
 The committed `wrangler.toml` binds the public D1 database. Database ids are
 resource identifiers, not credentials; authentication remains in Wrangler's
@@ -51,7 +72,8 @@ local account configuration.
 
 ## Aggregating
 
-The aggregate query that drives the public page (target: quarterly):
+The legacy ping table's aggregate query (data frozen at the 2026-09-28
+retirement, kept for the "Opt-in pings" legacy tab):
 
 ```sql
 SELECT
@@ -65,10 +87,46 @@ GROUP BY date, version, platform
 ORDER BY date DESC;
 ```
 
-No per-install rows are ever published. The Worker stores
-`install_id` to support **deduplication only** (so a chatty client
-can't inflate "installs"); aggregates always go through `COUNT
-(DISTINCT install_id)`.
+The open beacon carries no identifier, so its weekly/monthly "installs"
+figures come from each client's own `first_this_week` / `first_this_month`
+flag instead of a `COUNT(DISTINCT ...)`. The window is the exact ISO week
+(Monday-Sunday UTC), not a trailing 7 days — `first_this_week` is set once
+per ISO week, so a rolling window double-counts any install active in both
+the tail of last week and the start of this one. SQLite's `'weekday 1'`
+modifier gives the Monday of the ISO week containing a date (verified with
+the `sqlite3` CLI against a Monday, Wednesday and Sunday "now" substitute:
+`date('2026-09-28','-6 days','weekday 1')`,
+`date('2026-09-30','-6 days','weekday 1')`, and
+`date('2026-10-04','-6 days','weekday 1')` all resolve to `2026-09-28`, the
+Monday of that ISO week):
+
+```sql
+SELECT COUNT(*) AS weekly_active_installs
+FROM opens
+WHERE first_this_week = 1
+  AND received_at >= date('now', '-6 days', 'weekday 1');
+```
+
+Geo breakdowns count **installs**, not beacons: only `first_this_week = 1`
+rows are included, over one ISO week (`geo_week.week_start` in the
+response), grouped by the sanitized `country` + `region` columns together
+(so the US state "Georgia" and the country "Georgia" never merge), and
+suppressed below a minimum install count before they ever reach
+`/v1/stats`:
+
+```sql
+SELECT country, region, COUNT(*) AS installs
+FROM opens
+WHERE first_this_week = 1
+  AND received_at >= :week_start AND received_at < :week_end
+  AND region IS NOT NULL
+GROUP BY country, region
+ORDER BY installs DESC;
+```
+
+No per-install or per-beacon rows are ever published; `/v1/stats` returns
+aggregates only, with small geo buckets folded into a single row with every
+key field set to `"other"` (`suppressSmallBuckets` in `index.js`).
 
 ## Why this lives in the same repo
 

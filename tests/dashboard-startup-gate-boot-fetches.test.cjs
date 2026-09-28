@@ -49,7 +49,6 @@ test('boot beacons and composer catalogs wait for the archive rows', async () =>
   ctx.fetchViaGate('/api/config');
   ctx.fetchViaGate('/api/spawn-defaults', { cache: 'no-store' });
   ctx.fetchViaGate('/api/model-picker/picks');
-  ctx.fetchViaGate('/api/telemetry/heartbeat', { method: 'POST', keepalive: true });
   ctx.fetchViaGate('/api/client-log', { method: 'POST', body: '{}' });
   ctx.fetchViaGate('/api/sessions/spawn', { method: 'POST', body: '{}' });
   await new Promise(r => setTimeout(r, 1));
@@ -65,15 +64,15 @@ test('released catalog reads survive the spawn-click pool abort', async () => {
   const spawnDefaults = ctx.fetchViaGate('/api/spawn-defaults', { cache: 'no-store' });
   const picks = ctx.fetchViaGate('/api/model-picker/picks');
   const folders = ctx.window.__cccBackgroundApiFetch('/api/repo/list');
-  const heartbeat = ctx.fetchViaGate('/api/telemetry/heartbeat', { method: 'POST' });
+  const clientLog = ctx.fetchViaGate('/api/client-log', { method: 'POST', body: '{}' });
   ctx.release();
   ctx.abortPool();
-  const responses = await Promise.all([spawnDefaults, picks, heartbeat, folders]);
+  const responses = await Promise.all([spawnDefaults, picks, clientLog, folders]);
   assert.deepEqual(responses.map(r => r.status), [200, 200, 200, 200]);
   assert.ok(urls(ctx).includes('GET /api/spawn-defaults'));
   assert.ok(urls(ctx).includes('GET /api/model-picker/picks'));
   assert.ok(urls(ctx).includes('GET /api/repo/list'));
-  assert.ok(urls(ctx).includes('POST /api/telemetry/heartbeat'));
+  assert.ok(urls(ctx).includes('POST /api/client-log'));
 });
 
 test('reader-only popouts release the startup gate at boot', () => {
