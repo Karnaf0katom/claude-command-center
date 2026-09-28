@@ -471,30 +471,30 @@ def _usage_limit_attach_continuation_fields(found, session_id, path):
     return found
 
 
-def _usage_limit_retrieval_prompt(engine, sid, context_tokens):
-    """Python port of f2RetrievalPrompt's large-context branch (static/
-    app.js ~3058) -- must run unattended with no browser, so this can't
-    call the client's own function. Only that one branch is needed: this
-    is only ever called once context_tokens has already cleared
-    _USAGE_LIMIT_CONTEXT_THRESHOLD, so worthSelectiveRetrieval is always
-    true here. Kept in sync with the JS version by hand."""
+def continuation_retrieval_block(engine, sid, context_tokens=0):
+    """Shared "Origin session id + how to pull context selectively" block for
+    every continuation-spawn path: the F2 "Continue in a new session" button
+    (JS port below), unattended usage-limit auto-resume
+    (_usage_limit_retrieval_prompt), and `ccc spawn --continue-from` /
+    `ccc send --new-if-large-and-stale` (ccc_server/continuation.py). One
+    template so the three never drift out of wording with each other
+    (MEMO-FIX-lineage) -- callers differ only in the sentence(s) they wrap
+    around this block."""
     label, note, cmd_fn = _USAGE_LIMIT_ENGINE_LOCATE.get(
         engine, _USAGE_LIMIT_ENGINE_LOCATE["claude"]
     )
-    tokens_label = f"{context_tokens / 1000:.0f}k" if context_tokens >= 1000 else str(context_tokens)
+    size_note = (
+        f" (it is ~{context_tokens / 1000:.0f}k tokens)"
+        if context_tokens and context_tokens >= 1000
+        else (f" (it is ~{context_tokens} tokens)" if context_tokens else "")
+    )
     lines = [
-        f"You are continuing a task from an earlier {label} session, which ran long.",
-        "",
         f"Origin session id: {sid}",
         note,
         cmd_fn(sid),
         "",
-        "Task: Continue the work from where it left off. This session was",
-        "auto-resumed after hitting a usage-limit wall; there is no new",
-        "instruction beyond continuing.",
-        "",
-        "Retrieve context SELECTIVELY. Never open or Read the whole transcript",
-        f"(it is ~{tokens_label} tokens). Pull only the slice you need:",
+        f"Retrieve context SELECTIVELY. Never open or Read the whole transcript{size_note}.",
+        "Pull only the slice you need:",
         f"  - run `ccc brief {sid}` first — it already has the last asks, last",
         "    reply, commits, and files touched without reading the transcript",
         "  - tail -n 80 the transcript for the most recent turns (cut by",
@@ -504,6 +504,26 @@ def _usage_limit_retrieval_prompt(engine, sid, context_tokens):
         '  - ccc recall "<terms>" / ccc shipped "<topic>" for related work',
         "",
         "Load the minimum slice that answers the task, then proceed.",
+    ]
+    return "\n".join(lines), label
+
+
+def _usage_limit_retrieval_prompt(engine, sid, context_tokens):
+    """Python port of f2RetrievalPrompt's large-context branch (static/
+    app.js ~3058) -- must run unattended with no browser, so this can't
+    call the client's own function. Only that one branch is needed: this
+    is only ever called once context_tokens has already cleared
+    _USAGE_LIMIT_CONTEXT_THRESHOLD, so worthSelectiveRetrieval is always
+    true here. Kept in sync with the JS version by hand."""
+    block, label = continuation_retrieval_block(engine, sid, context_tokens)
+    lines = [
+        f"You are continuing a task from an earlier {label} session, which ran long.",
+        "",
+        block,
+        "",
+        "Task: Continue the work from where it left off. This session was",
+        "auto-resumed after hitting a usage-limit wall; there is no new",
+        "instruction beyond continuing.",
     ]
     return "\n".join(lines)
 

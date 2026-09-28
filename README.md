@@ -315,6 +315,9 @@ ccc spawn "drain the queue" --report-to <your-session-id>   # reports back
 ccc send queue-drain "also update the changelog"   # fire-and-forget
 ccc send <session-id> "stop, wrong branch" --steer # interrupt the turn
 ccc ask queue-drain "what's your status?"          # block for the reply
+
+ccc spawn --continue-from <old session> "keep going"       # new session, not a cold resume
+ccc send <old session> "keep going" --new-if-large-and-stale # spawns a continuation only when warranted
 ```
 
 It finds the server via `~/.claude/command-center/port.txt` (override with
