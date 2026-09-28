@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+import federation
 import ccc_server.lineage as lineage
 import ccc_server.report_routes as report_routes
 import ccc_server.session_brief as session_brief
@@ -341,3 +342,36 @@ def test_brief_parent_from_spawn_edge_on_chain_root(mock_brief_env):
     # auto-resumed, not freshly spawned by a dispatcher of its own.
     res = session_brief.brief(mock_brief_env["sid2"])
     assert res["parent"] == "dispatcher-1"
+
+
+def test_brief_children_from_spawn_edges(mock_brief_env):
+    graph_path = lineage._session_graph_path()
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"edges": [{
+            "parent": mock_brief_env["sid"], "child": "spawned-child-1",
+            "source": "test", "engine": "claude", "resumable": True, "name": "", "model": "",
+        }]}, f)
+    res = session_brief.brief(mock_brief_env["sid"])
+    assert res["children"] == ["spawned-child-1"]
+    assert res["nodes"] == {}
+
+
+def test_brief_tags_cross_node_parent_ref(mock_brief_env, monkeypatch):
+    """Multi-machine S6: a spawn parent recorded as a federation global ref
+    (this node's own graph, after a cross-node spawn) shows up untouched in
+    `parent` -- CLI/UI display stays a plain string -- but is also called out
+    in `nodes` so a caller can tell it's not a local session."""
+    this_node = "aaaaaaaa-0000-0000-0000-000000000001"
+    peer_node = "bbbbbbbb-0000-0000-0000-000000000002"
+    monkeypatch.setattr(federation, "node_id", lambda: this_node)
+    parent_ref = federation.format_session_ref(peer_node, "dispatcher-on-peer")
+    graph_path = lineage._session_graph_path()
+    with open(graph_path, "w", encoding="utf-8") as f:
+        json.dump({"edges": [{
+            "parent": parent_ref, "child": mock_brief_env["sid"],
+            "source": "ccc-spawn-cross-node", "engine": "claude",
+            "resumable": False, "name": "", "model": "",
+        }]}, f)
+    res = session_brief.brief(mock_brief_env["sid"])
+    assert res["parent"] == parent_ref
+    assert res["nodes"] == {parent_ref: peer_node}
