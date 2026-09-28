@@ -32671,6 +32671,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             f"confidence={shipped_info.get('confidence')}",
                         )
                         prompt = _shipped_check.shipped_warning_line(shipped_info) + prompt
+                    # MEMORY-1: optional 'brain' plugin session-start index.
+                    # No-op unless a private plugin is installed AND this repo
+                    # is opted in via brain-plugin.json -- see brain_hook.py.
+                    from ccc_server import brain_hook as _brain_hook
+                    try:
+                        prompt = _brain_hook.session_start_prefix(cwd_resolved) + prompt
+                    except Exception:
+                        pass
                     prompt = _wrap_prompt_with_return_address(
                         prompt, report_to, engine=engine, route_id=report_route,
                     )

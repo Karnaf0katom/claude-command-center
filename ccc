@@ -30,6 +30,8 @@ command, without opening the dashboard:
     ccc brief <session>                         # where a session left off + how to resume it
     ccc where <session|query>                   # plain-language status + human checklist + continue
 
+    ccc brain <subcmd> ...    # passthrough to an optional private plugin (no-op if unconfigured)
+
 <session> is a session id, a unique id prefix, or a (unique, case-
 insensitive) fragment of the session's display name from `ccc sessions`.
 
@@ -61,7 +63,10 @@ from datetime import datetime, timezone
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
-               "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where")
+               "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where",
+               "brain")
+
+BRAIN_CONFIG_FILE = os.path.expanduser("~/.claude/command-center/brain-plugin.json")
 
 _SINCE_RE = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 _SINCE_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -1228,6 +1233,35 @@ def cmd_spawn(args):
     return 0
 
 
+def cmd_brain(args):
+    """Passthrough to an optional private 'brain' plugin (MEMORY-1). CCC
+    itself has no idea what the plugin does -- it just execs
+    <plugin_path>/bin/brain with whatever args followed `ccc brain`,
+    inheriting this process's stdio, so the plugin's own CLI runs exactly as
+    if it had been invoked directly. Config-only; no running CCC server
+    required. See ccc_server/brain_hook.py for the config file format."""
+    try:
+        with open(BRAIN_CONFIG_FILE) as f:
+            config = json.load(f)
+    except OSError:
+        print(f"ccc brain: no plugin configured ({BRAIN_CONFIG_FILE} not found)",
+              file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"ccc brain: {BRAIN_CONFIG_FILE} is not valid JSON ({e})", file=sys.stderr)
+        return 1
+    plugin_path = (config or {}).get("plugin_path")
+    if not plugin_path:
+        print(f"ccc brain: {BRAIN_CONFIG_FILE} has no plugin_path set", file=sys.stderr)
+        return 1
+    exe = os.path.join(os.path.expanduser(str(plugin_path)), "bin", "brain")
+    if not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+        print(f"ccc brain: plugin executable not found or not executable ({exe})",
+              file=sys.stderr)
+        return 1
+    os.execv(exe, [exe] + args.args)
+
+
 def cmd_rebind_report_to(args):
     base = _resolve_server(args.server)
     if not base:
@@ -1511,6 +1545,16 @@ def main(argv=None):
                    help="only this child (session id/prefix/name, or its rr_ route id)")
     p.add_argument("--json", action="store_true", help="raw rebind result JSON")
     p.set_defaults(func=cmd_rebind_report_to)
+
+    p = sub.add_parser(
+        "brain",
+        help="passthrough to an optional private 'brain' plugin, if configured",
+        description="Execs <plugin_path>/bin/brain (from "
+                    f"{BRAIN_CONFIG_FILE}) with the given args, inheriting "
+                    "stdio. No-op error if no plugin is configured.",
+    )
+    p.add_argument("args", nargs=argparse.REMAINDER, help="args passed through to the plugin's own CLI")
+    p.set_defaults(func=cmd_brain)
 
     args = parser.parse_args(argv)
     return args.func(args)
