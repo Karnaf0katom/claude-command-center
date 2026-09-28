@@ -1,0 +1,1 @@
+- Added a Session Waste panel to the Throughput page: pick a session and press Analyze waste to see its score, what the money went to, and which fixes would have saved how much (uses the optional agent-throughput `throughput analyze`; shows the install command when it is missing).

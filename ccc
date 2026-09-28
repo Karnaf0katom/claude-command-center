@@ -728,6 +728,10 @@ def cmd_shipped(args):
         repo = stale.get("repo") or "local clone"
         plural = "s" if n != 1 else ""
         print(f"  note: {repo} local clone is {n} commit{plural} behind origin; result may be stale")
+    freshness = payload.get("origin_freshness")
+    if freshness and isinstance(freshness.get("age_s"), (int, float)):
+        mins = max(0, int(freshness["age_s"] // 60))
+        print(f"  {freshness.get('origin_ref') or 'origin'} fetched {mins} min ago")
     for ev in payload.get("evidence") or []:
         subj = ev.get("subject") or ""
         print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}")
