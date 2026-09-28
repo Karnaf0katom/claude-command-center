@@ -465,6 +465,7 @@
     .demo-bar .live .pulse { animation: none !important; }
   }
 </style>
+<script src="/analytics.js" defer></script>
 </head>
 <body>
 
@@ -1059,6 +1060,7 @@ ccc ask queue-drain "what's your status?"   <span class="comment"># blocks for t
   const downloadCta = document.getElementById("downloadCta");
   if (downloadCta) {
     downloadCta.addEventListener("click", () => {
+      if (window.cccTrackCta) window.cccTrackCta("download");
       try {
         if (navigator.sendBeacon && navigator.sendBeacon(DOWNLOAD_EVENT_URL)) return;
       } catch (_) {

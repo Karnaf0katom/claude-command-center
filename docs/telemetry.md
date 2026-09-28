@@ -1,7 +1,8 @@
 # Anonymous telemetry
 
 CCC ships one **anonymous, always-on** open beacon, plus an anonymous
-landing-page download-click counter. This file is the trust artifact. It
+landing-page download-click counter and cookieless website analytics
+(see "Website analytics"). This file is the trust artifact. It
 describes every payload, the kill switch, and the server-side contract. If
 anything in the source diverges from this file, the source is buggy — open
 an issue.
@@ -276,6 +277,25 @@ This event comes from the public website, not the installed CCC process, so the
 app's `CCC_TELEMETRY_DISABLED` environment variable does not control it.
 JavaScript disabled in the browser or a blocked Worker prevents the count while
 leaving the direct DMG link functional.
+
+## Website analytics
+
+The public website (ccc.amirfish.ai, served from `docs/`) loads
+[`docs/analytics.js`](analytics.js), which sends pageviews to a dedicated
+PostHog project so we can tell which links and campaigns bring visitors.
+It is configured to keep as little as possible:
+
+- **Cookieless.** `persistence: "memory"`: no cookies, no localStorage, nothing
+  survives a page load. The same person on two pages counts twice.
+- **Only two events.** A `$pageview` (URL including any `utm_*` tags, referrer,
+  browser/OS as PostHog derives them) and a `cta_click` with `cta_kind: "download"`
+  when the download button is clicked. No autocapture, no session replay, no
+  surveys, no person profiles.
+- **Do Not Track is honored** (`respect_dnt: true`): with DNT on, nothing is sent.
+- A blocked script changes nothing about the site; every link works without it.
+
+This is the website only. The installed CCC app never loads PostHog, and
+`CCC_TELEMETRY_DISABLED` does not affect it.
 
 ## State files
 
