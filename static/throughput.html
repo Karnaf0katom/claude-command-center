@@ -973,6 +973,16 @@
     overflow-x: auto;
     background: rgba(255, 255, 255, 0.02);
   }
+  .waste-panel { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 12px; background: rgba(255,255,255,0.02); }
+  .waste-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .waste-score { font-weight: 700; font-size: 14px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); }
+  .waste-score.good { color: #4ade80; } .waste-score.warn { color: #facc15; } .waste-score.bad { color: #f87171; }
+  .waste-muted { color: var(--text-muted); }
+  .waste-finding { padding: 8px 0 0; }
+  .waste-finding-title { font-weight: 600; }
+  .waste-fix { color: var(--text-muted); padding-top: 2px; }
+  .waste-btn { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: rgba(255,255,255,0.05); color: inherit; cursor: pointer; }
+  .waste-btn[disabled] { opacity: 0.6; cursor: default; }
   #top-sessions-table { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .top-sess-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 12px; align-items: center; padding: 9px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .top-sess-row:last-child { border-bottom: none; }
@@ -1448,6 +1458,12 @@
         </div>
         <div class="model-breakdown" id="model-breakdown">
           <!-- Model rows populated by JS -->
+        </div>
+
+        <!-- Session waste (per-session only): agent-throughput's `throughput analyze`, on demand -->
+        <div id="waste-section" style="display:none">
+          <div class="section-title"><span>🧯</span> Session Waste</div>
+          <div class="waste-panel" id="waste-panel"></div>
         </div>
 
         <!-- Weekly history bar chart (aggregate only, lazy-loaded) -->
@@ -2876,6 +2892,77 @@
       if (!isAggregate) {
         renderTurnsList(data.turns, isAggregate, (data.scope && data.scope.total_turns) || data.turns.length);
       }
+
+      const wasteSection = document.getElementById('waste-section');
+      if (wasteSection) wasteSection.style.display = isAggregate ? 'none' : '';
+      if (!isAggregate) loadSessionWaste(session.session_id, false);
+    }
+
+    // ── Session waste ─────────────────────────────────────────────────────
+    // A cached result shows as soon as the session opens; otherwise one click
+    // runs the analysis (seconds; about a minute on the tool's first run).
+    // SESSION_WASTE_START
+    function wasteEsc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+    function sessionWasteHtml(w) {
+      const esc = wasteEsc;
+      const usd = (v) => (v == null ? null : (Math.abs(v) >= 10 ? `$${Math.round(v).toLocaleString()}` : `$${Number(v).toFixed(2)}`));
+      const pair = (d) => `${usd(d.list_usd)} list` + (d.real_usd == null ? '' : ` ≈ ${usd(d.real_usd)} real`);
+      const button = (label) => `<button type="button" class="waste-btn" data-waste-run="1">${esc(label)}</button>`;
+      if (!w || w.running) {
+        return `<div class="waste-head"><button type="button" class="waste-btn" disabled>Analyzing…</button>`
+          + `<span class="waste-muted">pricing every call of this session and simulating fixes</span></div>`;
+      }
+      if (!w.ok) {
+        if (w.installed === false) {
+          return `<div class="waste-muted">Needs agent-throughput: <code>${esc(w.install || '')}</code></div>`;
+        }
+        if (w.cached === false && w.error === 'not analyzed yet') {
+          return `<div class="waste-head">${button('Analyze waste')}`
+            + `<span class="waste-muted">where this session's money went, and which fixes would have saved it</span></div>`;
+        }
+        return `<div class="waste-head">${button('Try again')}<span class="waste-muted">${esc(w.error || 'analysis failed')}</span></div>`;
+      }
+      const cls = w.score == null ? '' : (w.score >= 80 ? 'good' : (w.score >= 60 ? 'warn' : 'bad'));
+      const score = w.score == null ? 'score n/a' : `${w.score}/100`;
+      let html = `<div class="waste-head"><span class="waste-score ${cls}">${esc(score)}</span>`
+        + `<span>${esc(pair(w))}</span>`;
+      if (w.real_usd == null) html += `<span class="waste-muted">real $ needs your plan fee (throughput plans add)</span>`;
+      if (w.unpriced_calls) html += `<span class="waste-muted">${esc(w.unpriced_calls)} calls unpriced: lower bound</span>`;
+      html += '</div>';
+      const acts = (w.activities || []).slice(0, 3).map((a) => `${a.activity} ${Math.round(a.share_pct)}%`);
+      if (acts.length) html += `<div class="waste-muted" style="padding-top:6px">went to: ${esc(acts.join(' · '))}</div>`;
+      (w.findings || []).forEach((f, i) => {
+        html += `<div class="waste-finding"><div><span class="waste-finding-title">${i + 1}. ${esc(f.title)}</span>`
+          + ` — ${esc(Math.round(f.share_pct))}% of spend (${esc(pair(f))})</div>`
+          + `<div class="waste-fix">${esc(f.fix || '')}</div></div>`;
+      });
+      if (w.score != null && !(w.findings || []).length) {
+        html += `<div class="waste-finding waste-muted">No fix would save 5% or more of this session's cost.</div>`;
+      }
+      return html;
+    }
+    // SESSION_WASTE_END
+
+    async function loadSessionWaste(sessionId, run) {
+      const panel = document.getElementById('waste-panel');
+      if (!panel || !sessionId) return;
+      const stillHere = () => activeSessionId === sessionId;
+      panel.innerHTML = run ? sessionWasteHtml(null) : '';
+      let w;
+      try {
+        const res = await fetch(`/api/session/waste?session_id=${encodeURIComponent(sessionId)}${run ? '' : '&cached=1'}`);
+        w = await res.json();
+      } catch (err) {
+        w = { ok: false, error: String(err && err.message || err) };
+      }
+      if (!stillHere()) return;
+      panel.innerHTML = sessionWasteHtml(w);
+      const btn = panel.querySelector('[data-waste-run]');
+      if (btn) btn.addEventListener('click', () => loadSessionWaste(sessionId, true));
     }
 
     // ── Weekly history chart ───────────────────────────────────────────────
