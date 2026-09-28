@@ -29739,7 +29739,7 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 .fed-more:hover { color: var(--text); }
 .main.fed-embed-host { position: relative; }
 .fed-embed {
-  position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--bg);
+  position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--fed-row-bg, #271923);
 }
 .fed-embed-bar {
   flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 12px;
@@ -29750,4 +29750,4 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   flex: none; padding: 2px 10px; font-size: 12px; color: var(--text); cursor: pointer;
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
 }
-.fed-embed-frame { flex: 1; width: 100%; min-height: 0; border: none; background: var(--bg); }
+.fed-embed-frame { flex: 1; width: 100%; min-height: 0; border: none; background: var(--fed-row-bg, #271923); }

@@ -78,6 +78,7 @@
     var u = new URL(node.web_url);
     u.searchParams.set('ccc_popout', 'conversation');
     u.searchParams.set('conv', row.session_id);
+    u.searchParams.set('conv_bg', rowBg());
     return u.toString();
   }
 
@@ -146,6 +147,9 @@
       applyRowBg(pick.value);
       try { localStorage.setItem(ROW_BG_KEY, pick.value); } catch (_) {}
     });
+    // The open conversation is another machine's page: reload it with the new
+    // color once the pick settles (not on every drag step).
+    pick.addEventListener('change', function () { if (openRef) openRow(openRef); });
     head.appendChild(pick);
     return head;
   }

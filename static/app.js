@@ -2411,6 +2411,12 @@
     || ''
   ).trim();
   const CONV_POPOUT_REPO_PATH = (_bootUrlParams.get('repo_path') || '').trim();
+  // Embedding host's background pick (e.g. another machine's CCC showing this
+  // conversation in its pane): overrides the stored per-conversation color.
+  const CONV_POPOUT_BG = (() => {
+    const v = (_bootUrlParams.get('conv_bg') || '').trim();
+    return CONV_POPOUT_MODE && /^#[0-9a-f]{6}$/i.test(v) ? v : '';
+  })();
   if (CONV_POPOUT_MODE && document.body) {
     document.body.classList.add('conversation-popout');
     // Subagent transcripts (composite <parent>:agent-<id> ids) are read-only
@@ -79023,6 +79029,11 @@
   function applyConversationBackgroundToPane(paneId, colorId, opts = {}) {
     const pane = conversationPaneForId(paneId);
     if (!pane) return;
+    if (CONV_POPOUT_BG && !opts.persist) {
+      pane.setAttribute('data-conv-bg', 'custom');
+      setConversationPanePaletteVars(pane, conversationPaletteVars(CONV_POPOUT_BG, 'custom'));
+      return;
+    }
     const item = conversationBgPaletteItem(colorId);
     const key = conversationBgPrimaryKeyForPane(paneId);
     pane.setAttribute('data-conv-bg', item.id);
