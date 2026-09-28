@@ -1,0 +1,1 @@
+The "Where are we?" button now also appears in the open session's header (next to the title), on hover for search-result rows (including sessions found only via history/semantic search), and in the session's overflow menu — not just in a live row's hover meta line.

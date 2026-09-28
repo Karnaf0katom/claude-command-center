@@ -1796,6 +1796,9 @@
   .conv-sticky-header .conv-sticky-header__popout:hover {
     color: var(--text); border-color: var(--text-muted);
   }
+  .conv-sticky-header .conv-sticky-header__where:hover {
+    color: var(--text); border-color: var(--text-muted);
+  }
 
   /* RTL support — `unicode-bidi: plaintext` lets each block (paragraph,
      blockquote, code block) detect its own direction from its first
@@ -2758,7 +2761,31 @@
   }
   .conv-pane-titlebar {
     flex: 1 1 50%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
   }
+  .conv-pane-titlebar .conv-pane-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* "Where are we?" (MEMORY-2) -- the desktop-visible counterpart of the
+     sidebar row's .conv-where-btn / the mobile sticky header's copy. */
+  .conv-pane-where-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 4px;
+    color: var(--text-muted, #999);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1.2;
+    padding: 2px 6px;
+    white-space: nowrap;
+  }
+  .conv-pane-where-btn:hover { color: var(--text, #eee); background: var(--bg-hover, rgba(255,255,255,0.06)); }
   .conv-pane-popout {
     flex: 0 0 auto;
     width: 28px;

@@ -674,6 +674,22 @@
         body.textContent = 'Request failed: ' + (err && err.message ? err.message : err);
       });
   }
+  // "Where are we?" button (MEMORY-2): delegated on document, not $convList,
+  // so it fires for every surface the button can appear on -- a sidebar
+  // row's hover meta line, the open session's sticky header, and the
+  // session overflow menu -- without each one needing its own wiring.
+  if (!document.body._whereBtnWired) {
+    document.body._whereBtnWired = true;
+    document.body.addEventListener('click', function (ev) {
+      const btn = ev.target.closest && ev.target.closest('[data-role="where-btn"]');
+      if (!btn) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      const sid = btn.getAttribute('data-where-sid') || '';
+      if (!sid) return;
+      _showWhereOverlay(sid);
+    });
+  }
   // Delegated on document since the where-overlay lives outside $convList.
   if (!document.body._whereContinueWired) {
     document.body._whereContinueWired = true;
@@ -5628,8 +5644,23 @@
       html += '<div class="com-divider"></div>';
       html += '<button type="button" class="com-item" data-handoff-continue>'
         + '<span>Continue on…</span></button>';
+      // "Where are we?" (MEMORY-2): reuses the same delegated
+      // [data-role="where-btn"] click handling as the sidebar row button
+      // and the sticky header button -- no separate wiring needed here.
+      html += '<button type="button" class="com-item" data-role="where-btn" data-where-sid="' + escapeHtml(sid) + '">'
+        + '<span>Where are we?</span></button>';
     }
     $convOverflowMenu.innerHTML = html;
+    const $whereBtn = $convOverflowMenu.querySelector('[data-role="where-btn"]');
+    if ($whereBtn) {
+      // Own listener (not the generic document-level [data-role="where-btn"]
+      // delegate) so opening the overlay also closes this menu.
+      $whereBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _closeConvOverflow();
+        _showWhereOverlay($whereBtn.getAttribute('data-where-sid') || '');
+      });
+    }
     const $handoffContinueBtn = $convOverflowMenu.querySelector('[data-handoff-continue]');
     if ($handoffContinueBtn) {
       $handoffContinueBtn.addEventListener('click', (e) => {
@@ -34753,16 +34784,24 @@
           + ' title="Show / hide brief" aria-expanded="' + (_briefOpen ? 'true' : 'false') + '">'
           + (_briefOpen ? '&#9662;' : '&#9656;') + '</button>'
         : '';
-      // "Where are we?" (MEMO-FIX-where): same gate as the brief chevron --
-      // a row only earns this button once it has a captured session-state
-      // summary worth turning into a full status + human checklist.
-      const _whereBtnHtml = _hasBrief
+      // "Where are we?" (MEMO-FIX-where): normally gated the same as the
+      // brief chevron -- a row only earns this button once it has a
+      // captured session-state summary worth turning into a full status +
+      // human checklist. Search/history hits (MEMORY-2) are the one
+      // exception: a matched session found via search is exactly the case
+      // where a user wants "where did this end up," and those rows
+      // (especially the synthetic history-only ones, see
+      // _decorateWithHistoryMatches) never carry session_state at all, so
+      // _hasBrief alone would hide the button from search results entirely.
+      const _isSearchHit = !!(c._historyMatch || c._repoSearchMatch);
+      const _whereBtnHtml = _briefSid && (_hasBrief || _isSearchHit)
         ? '<button type="button" class="conv-where-btn" data-role="where-btn"'
           + ' data-where-sid="' + escapeHtml(_briefSid) + '"'
           + ' title="Where are we? Plain-language status, action items, and a continue prompt">Where?</button>'
         : '';
-      // Meta row: always shown when there are chips or a brief chevron.
-      const _hasMetaContent = !opts.evergreenAgent && (_hmObjectChip || _hmFolderChip || sessionProvenanceChipHtml || sessionIdChipHtml || goalMetaHtml || pinnedHtml || rowSizeHtml || branchSlotHtml || _hasBrief);
+      // Meta row: always shown when there are chips, a brief chevron, or
+      // (MEMORY-2) a search-hit Where? button with nothing else to anchor it.
+      const _hasMetaContent = !opts.evergreenAgent && (_hmObjectChip || _hmFolderChip || sessionProvenanceChipHtml || sessionIdChipHtml || goalMetaHtml || pinnedHtml || rowSizeHtml || branchSlotHtml || _hasBrief || _isSearchHit);
       const hoverMetaRowHtml = _hasMetaContent
         ? '<div class="conv-hover-meta-row">'
           + _briefChevronHtml
@@ -39437,21 +39476,10 @@
         if (row) row.classList.toggle('is-brief-open', nowOpen);
       });
     }
-    // "Where are we?" (MEMO-FIX-where): fetches /api/memory/where/<sid> and
-    // shows the result in an overlay. Delegated + wired once, mirroring the
-    // brief-toggle handler above.
-    if (!$convList._whereBtnWired) {
-      $convList._whereBtnWired = true;
-      $convList.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('[data-role="where-btn"]');
-        if (!btn) return;
-        ev.stopPropagation();
-        ev.preventDefault();
-        const sid = btn.getAttribute('data-where-sid') || '';
-        if (!sid) return;
-        _showWhereOverlay(sid);
-      });
-    }
+    // "Where are we?" (MEMO-FIX-where / MEMORY-2): click handling for
+    // [data-role="where-btn"] is a single document-level delegated listener
+    // (see the boot-time wiring near _showWhereOverlay's definition) so it
+    // covers every surface the button appears on, not just $convList rows.
     // Compact subagent clusters are collapsed by default. Toggle the selected
     // cluster in place so polling and user interaction do not move scroll.
     if (!$convList._subagentClusterToggleWired) {
@@ -41772,6 +41800,21 @@
     pane.classList.toggle('has-pane-title', !!(category || title));
     const header = pane.querySelector('[data-role="pane-header"]');
     if (header) header.title = [category, title].filter(Boolean).join(' - ');
+    // "Where are we?" (MEMORY-2): this in-pane header, not the mobile-only
+    // sticky header, is what's actually visible on desktop (>=1201px wide --
+    // see the .conv-sticky-header media query). Click handling is the same
+    // document-level [data-role="where-btn"] delegate used everywhere else.
+    const whereBtn = pane.querySelector('[data-role="where-btn"].conv-pane-where-btn');
+    if (whereBtn) {
+      const whereSid = (row && (row.session_id || row.id)) || '';
+      if (whereSid) {
+        whereBtn.hidden = false;
+        whereBtn.setAttribute('data-where-sid', whereSid);
+      } else {
+        whereBtn.hidden = true;
+        whereBtn.removeAttribute('data-where-sid');
+      }
+    }
     // Mirror the active pane's breadcrumb into the global toolbar slot
     // (#cccBreadcrumb). In single-pane mode the in-pane header is CSS-
     // hidden so the sticky "original ask" rises to that slot — the
@@ -59489,7 +59532,20 @@
               + '</svg>'
               + '<span>Pop out</span>'
             + '</button>';
-          sticky.innerHTML = resolveBtn + issueBtn
+          // "Where are we?" (MEMORY-2): this sticky header is the narrow-
+          // viewport counterpart of the in-pane titlebar's own Where? button
+          // (updatePaneHeader) -- the media query at .conv-sticky-header
+          // hides one and shows the other purely by width, so both need the
+          // button for full coverage. Slots into whichever offset
+          // issueBtn/resolveBtn leave free -- they always appear together,
+          // so there are only two layouts to avoid colliding with.
+          const whereBtn = conv.session_id
+            ? '<button type="button" class="tools-toggle conv-sticky-header__where" data-role="where-btn"'
+              + ' data-where-sid="' + escapeHtml(conv.session_id) + '"'
+              + ' style="right:' + (issueNum ? 360 : 120) + 'px;"'
+              + ' title="Where are we? Plain-language status, action items, and a continue prompt">Where?</button>'
+            : '';
+          sticky.innerHTML = resolveBtn + issueBtn + whereBtn
             + stickyPopoutBtn
             + '<button type="button" class="conv-sticky-header__close" data-csh-close title="Hide this panel completely">×</button>'
             + '<div class="csh-row">'
