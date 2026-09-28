@@ -338,12 +338,36 @@ wt_ensure_daemon() {
   case "${CCC_SKIP_WATCHTOWER_DAEMON:-0}" in
     1|true|True|yes|Yes) return 0 ;;
   esac
+  # `wt start` also syncs WatchTower's skills the first time it writes its
+  # plist. Ask it not to unless the user approved that (see wt_skills_approved).
+  local skip_sync=1
+  if wt_skills_approved; then
+    skip_sync=0
+  fi
   if command -v wt >/dev/null 2>&1; then
-    wt start >/dev/null 2>&1 || true
+    WT_SKIP_SKILL_SYNC="$skip_sync" wt start >/dev/null 2>&1 || true
   else
-    "$WT_PYTHON" -m watchtower.cli start >/dev/null 2>&1 || true
+    WT_SKIP_SKILL_SYNC="$skip_sync" "$WT_PYTHON" -m watchtower.cli start >/dev/null 2>&1 || true
   fi
   return 0
+}
+
+# CCC writes into the user's agent config (~/.claude/skills, ~/.codex/skills,
+# ...) only after they approve it: the "WatchTower skills" item in the
+# dashboard's Agent config access dialog or `ccc consent`, recorded by
+# ccc_server/config_consent.py. No decision yet = no sync.
+wt_skills_approved() {
+  local consent="$HOME/.claude/command-center/config-consent.json"
+  [ -f "$consent" ] || return 1
+  "$WT_PYTHON" - "$consent" >/dev/null 2>&1 <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+record = (data.get("items") or {}).get("watchtower-skills") or {}
+sys.exit(0 if record.get("decision") == "approved" else 1)
+PY
 }
 
 # WatchTower's own skill sync (the SKILL.md files that teach an agent the `wt`
@@ -355,8 +379,9 @@ wt_ensure_daemon() {
 # of relying on WatchTower's own first-run gate. `wt skills sync` just
 # symlinks bundled skill dirs into each present harness's skills dir
 # (~/.claude/skills, ~/.codex/skills, ...) — idempotent and cheap, safe to run
-# on every launch.
+# on every launch. Only once the user approved it (wt_skills_approved).
 wt_ensure_skills() {
+  wt_skills_approved || return 0
   if command -v wt >/dev/null 2>&1; then
     wt skills sync >/dev/null 2>&1 || true
   else
