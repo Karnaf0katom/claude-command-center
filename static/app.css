@@ -5966,7 +5966,9 @@
     transition: opacity 0.06s ease;
     z-index: 3;
   }
-  .conv-item:hover .conv-row-hover-slot,
+  /* Unselected rows stay quiet on hover (background only) so the whole row
+     is one clean click target; row chrome appears once the row is selected. */
+  .conv-item.active:hover .conv-row-hover-slot,
   .conv-item:focus-within .conv-row-hover-slot {
     opacity: 1;
     pointer-events: auto;
@@ -6003,8 +6005,8 @@
     color: var(--accent);
     background: rgba(88,166,255,0.12);
   }
-  /* Three-state row-end swap (CCC-783): at rest, the time shows. On hover
-     (or focus-within for keyboard users), the time fades out and the hover slot
+  /* Three-state row-end swap (CCC-783): at rest, the time shows. On hover of
+     the selected row (or focus-within for keyboard users), the time fades out and the hover slot
      (trash can + 2-dot kebab) fades in. Clicking the kebab (`.is-actions-open`) swaps again to
      the actions bar itself — only one of the three is ever visible. */
   .conv-item .conv-kebab-btn {
@@ -6039,9 +6041,9 @@
     border-radius: 50%;
     background: var(--text-muted);
   }
-  .conv-item:hover .conv-row-end > .conv-kebab-btn,
+  .conv-item.active:hover .conv-row-end > .conv-kebab-btn,
   .conv-item:focus-within .conv-row-end > .conv-kebab-btn,
-  .conv-item:hover .conv-row-end .conv-kebab-btn,
+  .conv-item.active:hover .conv-row-end .conv-kebab-btn,
   .conv-item:focus-within .conv-row-end .conv-kebab-btn {
     opacity: 1;
     pointer-events: auto;
@@ -6055,12 +6057,12 @@
     opacity: 0;
     pointer-events: none;
   }
-  .conv-item.is-pinned:not(:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions:not(:empty) {
+  .conv-item.is-pinned:not(.active:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions:not(:empty) {
     opacity: 1;
     pointer-events: auto;
     background: transparent;
   }
-  .conv-item.is-pinned:not(:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions > :not(.conv-pin-btn) {
+  .conv-item.is-pinned:not(.active:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions > :not(.conv-pin-btn) {
     opacity: 0;
     pointer-events: none;
   }
@@ -6072,13 +6074,13 @@
     flex: 0 0 auto;            /* override the column-width flex from the base rule */
     transition: opacity 0.06s ease;
   }
-  .conv-item:hover .conv-row-end > .conv-rel,
+  .conv-item.active:hover .conv-row-end > .conv-rel,
   .conv-item:focus-within .conv-row-end > .conv-rel,
   .conv-item.is-actions-open .conv-row-end > .conv-rel {
     opacity: 0;
     pointer-events: none;
   }
-  .conv-item.is-pinned:not(:hover):not(:focus-within):not(.is-actions-open) .conv-row-end > .conv-rel {
+  .conv-item.is-pinned:not(.active:hover):not(:focus-within):not(.is-actions-open) .conv-row-end > .conv-rel {
     opacity: 0;
   }
   /* CCC-449: with several buttons the hover action bar extends left past the
@@ -6101,10 +6103,10 @@
   .conv-item.is-actions-open .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-qc-badge,
   .conv-item.is-actions-open .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-pct-badge,
   .conv-item.is-actions-open .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-qc-badge,
-  .conv-item.is-pinned:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-pct-badge,
-  .conv-item.is-pinned:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-qc-badge,
-  .conv-item.is-pinned:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-pct-badge,
-  .conv-item.is-pinned:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-qc-badge {
+  .conv-item.is-pinned.active:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-pct-badge,
+  .conv-item.is-pinned.active:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-qc-badge,
+  .conv-item.is-pinned.active:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-pct-badge,
+  .conv-item.is-pinned.active:hover .conv-main-row:has(.conv-row-actions:not(:empty)) > .conv-evergreen-inline-badges .conv-qc-badge {
     opacity: 0;
     pointer-events: none;
   }
@@ -6974,7 +6976,7 @@
     font-size: 13px;
     font-weight: 400;
   }
-  .conv-project-tree .conv-item:hover .conv-main-row > .conv-row-end { display: inline-flex; }
+  .conv-project-tree .conv-item.active:hover .conv-main-row > .conv-row-end { display: inline-flex; }
 
   .conv-evergreen-agents-tree .conv-item.is-evergreen-agent-row {
     align-items: stretch;
@@ -7367,64 +7369,13 @@
   .conv-item.active .conv-hover-meta-row .conv-folder-chip,
   .conv-item.active .conv-hover-meta-row .conv-repo-pin { display: inline-flex; }
   .conv-item.active .conv-hover-meta-row .conv-meta-inline .sep { display: inline-flex; }
-  /* Hover (design_handoff_sidebar_session_list, 2c) keeps the row at ONE
-     line: instead of adding a second row, the meta line is lifted out of
-     flow and right-aligned on the title line, so the list never reflows
-     under the cursor. Only the compact identifiers are surfaced there —
-     session id and branch — the rest stays an active-only affordance. */
-  .conv-item:hover:not(.active) .conv-hover-meta-row {
-    display: flex;
-    position: absolute;
-    /* Clears the time column so "2d" stays readable, PLUS ~36px for the
-       context-% badge (CCC-961): the badge sits just left of the time
-       column and this overlay used to land right on top of it, hiding the
-       % behind the session-id chip on hover. */
-    right: calc(12px + var(--conv-time-col) + 36px);
-    top: 50%;
-    transform: translateY(-50%);
-    margin: 0;
-    max-width: 55%;
-    justify-content: flex-end;
-    background: var(--surface-2);
-    padding-left: 8px;
-    pointer-events: auto;
-    z-index: 2;
-  }
-  .conv-item:hover:not(.active) .conv-hover-meta-row > * { display: none; }
-  .conv-item:hover:not(.active) .conv-hover-meta-row .conv-sidebar-session-id-chip,
-  .conv-item:hover:not(.active) .conv-hover-meta-row .conv-branch-slot,
-  .conv-item:hover:not(.active) .conv-hover-meta-row .conv-session-origin-chip.is-parent,
-  .conv-item:hover:not(.active) .conv-hover-meta-row .conv-session-origin-chip.is-successor,
-  .conv-item:hover:not(.active) .conv-hover-meta-row .conv-session-origin-chip.is-grandparent { display: inline-flex; }
-  /* CCC-865 (narrowed): only the successor chip is already visible at rest
-     (see the :not(:hover) rule below), so keeping it in normal flow on
-     hover is a no-op — no reflow, nothing to fix. Parent/grandparent chips
-     used to get this same normal-flow treatment, but those rows show
-     NOTHING at rest, so "normal flow on hover" meant the row visibly grew
-     a second line every time the cursor passed over it — the row-height
-     jump reported against the sidebar list. They now fall through to the
-     general absolute-overlay hover rule above instead (which already
-     reveals the parent/grandparent chip via the child-visibility rule
-     above it, just without pushing layout). */
-  .conv-item:hover:not(.active) .conv-hover-meta-row:has(.conv-session-origin-chip.is-successor) {
-    position: static;
-    right: auto;
-    top: auto;
-    transform: none;
-    margin: 4px 48px 0 var(--conv-content-left);
-    max-width: calc(100% - var(--conv-content-left) - 70px);
-    justify-content: flex-start;
-    background: transparent;
-    padding-left: 0;
-    z-index: auto;
-  }
   /* The ⤴ from: chip is the only way back to a folded origin session (the
      origin has no row of its own), so it stays visible at rest; the rest of
-     the meta row still waits for hover/select. */
-  .conv-item:not(.active):not(:hover) .conv-hover-meta-row:has(.conv-session-origin-chip.is-successor) {
+     the meta row waits for select. */
+  .conv-item:not(.active) .conv-hover-meta-row:has(.conv-session-origin-chip.is-successor) {
     display: flex;
   }
-  .conv-item:not(.active):not(:hover) .conv-hover-meta-row:has(.conv-session-origin-chip.is-successor) > :not(.conv-session-origin-chip.is-successor) {
+  .conv-item:not(.active) .conv-hover-meta-row:has(.conv-session-origin-chip.is-successor) > :not(.conv-session-origin-chip.is-successor) {
     display: none;
   }
   /* Current-sessions rows already surface the full meta row by default; the
@@ -7670,9 +7621,6 @@
       border-radius: 4px;
       box-shadow: -8px 0 10px -2px var(--surface-2);
     }
-    .conv-item:hover:not(.active) .conv-hover-meta-row {
-      right: 52px;
-    }
   }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
@@ -7711,7 +7659,7 @@
     transition: opacity 0.15s, color 0.15s, background 0.15s;
     transform: scaleX(-1);  /* mirror so the pencil tip points back at the title */
   }
-  .conv-item:hover .conv-edit-btn { opacity: 0.7; }
+  .conv-item.active:hover .conv-edit-btn { opacity: 0.7; }
   .conv-item .conv-edit-btn:hover { opacity: 1; color: var(--accent); background: rgba(88,166,255,0.12); }
   .conv-item .conv-pin-btn,
   .conv-item .conv-wake-btn,
@@ -10237,7 +10185,7 @@
     font-size: 14px; cursor: grab; user-select: none;
   }
   .conv-item { position: relative; }
-  .conv-item:hover .drag-handle { display: block; }
+  .conv-item.active:hover .drag-handle { display: block; }
   .conv-item.dragging .drag-handle { cursor: grabbing; }
 
   /* Current-goal chip (codex /goal). Reads like a soft second column after
@@ -27771,9 +27719,6 @@ html:not(.ccc-debug-mode) #statsModal {
 #convList {
   container-name: convlist;
 }
-@container convlist (max-width: 300px) {
-  .conv-item:hover:not(.active) .conv-hover-meta-row { display: none; }
-}
 
 /* §4d — Trash reads as a quiet terminal marker after the last lane, not as
    another section header competing with the project lanes. */
@@ -29539,7 +29484,11 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
   .ns-model-comparison th, .ns-model-comparison td { padding: 7px 5px; }
   .ns-model-comparison table { font-size: 11px; }
 }
-.ns-model-selected { font-size: 12px; line-height: 1.5; margin: 10px 0; font-weight: 600; }
+.ns-model-selected { font-size: 12px; line-height: 1.5; margin: 10px 0; font-weight: 600; cursor: pointer; }
+.ns-model-details > summary { list-style: revert; }
+.ns-model-compare-hint { margin-left: 8px; font-weight: 400; color: var(--accent, #58a6ff); }
+.ns-model-details:not([open]) > summary { margin-bottom: 0; }
+.ns-model-details[open] .ns-model-compare-hint { display: none; }
 
 /* Codex reader: quiet message chrome, readable actions, bounded attachments. */
 .conv-pane.is-codex-session .kimi-turn .assistant-text {

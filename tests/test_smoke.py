@@ -15939,7 +15939,7 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("_restoreConversationListScrollTop($convList, pinScrollTop)", js)
         self.assertNotIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
         self.assertIn(".conv-item .conv-pin-btn", css)
-        self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions:not(:empty)", css)
+        self.assertIn(".conv-item.is-pinned:not(.active:hover):not(:focus-within):not(.is-actions-open) .conv-row-actions:not(:empty)", css)
         self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within) .conv-pin-btn.is-unpin", css)
         self.assertIn(".conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::before", css)
         self.assertIn(".conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::after", css)

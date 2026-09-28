@@ -78233,6 +78233,7 @@
     return (engine === 'claude' && claudeGuidance[_normalizeModelId(opt.id)]) || 'No task guidance in this catalog.';
   }
 
+  let _nsModelComparisonOpen = false;
   function renderNsModelComparison() {
     if (currentConversation !== '__new__') return;
     const host = getConvView()?.querySelector('.ns-model-comparison');
@@ -78265,14 +78266,19 @@
         + (opt.entitlement_summary ? '<small>' + escapeHtml(opt.entitlement_summary) + '</small>' : '')
         + '</td></tr>';
     }).join('');
-    const markup = '<div class="ns-model-heading"><strong>Compare models</strong><label>Engine <select aria-label="Compare models for engine">'
+    // Collapsed by default: the summary line names the selected model and
+    // price; the full table is one click away for when you want to compare.
+    const markup = '<details class="ns-model-details"' + (_nsModelComparisonOpen ? ' open' : '') + '>'
+      + '<summary class="ns-model-selected">Model: ' + escapeHtml(selectedOption?.label || selected || 'Engine default') + ' · ' + escapeHtml(selectedOption?.cost_summary || 'Price not reported')
+      + ' <span class="ns-model-compare-hint">Compare models</span></summary>'
+      + '<div class="ns-model-heading"><label>Engine <select aria-label="Compare models for engine">'
       + engineOptions + '</select></label></div>'
       + '<p class="ns-model-note">Catalog token rates: USD per 1 million tokens where quoted. Subscription charges and quota usage differ; caching, effort, and service tiers can change cost.</p>'
-      + '<p class="ns-model-selected">Selected: ' + escapeHtml(selectedOption?.label || selected || 'Engine default') + ' · ' + escapeHtml(selectedOption?.cost_summary || 'Price not reported') + '</p>'
       + '<div class="ns-model-table-wrap"><table><thead><tr><th>Model · click to select</th><th>Strengths & capabilities</th><th>Cost / plan</th></tr></thead><tbody>'
       + (rows || '<tr><td colspan="3">No model details available for this engine.</td></tr>') + '</tbody></table></div>'
       + '<p class="ns-model-note">Descriptions are provider guidance, not benchmark rankings. Prices reflect the available catalog and may lag provider changes.'
-      + (engine === 'claude' ? ' <a href="https://platform.claude.com/docs/en/models/overview" target="_blank" rel="noopener noreferrer">Claude model guide</a>' : '') + '</p>';
+      + (engine === 'claude' ? ' <a href="https://platform.claude.com/docs/en/models/overview" target="_blank" rel="noopener noreferrer">Claude model guide</a>' : '') + '</p>'
+      + '</details>';
     // Polling must not replace focused controls when nothing has changed.
     if (host._comparisonMarkup === markup) return;
     const scrollTop = host.querySelector('.ns-model-table-wrap')?.scrollTop || 0;
@@ -78280,6 +78286,9 @@
     host.innerHTML = markup;
     host._comparisonMarkup = markup;
     host.querySelector('.ns-model-table-wrap').scrollTop = scrollTop;
+    host.querySelector('details').addEventListener('toggle', event => {
+      _nsModelComparisonOpen = event.target.open;
+    });
     host.querySelector('select').addEventListener('change', event => {
       _spawnEngineChosenByUser = true;
       setSpawnEngine(event.target.value);

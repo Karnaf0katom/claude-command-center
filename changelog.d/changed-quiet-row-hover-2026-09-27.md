@@ -1,0 +1,1 @@
+- Sidebar rows stay quiet on hover until selected: no session-id/lineage overlay, trash, menu, rename pencil, or drag grip on unselected rows, so the whole row is a clean click target.

@@ -86,9 +86,12 @@ test('the successor is the effective parent of the session it continued from', (
   assert.equal(ctx.eff('successor-sess-01', 'origin-session-01'), '');
 });
 
-test('the ⤴ from: chip survives the hover overlay like the parent chip does', () => {
-  assert.match(css, /\.conv-item:hover:not\(\.active\) \.conv-hover-meta-row \.conv-session-origin-chip\.is-successor,/);
-  assert.match(css, /\.conv-item:hover:not\(\.active\) \.conv-hover-meta-row:has\(\.conv-session-origin-chip\.is-successor\),/);
+test('the ⤴ from: chip stays visible on unselected rows, hovered or not', () => {
+  assert.match(css, /\.conv-item:not\(\.active\) \.conv-hover-meta-row:has\(\.conv-session-origin-chip\.is-successor\) \{/);
+});
+
+test('hovering an unselected row adds no meta overlay (the row is one click target)', () => {
+  assert.equal(css.includes(':hover:not(.active) .conv-hover-meta-row'), false);
 });
 
 test('the selected-row title no longer carries ⤴ from: chips', () => {
