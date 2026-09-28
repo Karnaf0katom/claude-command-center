@@ -261,11 +261,32 @@ def collapse_chain_hits(
             current = nxt
         return current
 
+    def _continuation_root(sid: str) -> str:
+        current = sid
+        seen = set()
+        for _ in range(MAX_CHAIN_DEPTH):
+            if current in seen:
+                break
+            seen.add(current)
+            nxt = cont_origin.get(current) or ""
+            if not nxt or nxt not in hit_sid_set:
+                break
+            current = nxt
+        return current
+
     groups: dict[str, list[dict]] = {}
     for h in hits:
         sid = h.get(sid_key)
         root = _family_root(sid) if sid else id(h)
         groups.setdefault(root, []).append(h)
+
+    # The survivor is the newest member of the ROOT's own continuation chain
+    # (the orchestrator's latest successor), never a spawned child: a child
+    # that is merely newer would otherwise stand in for the master and its
+    # title/snippet would hide the session the query actually matched.
+    def _representative(root, members):
+        spine = [m for m in members if _continuation_root(m.get(sid_key)) == root]
+        return max(spine or members, key=lambda m: m.get(ts_key) or 0)
 
     out = []
     emitted_roots = set()
@@ -279,7 +300,7 @@ def collapse_chain_hits(
         if len(members) == 1:
             out.append(h)
             continue
-        newest = max(members, key=lambda m: m.get(ts_key) or 0)
+        newest = _representative(root, members)
         rep = dict(newest)
         rep["chain_collapsed"] = len(members) - 1
         rep["chain_collapsed_sids"] = [

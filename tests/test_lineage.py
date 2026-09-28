@@ -190,15 +190,30 @@ def test_collapse_continuation_chain_keeps_newest(db_conn, session_graph_file):
     assert rep["chain_collapsed_sids"] == ["session-a"]
 
 
-def test_collapse_spawn_family_keeps_newest(db_conn, session_graph_file):
+def test_collapse_spawn_family_keeps_orchestrator(db_conn, session_graph_file):
+    # A newer spawned child must not stand in for its orchestrator: the
+    # master is what the user is looking for, children fold under it.
     _write_edges(session_graph_file, [_edge("orch-1", "child-1")])
     _insert_session_meta(db_conn, "orch-1", start_ts=1.0)
     _insert_session_meta(db_conn, "child-1", start_ts=5.0)
-    hits = [_hit("orch-1", 1.0), _hit("child-1", 5.0)]
+    hits = [_hit("child-1", 5.0), _hit("orch-1", 1.0)]
     out = lineage.collapse_chain_hits(hits, db_conn, session_graph_path=session_graph_file)
     assert len(out) == 1
-    assert out[0]["session_id"] == "child-1"
-    assert out[0]["chain_collapsed"] == 1
+    assert out[0]["session_id"] == "orch-1"
+    assert out[0]["chain_collapsed_sids"] == ["child-1"]
+
+
+def test_collapse_spawn_family_uses_orchestrators_latest_successor(db_conn, session_graph_file):
+    # Real shape (migration session 3084fe5f): origin -> continued -> spawned
+    # a side child. The survivor is the continued orchestrator, not the child.
+    _write_edges(session_graph_file, [_edge("orch-2", "side-child")])
+    _insert_session_meta(db_conn, "orch-1", start_ts=1.0)
+    _insert_session_meta(db_conn, "orch-2", start_ts=2.0, continuation_origin="orch-1")
+    _insert_session_meta(db_conn, "side-child", start_ts=9.0)
+    hits = [_hit("side-child", 9.0), _hit("orch-1", 1.0), _hit("orch-2", 2.0)]
+    out = lineage.collapse_chain_hits(hits, db_conn, session_graph_path=session_graph_file)
+    assert [h["session_id"] for h in out] == ["orch-2"]
+    assert sorted(out[0]["chain_collapsed_sids"]) == ["orch-1", "side-child"]
 
 
 def test_collapse_does_not_link_through_absent_ancestor(db_conn, session_graph_file):
