@@ -21,6 +21,7 @@ def fts_env(tmp_path, monkeypatch):
     kimi_dir = tmp_path / "kimi"
     gemini_dir = tmp_path / "gemini"
     cursor_dir = tmp_path / "cursor"
+    harvested_dir = tmp_path / "harvested"
     projects_dir.mkdir(parents=True)
     codex_dir.mkdir(parents=True)
     kimi_dir.mkdir(parents=True)
@@ -36,6 +37,8 @@ def fts_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_KIMI_SESSIONS_ROOT", str(kimi_dir))
     monkeypatch.setenv("CCC_GEMINI_TMP_ROOT", str(gemini_dir))
     monkeypatch.setenv("CCC_CURSOR_PROJECTS_ROOT", str(cursor_dir))
+    # Isolate the S8b harvested-sandbox root too -- same leak risk as above.
+    monkeypatch.setenv("CCC_HARVESTED_ROOT", str(harvested_dir))
     monkeypatch.setenv("CCC_SESSION_FTS_DAYS", "0")  # disable cutoff for tests
     monkeypatch.setenv("CCC_SESSION_FTS_ALLOW_SCRATCH", "1")
     # These tests exercise FTS mechanics, not the optional embeddings channel;
@@ -65,6 +68,7 @@ def fts_env(tmp_path, monkeypatch):
         "kimi": kimi_dir,
         "gemini": gemini_dir,
         "cursor": cursor_dir,
+        "harvested": harvested_dir,
     }
 
 
@@ -177,6 +181,23 @@ def test_search_sessions_finds_codex_session(fts_env):
     file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     results = session_fts.search_sessions("AVX512 vectorization")
+    assert len(results) > 0
+    assert results[0]["session_id"] == sid
+
+
+def test_search_sessions_finds_harvested_sandbox_session(fts_env):
+    """S8b: a transcript copied out of a wiped worker sandbox into the
+    harvested/ root must be indexed and searchable like any other root."""
+    sid = "99999999-1111-2222-3333-444444444444"
+    file_path = fts_env["harvested"] / "ccc-local-sbx1" / ".claude" / "projects" / "some-repo" / f"{sid}.jsonl"
+    _write_claude_jsonl(file_path, sid, [
+        {"type": "user", "message": {"role": "user", "content": "harvested sandbox marker phrase"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "found it"}
+        ]}},
+    ])
+
+    results = session_fts.search_sessions("harvested sandbox marker phrase")
     assert len(results) > 0
     assert results[0]["session_id"] == sid
 

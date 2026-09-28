@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from ccc_server import sandbox_harvest
+
 server = importlib.import_module("server")
 
 
@@ -4470,5 +4472,38 @@ def test_ship_graph_cold_start_skips_filesystem_scan_for_large_corpus(tmp_path, 
 
     assert scan_calls == [], "cold-start sync with a large existing corpus scanned the filesystem inline"
     assert bg_calls == [1], "cold-start sync with a large existing corpus did not defer to the background sync"
+
+
+def test_sandbox_harvest_warm_tick_copies_nothing(monkeypatch, tmp_path):
+    """S8b harvest sweep runs every 60s forever; a warm tick over unchanged
+    sandboxes must not re-copy already-harvested files, or the sweep does
+    O(all sandboxes * all files) file-copy work every minute forever."""
+    scan_root = tmp_path / "tmp"
+    harvested_root = tmp_path / "harvested"
+    scan_root.mkdir()
+    monkeypatch.setenv("CCC_SANDBOX_SCAN_ROOT", str(scan_root))
+    monkeypatch.setenv("CCC_HARVESTED_ROOT", str(harvested_root))
+
+    for i in range(20):
+        proj = scan_root / f"ccc-local-{i}" / "home" / ".claude" / "projects" / "repo"
+        proj.mkdir(parents=True)
+        (proj / "sess.jsonl").write_text('{"type": "user"}\n')
+
+    first = sandbox_harvest.harvest_tick()
+    assert first["files_copied"] == 20
+
+    copy_calls = []
+    orig_copy2 = sandbox_harvest.shutil.copy2
+
+    def spy(*a, **k):
+        copy_calls.append((a, k))
+        return orig_copy2(*a, **k)
+
+    monkeypatch.setattr(sandbox_harvest.shutil, "copy2", spy)
+
+    second = sandbox_harvest.harvest_tick()
+
+    assert second["files_copied"] == 0
+    assert copy_calls == [], f"warm harvest tick re-copied {len(copy_calls)} unchanged files"
 
 

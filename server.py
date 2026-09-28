@@ -39783,8 +39783,13 @@ def main():
     if not os.environ.get("CCC_EPHEMERAL"):
         from ccc_server import session_fts as _session_fts_warm
         from ccc_server import ship_graph as _ship_graph_warm
+        from ccc_server import sandbox_harvest as _sandbox_harvest_warm
         threading.Thread(target=_session_fts_warm.warm_start, daemon=True, name="ccc-session-fts-warm").start()
         threading.Thread(target=_ship_graph_warm.warm_start, daemon=True, name="ccc-ship-graph-warm").start()
+        # Sandbox-transcript harvest (multi-machine S8b): copies queue-worker
+        # sandbox transcripts (/tmp/ccc-local-*) into a persistent home
+        # before they're wiped, so session_fts above can index them.
+        threading.Thread(target=_sandbox_harvest_warm.warm_start, daemon=True, name="ccc-sandbox-harvest-warm").start()
     # Idle-session reaper: sweeps every 30 min, SIGTERMs `claude` processes
     # whose JSONL has been quiet for >24h. Catches abandoned-but-not-archived
     # sessions and forgotten cron agents that the archive-time kill misses.
