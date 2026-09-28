@@ -1,0 +1,1 @@
+- Fixed the multi-node session list (`/api/sessions?federated=1`) returning an empty reply when session timestamps mixed epoch and ISO formats.

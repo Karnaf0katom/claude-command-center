@@ -192,6 +192,27 @@ def _federation_fetch_peer_sessions(peer, limit):
     return {**payload, "stale": False}, None
 
 
+def _federation_row_epoch(row):
+    """Sort key for federated rows: engines report `timestamp` as epoch
+    seconds or an ISO string, so normalize before comparing."""
+    ts = row.get("timestamp")
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str) and ts:
+        try:
+            return float(ts)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return 0.0
+
+
 def _federation_federated_sessions(limit=200):
     """One session list across every node: local + each paired peer, each
     row carrying its owning node, global ref, and staleness."""
@@ -235,7 +256,7 @@ def _federation_federated_sessions(limit=200):
                 entry.update({"ok": False, "stale": True,
                               "observed_at": None, **(err or {})})
             nodes.append(entry)
-    sessions.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
+    sessions.sort(key=_federation_row_epoch, reverse=True)
     return {"ok": True, "sessions": sessions, "nodes": nodes,
             "count": len(sessions)}
 
