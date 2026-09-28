@@ -718,7 +718,7 @@ def cmd_shipped(args):
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
-    verdict = "SHIPPED" if payload.get("shipped") else "NOT SHIPPED"
+    verdict = payload.get("verdict") or ("SHIPPED" if payload.get("shipped") else "NOT SHIPPED")
     confidence = payload.get("confidence")
     conf_str = f" (confidence {confidence:.2f})" if isinstance(confidence, (int, float)) else ""
     print(f"{verdict}{conf_str}: {text}")
@@ -734,7 +734,8 @@ def cmd_shipped(args):
         print(f"  {freshness.get('origin_ref') or 'origin'} fetched {mins} min ago")
     for ev in payload.get("evidence") or []:
         subj = ev.get("subject") or ""
-        print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}")
+        state = f"  ({ev['state']})" if ev.get("state") else ""
+        print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}{state}")
     tickets = payload.get("tickets") or []
     if tickets:
         print(f"  tickets: {', '.join(tickets)}")

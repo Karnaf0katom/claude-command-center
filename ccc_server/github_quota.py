@@ -373,3 +373,98 @@ def pr_cache_stats():
             "limit": pr_limit(),
             "ages_s": {k: round(now - v["ts"], 1) for k, v in _PR_CACHE.items()},
         }
+
+
+# ---------------------------------------------------------------------------
+# `compare` verification. Used by ship_graph (MEMORY-7, multi-machine S2) to
+# confirm a commit is on the default branch when the local clone's fetched
+# view of `origin/<default>` is stale. This is a REST call, so it spends the
+# separate `core` rate-limit bucket, not the GraphQL one metered above --
+# there is no in-band way to read that bucket's true usage (same OPS-929
+# problem as the GraphQL quota), so gating is a simple bounded call budget
+# instead of a read-then-spend check.
+# ---------------------------------------------------------------------------
+
+
+def compare_ttl_s():
+    """TTL for a non-`on_default` compare result. `on_default` itself is
+    cached forever below -- ancestry of a merged commit never un-happens."""
+    return _env_int("CCC_GH_COMPARE_TTL_S", 3600, 60, 86400)
+
+
+def compare_max_per_hour():
+    """Call budget for `gh api .../compare/...`, one call per stale top
+    candidate. Keeps a burst of `ccc shipped` queries against long-stale
+    clones from spending the REST quota other tools need."""
+    return _env_int("CCC_GH_COMPARE_MAX_PER_HOUR", 20, 1, 200)
+
+
+_COMPARE_LOCK = threading.Lock()
+_COMPARE_CACHE = {}  # (owner_repo, base, sha) -> {"ts": float, "state": str, "forever": bool}
+_COMPARE_CALL_TIMES = []  # rolling window of call timestamps, for the budget gate
+
+
+def _compare_budget_ok():
+    now = time.time()
+    with _COMPARE_LOCK:
+        while _COMPARE_CALL_TIMES and now - _COMPARE_CALL_TIMES[0] > 3600:
+            _COMPARE_CALL_TIMES.pop(0)
+        if len(_COMPARE_CALL_TIMES) >= compare_max_per_hour():
+            return False
+        _COMPARE_CALL_TIMES.append(now)
+        return True
+
+
+def github_compare_state(owner_repo, base, sha, timeout=10):
+    """`gh api repos/{owner_repo}/compare/{base}...{sha}`, quota-gated and
+    cached. Returns one of:
+
+    - ``"on_default"``: ``identical`` or ``behind`` -- sha is reachable from
+      base, cached forever (this ancestry fact is immutable).
+    - ``"ahead"``: sha has commits base does not (pushed, not merged).
+    - ``"unknown"``: over budget, `gh` failed, or the response didn't parse --
+      never treated as a negative verdict by the caller.
+
+    Never raises and never spawns `gh` more than once per
+    ``(owner_repo, base, sha)`` within the cache window.
+    """
+    key = (owner_repo, base, sha)
+    now = time.time()
+    with _COMPARE_LOCK:
+        hit = _COMPARE_CACHE.get(key)
+        if hit and (hit["forever"] or (now - hit["ts"]) < compare_ttl_s()):
+            return hit["state"]
+
+    if not owner_repo or not base or not sha:
+        return "unknown"
+    if not _compare_budget_ok():
+        return "unknown"
+
+    try:
+        out = _run_gh(["api", f"repos/{owner_repo}/compare/{base}...{sha}"], timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if out.returncode != 0:
+        return "unknown"
+    try:
+        payload = json.loads(out.stdout)
+    except ValueError:
+        return "unknown"
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if status in ("identical", "behind"):
+        state = "on_default"
+    elif status in ("ahead", "diverged"):
+        state = "ahead"
+    else:
+        state = "unknown"
+
+    with _COMPARE_LOCK:
+        _COMPARE_CACHE[key] = {"ts": now, "state": state, "forever": state == "on_default"}
+    return state
+
+
+def reset_compare_cache():
+    """Test seam -- drop cached compare results and the call budget window."""
+    with _COMPARE_LOCK:
+        _COMPARE_CACHE.clear()
+        _COMPARE_CALL_TIMES.clear()

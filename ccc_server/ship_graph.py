@@ -6,6 +6,9 @@ Exposes:
   - is_shipped(topic: str) -> dict:
       Answers 'did we ship X?' with:
       {'shipped': bool, 'confidence': float, 'evidence': [{'repo', 'commit', 'subject', 'session_id'}], 'tickets': [...]}
+      Also adds 'verdict' (SHIPPED / PUSHED, NOT MERGED / COMMITTED ON <node>, NOT PUSHED /
+      NOT FOUND on reachable nodes ...), 'origin_freshness', and evidence[0]['state']
+      (on_default / on_remote_branch / local_only / unknown) -- multi-machine S2.
   - search_sessions(query: str, limit: int = 20) -> list[dict]:
       Re-ranks/augments ccc_server/session_fts.search_sessions results using
       commit matches and ticket expansion over the graph.
@@ -32,6 +35,9 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+import federation
+from ccc_server import github_quota as _github_quota
 
 _base_search_sessions = None
 
@@ -1830,23 +1836,132 @@ def _origin_freshness_info(repo_path: str) -> dict | None:
     return {"origin_ref": origin_ref, "fetched_at": fetched_at, "age_s": max(0.0, time.time() - fetched_at)}
 
 
+def _remote_branch_contains(repo_path: str, sha: str) -> bool | None:
+    """Whether any remote-tracking branch already known to this clone
+    contains `sha` -- a `git branch -r --contains` subprocess, but no
+    network I/O (it reads existing remote-tracking refs). Only called from
+    `_classify_non_main_commit`, which is itself cached, so this never
+    re-runs for a warm (repo_path, sha) pair. Returns None if this can't be
+    determined."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_path, "branch", "-r", "--contains", sha],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return any(line.strip() and "->" not in line for line in r.stdout.splitlines())
+    except Exception:
+        pass
+    return None
+
+
+def _commit_on_main(conn: sqlite3.Connection, repo_name: str, sha: str) -> bool:
+    row = conn.execute(
+        "SELECT on_main FROM commits WHERE repo = ? AND hash = ?", (repo_name, sha)
+    ).fetchone()
+    return bool(row and row[0])
+
+
+_verdict_state_cache: dict[tuple[str, str], tuple[float, str]] = {}
+_verdict_state_lock = threading.Lock()
+_VERDICT_STATE_TTL = 300.0  # matches _STALENESS_TTL: bounds repeat classification subprocesses
+
+
+def _classify_non_main_commit(repo_path: str, sha: str, freshness: dict | None) -> str:
+    """The non-trivial half of `_commit_verdict_state`: `sha` is not on the
+    locally known default branch. Cached per (repo_path, sha) so a warm,
+    repeated `ccc shipped` call spawns zero subprocesses."""
+    key = (repo_path, sha)
+    now = time.time()
+    with _verdict_state_lock:
+        cached = _verdict_state_cache.get(key)
+        if cached and now - cached[0] < _VERDICT_STATE_TTL:
+            return cached[1]
+
+    state = "unknown"
+    on_remote = _remote_branch_contains(repo_path, sha)
+    if on_remote:
+        state = "on_remote_branch"
+    else:
+        stale = (
+            freshness is None
+            or not isinstance(freshness.get("age_s"), (int, float))
+            or freshness["age_s"] > 3600
+        )
+        if not stale:
+            state = "local_only"
+        else:
+            ident = federation.repo_identity(repo_path)
+            if ident and ident.get("kind") == "remote" and ident["identity"].startswith("github.com/"):
+                owner_repo = ident["identity"][len("github.com/"):]
+                default_branch = _default_branch_name_fast(repo_path)
+                gh_state = _github_quota.github_compare_state(owner_repo, default_branch, sha)
+                if gh_state == "on_default":
+                    state = "on_default"
+                elif gh_state == "ahead":
+                    state = "local_only"
+
+    with _verdict_state_lock:
+        _verdict_state_cache[key] = (now, state)
+    return state
+
+
+def _commit_verdict_state(
+    conn: sqlite3.Connection, repo_name: str, repo_path: str, sha: str, freshness: dict | None
+) -> str:
+    """Classify one commit's relationship to origin/<default> (MEMORY-7,
+    multi-machine S2, design spec section 6): 'on_default', 'on_remote_branch',
+    'local_only', or 'unknown'. Only reaches out to GitHub (quota-gated,
+    cached) when the local fetched view of origin is stale or missing --
+    a fresh local view is trusted outright."""
+    if _commit_on_main(conn, repo_name, sha):
+        return "on_default"
+    return _classify_non_main_commit(repo_path, sha, freshness)
+
+
 def is_shipped(topic: str) -> dict:
     """Determine whether a topic has been shipped. Wraps `_is_shipped_impl`
-    to annotate a NOT SHIPPED verdict with clone staleness, since a behind
-    local clone and 'never shipped' look identical to the search below, and
-    every verdict with how fresh our knowledge of origin is."""
+    to annotate the verdict with clone staleness, the top evidence commit's
+    relationship to origin/<default> (on_default / on_remote_branch /
+    local_only / unknown, per multi-machine S2), and how fresh our knowledge
+    of origin is."""
     result = _is_shipped_impl(topic)
+    if not (topic or "").strip():
+        return result
     roots = discover_repo_roots()
     detected_repo, _ = detect_named_repo((topic or "").strip(), roots)
-    repo_path = roots.get(detected_repo) if detected_repo else None
-    if repo_path:
-        freshness = _origin_freshness_info(repo_path)
-        if freshness:
-            result["origin_freshness"] = freshness
-        if not result.get("shipped"):
-            behind = _clone_behind_count(repo_path)
-            if behind:
-                result["stale_clone"] = {"repo": detected_repo, "behind": behind}
+    evidence = result.get("evidence") or []
+    top_repo_name = evidence[0]["repo"] if evidence else detected_repo
+    repo_path = roots.get(top_repo_name) if top_repo_name else None
+
+    freshness = _origin_freshness_info(repo_path) if repo_path else None
+    if freshness:
+        result["origin_freshness"] = freshness
+
+    node = federation.node_identity().get("display_name") or "this machine"
+
+    if evidence and repo_path:
+        conn = _get_connection()
+        top_state = _commit_verdict_state(conn, top_repo_name, repo_path, evidence[0]["commit"], freshness)
+        evidence[0]["state"] = top_state
+        if top_state == "on_remote_branch":
+            result["verdict"] = "PUSHED, NOT MERGED"
+        elif top_state == "local_only":
+            result["verdict"] = f"COMMITTED ON {node}, NOT PUSHED"
+        else:
+            # "on_default" and "unknown" both keep the plain SHIPPED verdict:
+            # a qualifying commit was found, and 'unknown' only means we
+            # could not further verify its reachability within budget.
+            result["verdict"] = "SHIPPED"
+    elif not result.get("shipped"):
+        behind = _clone_behind_count(repo_path) if repo_path else None
+        if behind:
+            result["stale_clone"] = {"repo": detected_repo, "behind": behind}
+        age_note = ""
+        if freshness and isinstance(freshness.get("age_s"), (int, float)):
+            mins = max(0, int(freshness["age_s"] // 60))
+            age_note = f"; {freshness.get('origin_ref') or 'origin'} fetched {mins} min ago"
+        result["verdict"] = f"NOT FOUND on reachable nodes ({node}{age_note})"
     return result
 
 

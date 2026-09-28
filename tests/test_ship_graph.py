@@ -1046,4 +1046,141 @@ def test_is_shipped_omits_origin_freshness_when_never_fetched(mock_graph_env):
     assert res.get("origin_freshness") is None
 
 
+# MEMORY-7 (multi-machine S2): shipped verdict states (on_default /
+# on_remote_branch / local_only / unknown), GitHub compare verification of
+# the top SHA, and the richer verdict wording.
+
+def _isolated_node_home(tmp_path, monkeypatch):
+    """federation.node_identity() reads $HOME/.claude/command-center/node.json
+    -- point it at a scratch home so tests never touch the real one, and
+    return the display name it will report."""
+    home = tmp_path / "node-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    import federation
+    return federation.node_identity()["display_name"]
+
+
+def test_evidence_state_on_default_for_main_commit(mock_graph_env, tmp_path, monkeypatch):
+    """A commit already on the locally known default branch is on_default
+    with zero extra subprocesses (no remote-branch check, no GitHub call)."""
+    _isolated_node_home(tmp_path, monkeypatch)
+    res = ship_graph.is_shipped("Did we ship biometric webauthn login in test-repo?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["state"] == "on_default"
+    assert res["verdict"] == "SHIPPED"
+
+
+def test_evidence_state_on_remote_branch_for_pushed_not_merged(mock_graph_env, tmp_path, monkeypatch):
+    """A commit pushed to a non-default branch but not merged into the
+    default branch is on_remote_branch, verdict PUSHED, NOT MERGED -- found
+    via `git branch -r --contains`, no GitHub call needed. Uses a local
+    branch named 'next': the commit scan (`_sync_git_repos`) only walks
+    HEAD plus whichever of next/main/master exist, so an arbitrary branch
+    name would never even enter the commits table."""
+    env = mock_graph_env
+    _isolated_node_home(tmp_path, monkeypatch)
+    repo_dir = env["repo_dir"]
+    _add_origin_remote(repo_dir, tmp_path)
+
+    subprocess.run(["git", "checkout", "-b", "next"], cwd=repo_dir, check=True, capture_output=True)
+    (repo_dir / "glitter.py").write_text("# glitter", encoding="utf-8")
+    subprocess.run(["git", "add", "glitter.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(glitter): add glitter cursor trail effect"],
+                    cwd=repo_dir, check=True)
+    feature_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "push", "origin", "next"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "fetch", "origin"], cwd=repo_dir, check=True, capture_output=True)
+
+    ship_graph._last_sync_ts = 0.0
+    res = ship_graph.is_shipped("Did we add a glitter cursor trail effect?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == feature_sha
+    assert res["evidence"][0]["state"] == "on_remote_branch"
+    assert res["verdict"] == "PUSHED, NOT MERGED"
+
+
+def test_evidence_state_local_only_when_fresh_and_unpushed(mock_graph_env, tmp_path, monkeypatch):
+    """A fresh local view of origin (recently fetched) that still doesn't
+    contain the commit is trusted outright: local_only, no GitHub call."""
+    env = mock_graph_env
+    node_name = _isolated_node_home(tmp_path, monkeypatch)
+    repo_dir = env["repo_dir"]
+    _add_origin_remote(repo_dir, tmp_path)  # pushes the existing commit only
+
+    (repo_dir / "sparkles.py").write_text("# sparkles", encoding="utf-8")
+    subprocess.run(["git", "add", "sparkles.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(sparkles): add sparkle export for dashboard widgets"],
+                    cwd=repo_dir, check=True)
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    ship_graph._last_sync_ts = 0.0
+    # An unrelated query still syncs the repo's commits table (the sync is
+    # topic-independent), without classifying (and cross-run caching) the
+    # sparkles commit itself under a stale freshness reading.
+    ship_graph.is_shipped("xyzzy unrelated query that matches nothing")
+
+    repo_path = ship_graph.discover_repo_roots()["test-repo"]
+    conn = ship_graph._get_connection()
+    conn.execute(
+        "UPDATE repos SET fetched_at = ? WHERE path = ?", (time.time(), repo_path),
+    )
+    conn.commit()
+
+    res = ship_graph.is_shipped("Did we add sparkle export for dashboard widgets?")
+    assert res["shipped"] is True
+    assert res["evidence"][0]["commit"] == new_sha
+    assert res["evidence"][0]["state"] == "local_only"
+    assert res["verdict"] == f"COMMITTED ON {node_name}, NOT PUSHED"
+
+
+def test_not_found_verdict_includes_node_name(mock_graph_env, tmp_path, monkeypatch):
+    node_name = _isolated_node_home(tmp_path, monkeypatch)
+    res = ship_graph.is_shipped("quantum flux capacitor teleportation")
+    assert res["shipped"] is False
+    assert res["verdict"].startswith("NOT FOUND on reachable nodes (")
+    assert node_name in res["verdict"]
+
+
+def test_classify_non_main_commit_warm_call_spawns_no_subprocess(mock_graph_env, tmp_path, monkeypatch):
+    """A repeated `ccc shipped` for the same not-on-main commit must not
+    re-spawn `git branch -r --contains` -- _classify_non_main_commit caches
+    per (repo_path, sha)."""
+    env = mock_graph_env
+    _isolated_node_home(tmp_path, monkeypatch)
+    repo_dir = env["repo_dir"]
+    _add_origin_remote(repo_dir, tmp_path)
+
+    subprocess.run(["git", "checkout", "-b", "next"], cwd=repo_dir, check=True, capture_output=True)
+    (repo_dir / "glitter.py").write_text("# glitter", encoding="utf-8")
+    subprocess.run(["git", "add", "glitter.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "feat(glitter): add glitter cursor trail effect"],
+                    cwd=repo_dir, check=True)
+    subprocess.run(["git", "push", "origin", "next"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "fetch", "origin"], cwd=repo_dir, check=True, capture_output=True)
+
+    ship_graph._last_sync_ts = 0.0
+    topic = "Did we add a glitter cursor trail effect?"
+    res1 = ship_graph.is_shipped(topic)
+    assert res1["evidence"][0]["state"] == "on_remote_branch"
+
+    calls = []
+    real_run = subprocess.run
+
+    def spy_run(*args, **kwargs):
+        calls.append(args)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    res2 = ship_graph.is_shipped(topic)
+    assert res2["evidence"][0]["state"] == "on_remote_branch"
+    assert calls == [], f"warm classification call spawned subprocesses: {calls}"
+
+
 

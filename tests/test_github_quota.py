@@ -407,3 +407,69 @@ class UnexpectedPayloadTest(unittest.TestCase):
 
     def test_null_data_block_degrades_to_an_error(self):
         self.assertIsNone(self._read_with_stdout('{"data": null}')["remaining"])
+
+
+class CompareStateTests(unittest.TestCase):
+    """MEMORY-7 (multi-machine S2): `gh api .../compare/...` verification of
+    a commit against origin/<default> when the local fetched view is stale.
+    Same call-count discipline as the rest of this module -- cached, and
+    gated by a bounded call budget instead of an extra `gh` round trip to
+    read the REST quota (no in-band way to do that, see the module docstring)."""
+
+    def setUp(self):
+        github_quota.reset_compare_cache()
+        self.addCleanup(github_quota.reset_compare_cache)
+
+    def test_identical_or_behind_means_on_default(self):
+        for status in ("identical", "behind"):
+            github_quota.reset_compare_cache()
+            with mock.patch.object(github_quota, "_run_gh",
+                                   return_value=_Proc(json.dumps({"status": status}))):
+                state = github_quota.github_compare_state("o/r", "main", f"sha-{status}")
+            self.assertEqual(state, "on_default")
+
+    def test_ahead_or_diverged_is_not_on_default(self):
+        for status in ("ahead", "diverged"):
+            github_quota.reset_compare_cache()
+            with mock.patch.object(github_quota, "_run_gh",
+                                   return_value=_Proc(json.dumps({"status": status}))):
+                state = github_quota.github_compare_state("o/r", "main", f"sha-{status}")
+            self.assertEqual(state, "ahead")
+
+    def test_gh_failure_is_unknown_not_a_raise(self):
+        with mock.patch.object(github_quota, "_run_gh", side_effect=OSError("boom")):
+            state = github_quota.github_compare_state("o/r", "main", "deadbeef")
+        self.assertEqual(state, "unknown")
+
+    def test_non_zero_exit_is_unknown(self):
+        with mock.patch.object(github_quota, "_run_gh",
+                               return_value=_Proc("not found", returncode=1)):
+            state = github_quota.github_compare_state("o/r", "main", "deadbeef")
+        self.assertEqual(state, "unknown")
+
+    def test_on_default_result_is_cached_forever(self):
+        with mock.patch.object(github_quota, "_run_gh",
+                               return_value=_Proc(json.dumps({"status": "identical"}))) as run:
+            github_quota.github_compare_state("o/r", "main", "deadbeef")
+            github_quota.github_compare_state("o/r", "main", "deadbeef")
+            github_quota.github_compare_state("o/r", "main", "deadbeef")
+        self.assertEqual(run.call_count, 1)
+
+    def test_call_budget_gates_further_calls_and_returns_unknown(self):
+        os.environ["CCC_GH_COMPARE_MAX_PER_HOUR"] = "1"
+        self.addCleanup(lambda: os.environ.pop("CCC_GH_COMPARE_MAX_PER_HOUR", None))
+        with mock.patch.object(github_quota, "_run_gh",
+                               return_value=_Proc(json.dumps({"status": "ahead"}))) as run:
+            github_quota.github_compare_state("o/r", "main", "sha-one")
+            second = github_quota.github_compare_state("o/r", "main", "sha-two")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(second, "unknown")
+
+    def test_argv_shape(self):
+        with mock.patch.object(github_quota, "_run_gh",
+                               return_value=_Proc(json.dumps({"status": "identical"}))) as run:
+            github_quota.github_compare_state("amirfish1/claude-command-center", "main", "abc123")
+        argv = run.call_args[0][0]
+        self.assertEqual(
+            argv, ["api", "repos/amirfish1/claude-command-center/compare/main...abc123"],
+        )
