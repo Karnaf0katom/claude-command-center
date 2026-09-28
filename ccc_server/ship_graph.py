@@ -727,9 +727,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
     )
 
     row_v = conn.execute("SELECT val FROM meta WHERE key = 'schema_v'").fetchone()
-    if not row_v or row_v[0] != "2":
+    # v3: the commit scan now walks origin/<default> too; force one rescan so
+    # already-gated repos pick up commits their behind clones never indexed.
+    if not row_v or row_v[0] != "3":
         conn.execute("UPDATE repos SET head_sha = ''")
-        conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('schema_v', '2')")
+        conn.execute("INSERT OR REPLACE INTO meta (key, val) VALUES ('schema_v', '3')")
     conn.commit()
 
 
@@ -779,12 +781,22 @@ def _sync_git_repos(conn: sqlite3.Connection, roots: dict[str, str], days: float
             except Exception:
                 pass
 
+        # Walk origin/<b> too, not just the local branch: a clone that is
+        # behind origin (never pulled) would otherwise never index commits
+        # that already shipped, and `ccc shipped` says NOT FOUND for them.
+        # One for-each-ref call also sees packed refs, unlike a loose-file stat.
         branches = ["HEAD"]
-        for b in ["next", "main", "master"]:
-            p_ref = Path(repo_path) / ".git" / "refs" / "heads" / b
-            p_rem = Path(repo_path) / ".git" / "refs" / "remotes" / "origin" / b
-            if p_ref.exists() or p_rem.exists():
-                branches.append(b)
+        try:
+            fr = subprocess.run(
+                ["git", "-C", repo_path, "for-each-ref", "--format=%(refname:short)",
+                 "refs/heads/next", "refs/heads/main", "refs/heads/master",
+                 "refs/remotes/origin/next", "refs/remotes/origin/main", "refs/remotes/origin/master"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if fr.returncode == 0:
+                branches += [x.strip() for x in fr.stdout.splitlines() if x.strip()]
+        except Exception:
+            pass
 
         args = ["git", "-C", repo_path, "log"] + list(dict.fromkeys(branches))
         if days > 0:

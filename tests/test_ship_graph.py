@@ -916,6 +916,12 @@ def test_sync_git_repos_gate_reacts_to_origin_move_without_local_head_change(moc
         (str(env["repo_dir"]),),
     ).fetchone()
     assert row2 == (env["commit_sha"], new_origin_head)
+    # The upstream-only commit must be indexed even though the local branch
+    # never pulled it (real case: a clone 4 behind hid a shipped commit).
+    indexed = conn.execute(
+        "SELECT on_main FROM commits WHERE hash = ?", (new_origin_head,)
+    ).fetchone()
+    assert indexed == (1,)
 
 
 def test_check_and_fetch_origin_skips_fetch_when_already_current(mock_graph_env, tmp_path, monkeypatch):
