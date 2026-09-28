@@ -28448,6 +28448,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not self._phone_access_local_only():
                 return
             self.send_json(phone_access.nodes_overview())
+        elif path == "/api/config-consent":
+            # Every change CCC would make to agent config outside its own
+            # dir (hooks, skills), with the user's decision and exact diffs.
+            try:
+                self.send_json(config_consent.overview())
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/network-config":
             # What origins / bind host are trusted on this run, plus a live
             # snapshot of the tailnet so the UI can offer a "trust my
@@ -29921,6 +29928,45 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(res)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
+            return
+        if path.startswith("/api/config-consent/"):
+            # Writing to the user's agent config is local-only: a peer let in
+            # through phone access / a tunnel cannot approve it.
+            if phone_access.is_remote_request(self.client_address[0], self.headers):
+                self.send_json({"ok": False, "error": "config consent is local-only"}, 403)
+                return
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({"ok": False, "error": "invalid JSON"}, 400)
+                return
+            if not isinstance(payload, dict):
+                payload = {}
+            via = str(payload.get("via") or "ui")[:16]
+            try:
+                if path == "/api/config-consent/decide":
+                    decisions = payload.get("decisions")
+                    if not isinstance(decisions, dict) or not decisions:
+                        self.send_json({"ok": False, "error": "decisions must be a non-empty object"}, 400)
+                        return
+                    res = config_consent.decide(decisions, via=via)
+                elif path == "/api/config-consent/revoke":
+                    ids = payload.get("ids")
+                    if ids is not None and not isinstance(ids, list):
+                        self.send_json({"ok": False, "error": "ids must be a list"}, 400)
+                        return
+                    res = config_consent.revoke(ids or None, via=via)
+                elif path == "/api/config-consent/notice-ack":
+                    res = config_consent.ack_notice()
+                else:
+                    self.send_json({"ok": False, "error": "not found"}, 404)
+                    return
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+                return
+            self.send_json(res, 200 if res.get("ok") else 409)
             return
         if path == "/api/history/retention":
             # Consent-only: the OOBE / pill warning posts here when the user
@@ -39305,16 +39351,12 @@ def migrate_state_dir():
         print(f"  [migrate] Could not rename state dir ({e}). Continuing with {new}.")
 
 
-def ensure_hooks_installed():
-    """Ensure our PostToolUse and Stop hooks are registered in ~/.claude/settings.json.
+def _sync_hook_scripts():
+    """Copy this repo's hooks/ scripts into ~/.claude/command-center/hooks/.
 
-    Also copies the hook scripts from this repo's hooks/ into
-    ~/.claude/command-center/hooks/ so ~/.claude/settings.json can reference
-    them from a stable location independent of where this repo is checked out.
-    Migrates legacy `log-viewer/hooks/` references to the new path in-place.
+    CCC's own directory, so no consent needed; the hook entries that point
+    here are only written into agent config after approval (config_consent).
     """
-    # Copy hook scripts into the well-known install location, keeping them
-    # in sync with whatever version is in this repo.
     import shutil
     repo_hooks = CCC_ROOT / "hooks"
     HOOK_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -39330,219 +39372,27 @@ def ensure_hooks_installed():
         except OSError as e:
             print(f"  [hooks] Could not copy {name}: {e}")
 
-    settings_path = Path.home() / ".claude" / "settings.json"
-    try:
-        if settings_path.exists():
-            settings = json.loads(settings_path.read_text())
-        else:
-            settings = {}
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"  [hooks] Could not read settings.json: {e}")
-        return
 
-    hooks = settings.setdefault("hooks", {})
+def ensure_hooks_installed():
+    """Install CCC's Claude Code hooks into ~/.claude/settings.json.
 
-    # Rewrite CCC-owned hook entries to use an absolute Python executable. Claude
-    # Code hook environments can run with a minimal PATH, where bare `python3`
-    # exits 127 before our script even starts.
-    rewrote_hooks = False
-    for kind in ("PreToolUse", "PostToolUse", "Notification", "Stop", "PreCompact", "PostCompact"):
-        for entry in hooks.get(kind, []) or []:
-            for h in entry.get("hooks", []) or []:
-                cmd = h.get("command", "")
-                normalized, changed = _normalize_ccc_hook_command(cmd)
-                if changed:
-                    h["command"] = normalized
-                    rewrote_hooks = True
-
-    # PreToolUse hook — writes an in-flight marker so the dashboard can show
-    # "running X for Ns" while a long tool is still executing, and blocks on a
-    # relayed AskUserQuestion (needs the long `timeout` below to wait out the
-    # user's answer).
-    pre_tool_hooks = hooks.setdefault("PreToolUse", [])
-    has_pre_tool = any(
-        "pre-tool-use.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in pre_tool_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_pre_tool:
-        pre_tool_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("pre-tool-use.py"),
-                "timeout": PRETOOLUSE_HOOK_TIMEOUT,
-            }]
-        })
-        print("  [hooks] Installed PreToolUse hook")
-    else:
-        # Migrate older installs: ensure our pre-tool-use hook carries the long
-        # timeout so AskUserQuestion relay can block until answered.
-        for entry in pre_tool_hooks:
-            for h in entry.get("hooks", []) or []:
-                cmd = h.get("command", "")
-                if ("pre-tool-use.py" in cmd and HOOK_MARKER in cmd
-                        and h.get("timeout") != PRETOOLUSE_HOOK_TIMEOUT):
-                    h["timeout"] = PRETOOLUSE_HOOK_TIMEOUT
-                    rewrote_hooks = True
-                    print("  [hooks] Set PreToolUse hook timeout for question relay")
-
-    # PostToolUse hook
-    post_tool_hooks = hooks.setdefault("PostToolUse", [])
-    has_post_tool = any(
-        "post-tool-use.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in post_tool_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_post_tool:
-        post_tool_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("post-tool-use.py")
-            }]
-        })
-        print("  [hooks] Installed PostToolUse hook")
-
-    # Notification hook — fires when Claude Code asks for permission (or
-    # otherwise wants the user's attention). Drives a precise "Needs
-    # approval" badge on the kanban card, replacing the brittle
-    # pending_tool/age heuristic the UI used to rely on.
-    notification_hooks = hooks.setdefault("Notification", [])
-    has_notification = any(
-        "notification.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in notification_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_notification:
-        notification_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("notification.py")
-            }]
-        })
-        print("  [hooks] Installed Notification hook")
-
-    # Stop hook
-    stop_hooks = hooks.setdefault("Stop", [])
-    has_stop = any(
-        HOOK_MARKER in h.get("command", "")
-        for entry in stop_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_stop:
-        stop_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("stop.py")
-            }]
-        })
-        print("  [hooks] Installed Stop hook")
-
-    # PreCompact / PostCompact hooks — mark a session as mid-/compact so the
-    # dashboard can show a "Compacting…" badge instead of a stale tool pill.
-    # No long timeout needed: unlike PreToolUse (which blocks on a relayed
-    # AskUserQuestion answer), these just write/clear a marker file and return.
-    pre_compact_hooks = hooks.setdefault("PreCompact", [])
-    has_pre_compact = any(
-        "pre-compact.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in pre_compact_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_pre_compact:
-        pre_compact_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("pre-compact.py")
-            }]
-        })
-        print("  [hooks] Installed PreCompact hook")
-
-    post_compact_hooks = hooks.setdefault("PostCompact", [])
-    has_post_compact = any(
-        "post-compact.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in post_compact_hooks
-        for h in entry.get("hooks", [])
-    )
-    if not has_post_compact:
-        post_compact_hooks.append({
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": _ccc_hook_command("post-compact.py")
-            }]
-        })
-        print("  [hooks] Installed PostCompact hook")
-
-    if (not has_pre_tool or not has_post_tool or not has_notification
-            or not has_stop or not has_pre_compact or not has_post_compact
-            or rewrote_hooks):
-        tmp_path = settings_path.with_suffix(".tmp")
-        try:
-            tmp_path.write_text(json.dumps(settings, indent=4) + "\n")
-            tmp_path.replace(settings_path)
-            if rewrote_hooks:
-                print("  [hooks] Normalized Claude Code hook commands in settings.json")
-            print("  [hooks] settings.json updated")
-        except OSError as e:
-            print(f"  [hooks] Failed to write settings.json: {e}")
-            tmp_path.unlink(missing_ok=True)
+    Only runs after the user approved the "claude-hooks" item (see
+    ccc_server/config_consent.py, which owns the entries, migration of
+    legacy/relative commands, and the format-preserving write).
+    """
+    _sync_hook_scripts()
+    err = config_consent.ClaudeHooks().apply(config_consent.default_ctx())
+    if err:
+        print(f"  [hooks] {err}")
 
 
 def ensure_codex_hooks_installed():
-    """Ensure the Codex PostCompact re-orientation hook (MEMO-FIX-16, parity
-    with ensure_hooks_installed's Claude Code PostCompact hook) is registered
-    in ~/.codex/hooks.json.
-
-    Idempotent and additive only: other third-party tools already own entries
-    in this file and must be left untouched.
-    Codex's hook subsystem also gates a *new* command entry behind a one-time
-    interactive trust prompt on next `codex` launch (hook commands are
-    "Untrusted" until the user approves the hash) — this function cannot and
-    should not bypass that; it only registers the entry.
-    """
-    hooks_path = Path.home() / ".codex" / "hooks.json"
-    try:
-        if hooks_path.exists():
-            config = json.loads(hooks_path.read_text())
-        else:
-            config = {}
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"  [hooks] Could not read Codex hooks.json: {e}")
-        return
-
-    hooks = config.setdefault("hooks", {})
-    post_compact_hooks = hooks.setdefault("PostCompact", [])
-    has_post_compact = any(
-        "post-compact-codex.py" in h.get("command", "") and HOOK_MARKER in h.get("command", "")
-        for entry in post_compact_hooks
-        for h in entry.get("hooks", []) or []
-    )
-    if has_post_compact:
-        return
-
-    post_compact_hooks.append({
-        "hooks": [{
-            "type": "command",
-            "command": _ccc_hook_command("post-compact-codex.py"),
-            "timeout": 5,
-        }],
-    })
-    tmp_path = hooks_path.with_suffix(".tmp")
-    try:
-        hooks_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(config, indent=2) + "\n")
-        tmp_path.replace(hooks_path)
-        print(
-            "  [hooks] Installed Codex PostCompact hook (needs one-time trust "
-            "approval on next `codex` launch)"
-        )
-    except OSError as e:
-        print(f"  [hooks] Failed to write Codex hooks.json: {e}")
-        tmp_path.unlink(missing_ok=True)
+    """Install the Codex PostCompact re-orientation hook (MEMO-FIX-16) into
+    ~/.codex/hooks.json. Consent-gated like ensure_hooks_installed; additive
+    only. Codex still asks the user to trust the new command once."""
+    err = config_consent.CodexHooks().apply(config_consent.default_ctx())
+    if err:
+        print(f"  [hooks] {err}")
 
 
 _adopt_ccc_module("fleet")
@@ -39559,6 +39409,12 @@ if "ccc_server.phone_access" in sys.modules:
     phone_access = _pa_importlib.reload(sys.modules["ccc_server.phone_access"])
 else:
     from ccc_server import phone_access
+# Consent gate for agent-config writes: namespace import (generic names).
+if "ccc_server.config_consent" in sys.modules:
+    import importlib as _cc_importlib
+    config_consent = _cc_importlib.reload(sys.modules["ccc_server.config_consent"])
+else:
+    from ccc_server import config_consent
 
 def main():
     # State files, logs and transcripts hold secrets: create everything owner-only.
@@ -39612,10 +39468,11 @@ def main():
     # cold_resume events right after this line implicates restart-EOF as the
     # cause of warm processes dying.
     _resume_ledger_append("server_start", pid=os.getpid())
-    ensure_hooks_installed()
-    ensure_codex_hooks_installed()
+    # Hooks and skills go into the user's agent config only after they
+    # approve each item (dashboard modal or `ccc consent`).
+    _sync_hook_scripts()
+    config_consent.startup()
     _schedule_claude_spawn_capability_probe()
-    install_orchestration_skill()
     worker_health = _control_plane_request("health")
     worker_capabilities = set(
         ((worker_health.get("worker") or {}).get("capabilities") or [])

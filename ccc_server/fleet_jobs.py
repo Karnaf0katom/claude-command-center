@@ -1585,58 +1585,10 @@ def write_port_file(bind_host, port=None):
     return url
 
 
-def _install_skill(name: str, skills_root: Path = None):
-    """Install (or refresh) a bundled skill into <skills_root>/<name>/SKILL.md
-    (default ~/.claude/skills). Idempotent — only writes when the source
-    differs from the destination."""
-    import shutil
-    src = _core.CCC_ROOT / "skills" / f"{name}.md"
-    if not src.exists():
-        print(f"  [skill] source not found at {src}; skipping")
-        return
-    if skills_root is None:
-        skills_root = Path.home() / ".claude" / "skills"
-    dst_dir = skills_root / name
-    dst = dst_dir / "SKILL.md"
-    try:
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        if dst.exists() and dst.read_bytes() == src.read_bytes():
-            print(f"  [skill] {name} already up to date ({skills_root})")
-            return
-        shutil.copy2(src, dst)
-        print(f"  [skill] installed {name} -> {dst}")
-    except OSError as e:
-        print(f"  [skill] could not install {name} ({e})")
-
-
-def _skill_install_roots():
-    """Skill destinations: always ~/.claude/skills; also ~/.codex/skills when
-    Codex is present (its home dir exists or its CLI resolves). Codex reads
-    the same agent-skills SKILL.md layout and ignores Claude-only frontmatter."""
-    roots = [Path.home() / ".claude" / "skills"]
-    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-    try:
-        codex_present = codex_home.is_dir() or _core._resolve_codex_bin().get("available")
-    except Exception:
-        codex_present = False
-    if codex_present:
-        roots.append(codex_home / "skills")
-    return roots
-
-
-def install_orchestration_skill():
-    """Install all bundled CCC skills. Skipped when CCC_SKIP_SKILL_INSTALL=1."""
-    if os.environ.get("CCC_SKIP_SKILL_INSTALL", "").strip().lower() in ("1", "true", "yes", "on"):
-        print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
-        return
-    for root in _skill_install_roots():
-        _install_skill("ccc-orchestration", root)
-        _install_skill("group-chat-checkin", root)
-        # W86 ecosystem glue: bridge superpowers plans to Watchtower queues,
-        # and spawn browser-driven verification lanes. Installed so the
-        # "CCC works with your skills" integrations are present out of the box.
-        _install_skill("superpowers-to-watchtower", root)
-        _install_skill("fleet-verify", root)
+# Bundled skills (skills/*.md) are installed into ~/.claude/skills and
+# ~/.codex/skills only after the user approves them: see
+# ccc_server/config_consent.py (BundledSkill). CCC_SKIP_SKILL_INSTALL=1 still
+# turns skill installs off entirely.
 
 
 def _raise_open_file_limit(min_soft=2048):
