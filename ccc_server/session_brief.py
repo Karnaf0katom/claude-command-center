@@ -29,6 +29,8 @@ import sys
 import time
 from pathlib import Path
 
+import federation
+
 from ccc_server import lineage as _lineage
 from ccc_server import session_fts as _sfts
 from ccc_server import ship_graph as _sg
@@ -253,6 +255,29 @@ def _artifacts_outside_repos(files: list[str], roots: dict) -> list[str]:
     return out
 
 
+def _ref_owner_node(ref: str) -> str | None:
+    """This session ref's owning node_id if it's a federation global ref
+    (`<node-uuid>:<native-sid>`), else None -- including for a bare/local
+    sid, which carries no node prefix at all."""
+    if not ref:
+        return None
+    node, _native = federation.parse_session_ref(ref)
+    return node
+
+
+def _node_tags(refs: list[str]) -> dict[str, str]:
+    """{ref: owner_node_id} for every ref in `refs` that names a peer other
+    than this node -- local refs (the common single-machine case) are left
+    out entirely, so a caller can tell "this is local" from "absent"."""
+    here = federation.node_id()
+    tags = {}
+    for ref in refs:
+        node = _ref_owner_node(ref)
+        if node and node != here:
+            tags[ref] = node
+    return tags
+
+
 def _resume_command(engine: str, sid: str, cwd: str) -> str:
     fn = _ENGINE_RESUME.get(engine)
     if fn:
@@ -317,6 +342,8 @@ def brief(query: str) -> dict:
     roots = _sg.discover_repo_roots()
     repo_root = roots.get(meta.get("repo", ""), "")
     lineage = _lineage.chain_summary(conn, sid)
+    children = _lineage.spawn_children_of(sid)
+    nodes = _node_tags([lineage["parent"], lineage["latest"], *lineage["continuation_ancestors"], *children])
 
     def _date(ts):
         return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
@@ -344,4 +371,8 @@ def brief(query: str) -> dict:
         "parent": lineage["parent"],
         "latest": lineage["latest"],
         "continuation_ancestors": lineage["continuation_ancestors"],
+        "children": children,
+        # {ref: owner_node_id} for any of the refs above that name a peer
+        # node (multi-machine spec S6) -- empty on a single-machine setup.
+        "nodes": nodes,
     }

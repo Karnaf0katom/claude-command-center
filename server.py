@@ -32512,6 +32512,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             target_node = str(payload.get("node") or "").strip()
             if target_node and target_node != federation.node_id():
                 proxied, proxied_status = _federation_spawn_on_node(target_node, payload)
+                _federation_record_cross_node_spawn_edge(payload, proxied)
                 self.send_json(proxied, proxied_status)
                 return
             prompt = _decode_over_url_encoded_text(payload.get("prompt") or "").strip()

@@ -753,6 +753,32 @@ def _federation_spawn_on_node(node_ref, payload):
     return result, status
 
 
+def _federation_record_cross_node_spawn_edge(payload, proxied):
+    """Multi-machine S6: after `_federation_spawn_on_node` places a spawn on
+    a peer, record the child as a global ref in THIS node's own session
+    graph too. Without this, only the peer's side of the edge exists (its
+    `_record_spawn_to_registry` already accepts the globalized parent ref
+    `_federation_spawn_on_node` sends) -- the dispatching node itself has no
+    record that its session has a child living elsewhere, so `ccc brief`/
+    family-tree queries against the LOCAL parent never find it.
+
+    Best-effort: a failed/unresolved spawn (no `ref`) or a spawn with no
+    parent linkage records nothing, same as a same-node spawn would.
+    """
+    if not (isinstance(proxied, dict) and proxied.get("ok") and proxied.get("ref")):
+        return
+    report_to, _ = _core._normalize_return_address(payload)
+    parent, _ = _core._normalize_spawn_parent_session_id(payload, report_to=report_to)
+    if not parent:
+        return
+    _core._session_graph_add_edge(
+        parent, proxied["ref"],
+        source="ccc-spawn-cross-node",
+        engine=str(payload.get("engine") or "").strip(),
+        resumable=False,
+    )
+
+
 def _federation_handle_pair_request(data):
     """Inbound pairing: a peer (which already proved loopback/SSH access)
     introduces itself with a shared secret. Store it; return our identity.
