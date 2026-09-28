@@ -88,7 +88,16 @@
   .error { color: #ff6b6b; padding: 18px; }
   .tab-intro { max-width: 1080px; margin: 14px auto 0; padding: 0 22px; color: var(--ink-dim); font-size: 13px; }
   .tab-intro code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
-  .chart-wrap { width: 100%; }
+  .chart-wrap { width: 100%; position: relative; }
+  .chart-hit { fill: transparent; cursor: crosshair; }
+  .chart-hit:hover, .chart-hit.pinned { fill: rgba(255,255,255,0.06); }
+  #chartTip {
+    position: fixed; z-index: 10; pointer-events: none; display: none;
+    background: #1a2230; border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 9px; font-size: 13px; color: var(--ink); white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  }
+  #chartTip .tip-day { color: var(--ink-dim); font-size: 12px; }
   .chart-svg { width: 100%; height: auto; display: block; max-height: 220px; }
   .chart-svg text { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
   .headline { background: linear-gradient(180deg, #131a24, var(--panel)); }
@@ -100,6 +109,7 @@
   table.explain td.stat-cell { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
   table.explain .pill { white-space: nowrap; }
   .kind-floor { border-color: #2f5d3a; color: var(--good); }
+  .kind-best { border-color: #2f4a6d; color: #7fb2ff; }
   .kind-ceiling { border-color: #5d4a2f; color: var(--accent); }
   .trust { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; margin-right: 4px; }
   .trust-high { color: var(--good); }
@@ -198,7 +208,7 @@ function renderOverview(d) {
   const today = pings[0] || {};
   const openToday = opens[0] || {};
 
-  // "Without me" is the honest headline. "With me" is kept beside it so the
+  // Opt-in "without me" vs "with me" stay side by side in the table so the
   // gap is visible instead of being a thing you have to remember.
   const dailyFloor = today.active_installs ?? 0;
   const dailyFloorWithMe = today.active_installs_all ?? dailyFloor;
@@ -221,7 +231,7 @@ function renderOverview(d) {
 
   const rows = [
     {
-      name: "Daily users",
+      name: "Opt-in daily installs",
       value: dailyFloor,
       withMe: dailyFloorWithMe,
       kind: "floor",
@@ -251,14 +261,12 @@ function renderOverview(d) {
       name: "Anonymous installs today",
       value: anonToday,
       withMe: openToday.boots_all ?? anonToday,
-      kind: anonTrusted ? "real total" : "still rolling out",
-      what: "Installs that ran today and sent the anonymous daily beacon. No opt-in needed.",
-      trust: anonTrusted ? "high" : "low",
+      kind: "best estimate",
+      what: "Installs that ran today and sent the anonymous daily beacon. No opt-in needed, so it sees every install that has not set the kill switch.",
+      trust: anonTrusted ? "high" : "medium",
       why: anonTrusted
         ? "Most of the fleet is on the daily beacon, so this is the closest thing to true daily usage."
-        : v7New === 0
-          ? `No active install is on ${DAILY_BEACON_SINCE}+ yet, so this still counts restarts rather than installs and reads far too low. It becomes the real daily number as the fleet updates.`
-          : `Only ${rolloutPct}% of active installs are on ${DAILY_BEACON_SINCE}+. The rest only beacon when they restart, so this number still reads too low.`,
+        : `${rolloutPct}% of opt-in installs are on ${DAILY_BEACON_SINCE}+. Older builds beacon once per restart instead of once per day, which can add a few extra counts (restarts) or miss a long-running install. Those errors pull in opposite directions; the distinct-IP count (${anonIpsToday}) is a sanity check from below.`,
     },
     {
       name: "Ever opted in",
@@ -271,7 +279,7 @@ function renderOverview(d) {
     },
   ];
 
-  const KIND_CLASS = { floor: "kind-floor", ceiling: "kind-ceiling" };
+  const KIND_CLASS = { floor: "kind-floor", ceiling: "kind-ceiling", "best estimate": "kind-best" };
 
   return `
     <p class="tab-intro">
@@ -283,20 +291,26 @@ function renderOverview(d) {
         <h2>How many daily users are there</h2>
         <div class="headline-row">
           <div>
-            <div class="stat-big">${dailyFloor}</div>
-            <div class="stat-sub">without me — opt-in installs that ran today</div>
+            <div class="stat-big">${anonToday}</div>
+            <div class="stat-sub">best estimate: installs that ran today</div>
           </div>
-          <div class="headline-sep">vs</div>
+          <div class="headline-sep">from</div>
           <div>
-            <div class="stat-big stat-dim">${dailyFloorWithMe}</div>
-            <div class="stat-sub">with me included</div>
+            <div class="stat-big stat-dim">${anonIpsToday}</div>
+            <div class="stat-sub">distinct networks</div>
+          </div>
+          <div class="headline-sep">of which</div>
+          <div>
+            <div class="stat-big stat-dim">${dailyFloor}</div>
+            <div class="stat-sub">opted in to the detailed ping</div>
           </div>
         </div>
         <p class="muted headline-note">
-          This is a <strong>floor</strong>, not the truth: it only counts installs whose owner clicked <em>Enable</em> on the telemetry banner. Real daily usage is this number plus an unknown number of installs that never opted in.
+          The best estimate is the <strong>anonymous daily beacon</strong>: every running install sends it once per UTC day, with no install id and no consent step, so it covers people who never clicked <em>Enable</em>.
+          The opt-in count (${dailyFloor}) is only the subset that said yes, so it is a hard floor, not the answer.
           ${anonTrusted
-            ? `The anonymous counter now covers those too — see <strong>Anonymous installs today (${anonToday})</strong> below for the fuller picture.`
-            : `The anonymous counter is meant to cover those, but it only became a true daily count in ${DAILY_BEACON_SINCE}; until installs update it still reads too low${v7New === 0 ? "" : ` (${rolloutPct}% updated so far)`}.`}
+            ? ""
+            : `Caveat: ${100 - rolloutPct}% of installs are still on builds older than ${DAILY_BEACON_SINCE}, which beacon per restart instead of per day, so the estimate can wobble by a few either way.`}
         </p>
       </div>
 
@@ -382,7 +396,7 @@ function renderOptIn(d) {
       Richer payload — install id, version, engines on PATH, last-active date, sessions in last 24h.
       Fires once per UTC day, <strong>only after</strong> the user clicks <em>Enable</em> on the dashboard banner.
       <code>CCC_TELEMETRY_DISABLED=1</code> kills it.
-      <br><strong>"Active today" is the honest daily-user number</strong> — installs that had CCC running today and have opted in. It is a floor: installs that never opted in are only visible on the anonymous tab.
+      <br><strong>"Active today" is a floor</strong>: it only counts installs that opted in. The best daily-usage estimate is on the anonymous tab, which every install sends.
     </p>
     <div class="grid">
       <div class="card">
@@ -393,7 +407,7 @@ function renderOptIn(d) {
       <div class="card">
         <h2>Active today</h2>
         <div class="stat-big">${today}</div>
-        <div class="stat-sub">opt-in installs that ran today — the daily-user floor</div>
+        <div class="stat-sub">opt-in installs that ran today (a floor; see the anonymous tab for the best estimate)</div>
       </div>
       <div class="card">
         <h2>Active last 7d</h2>
@@ -413,7 +427,7 @@ function renderOptIn(d) {
 
       <div class="card wide">
         <h2>Active installs by day (last 3 months)</h2>
-        ${timelineChart(pings90, "active_installs", { stroke: "#4ade80", fill: "rgba(74,222,128,0.18)" })}
+        ${timelineChart(pings90, "active_installs", { stroke: "#4ade80", fill: "rgba(74,222,128,0.18)", tip: r => `${r.active_installs ?? 0} opt-in installs active` })}
         <details style="margin-top:10px">
           <summary class="muted" style="cursor:pointer">exact daily numbers</summary>
           <div style="margin-top:10px">${dayBars(pings, "active_installs")}</div>
@@ -501,13 +515,13 @@ function renderBeacon(d) {
 
       <div class="card wide">
         <h2>Distinct IPs by day (last 3 months)</h2>
-        ${timelineChart(opens90, "distinct_ips", { stroke: "#ffd266", fill: "rgba(255,210,102,0.18)" })}
+        ${timelineChart(opens90, "distinct_ips", { stroke: "#ffd266", fill: "rgba(255,210,102,0.18)", tip: r => `${r.distinct_ips ?? 0} distinct IPs · ${r.boots ?? 0} beacons` })}
         <p class="muted">This is the closest thing here to a daily-active-installs line. It undercounts installs behind one shared address, and before 2026-08-12 it only saw machines that happened to restart that day. Empty days mean no beacon fired (rows captured before 2026-06-08 had no ip_hash column yet).</p>
       </div>
 
       <div class="card wide">
         <h2>Total beacons by day (last 3 months)</h2>
-        ${timelineChart(opens90, "boots", { stroke: "#2563eb", fill: "rgba(37,99,235,0.18)" })}
+        ${timelineChart(opens90, "boots", { stroke: "#2563eb", fill: "rgba(37,99,235,0.18)", tip: r => `${r.boots ?? 0} beacons · ${r.distinct_ips ?? 0} distinct IPs` })}
         <details style="margin-top:10px">
           <summary class="muted" style="cursor:pointer">exact daily numbers</summary>
           <div style="margin-top:10px">
@@ -561,7 +575,7 @@ function renderDownloads(d) {
       </div>
       <div class="card wide">
         <h2>Site download clicks by day (last 3 months)</h2>
-        ${timelineChart(rows90, "download_clicks", { stroke: "#ffd266", fill: "rgba(255,210,102,0.18)" })}
+        ${timelineChart(rows90, "download_clicks", { stroke: "#ffd266", fill: "rgba(255,210,102,0.18)", tip: r => `${r.download_clicks ?? 0} download clicks` })}
         <div style="margin-top:10px">${dayBars(rows, "download_clicks")}</div>
       </div>
       <div class="card wide muted">Updated ${escapeHtml(d.generated_at)}. Cached at the edge for 5 minutes.</div>
@@ -614,9 +628,11 @@ function timelineChart(rows, key, opts) {
   const padL = 36, padR = 12, padT = 14, padB = 26;
   if (!rows.length) return '<p class="muted">No data yet.</p>';
   // Reverse to ascending time order, drop missing values.
+  const tipFn = opt.tip || (r => `${r[key] ?? 0}`);
   const points = rows.slice().reverse().map(r => ({
     day: r.day,
     val: typeof r[key] === "number" ? r[key] : 0,
+    tip: tipFn(r),
   }));
   const max = Math.max(1, ...points.map(p => p.val));
   // Round max up to next "nice" tick for the Y-axis label.
@@ -644,7 +660,13 @@ function timelineChart(rows, key, opts) {
         <text x="${padL - 6}" y="${padT + plotH + 4}" text-anchor="end" font-size="11" fill="#8a96a8">0</text>
         <path d="${areaPath}" fill="${fillColor}"/>
         <path d="${linePath}" fill="none" stroke="${strokeColor}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-        ${xy.map(d => `<circle cx="${d.x.toFixed(1)}" cy="${d.y.toFixed(1)}" r="2.5" fill="${strokeColor}"><title>${escapeHtml(d.p.day)}: ${d.p.val}</title></circle>`).join("")}
+        ${xy.map(d => `<circle cx="${d.x.toFixed(1)}" cy="${d.y.toFixed(1)}" r="2.5" fill="${strokeColor}"/>`).join("")}
+        ${xy.map(d => {
+          // Full-height column per day so hovering anywhere above a day
+          // shows its value, not just the 2.5px dot.
+          const half = (stepX || plotW) / 2;
+          return `<rect class="chart-hit" x="${(d.x - half).toFixed(1)}" y="${padT}" width="${(2 * half).toFixed(1)}" height="${plotH}" data-day="${escapeHtml(d.p.day)}" data-tip="${escapeHtml(d.p.tip)}"/>`;
+        }).join("")}
         ${xTicks.map(t => `<text x="${t.x}" y="${h - 8}" text-anchor="middle" font-size="11" fill="#8a96a8">${escapeHtml(t.label)}</text>`).join("")}
       </svg>
     </div>
@@ -701,6 +723,28 @@ function formatActive(seconds) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+
+const chartTip = document.createElement("div");
+chartTip.id = "chartTip";
+document.body.appendChild(chartTip);
+function showChartTip(hit, x, y) {
+  chartTip.innerHTML = `<div class="tip-day">${escapeHtml(hit.dataset.day)}</div><div>${escapeHtml(hit.dataset.tip)}</div>`;
+  chartTip.style.display = "block";
+  const w = chartTip.offsetWidth;
+  chartTip.style.left = `${Math.min(x + 12, window.innerWidth - w - 8)}px`;
+  chartTip.style.top = `${y - 48}px`;
+}
+document.addEventListener("pointermove", e => {
+  const hit = e.target.closest && e.target.closest(".chart-hit");
+  if (hit) showChartTip(hit, e.clientX, e.clientY);
+  else if (!document.querySelector(".chart-hit.pinned")) chartTip.style.display = "none";
+});
+document.addEventListener("click", e => {
+  document.querySelectorAll(".chart-hit.pinned").forEach(h => h.classList.remove("pinned"));
+  const hit = e.target.closest && e.target.closest(".chart-hit");
+  if (hit) { hit.classList.add("pinned"); showChartTip(hit, e.clientX, e.clientY); }
+  else chartTip.style.display = "none";
+});
 
 document.querySelectorAll(".tab").forEach(btn => {
   btn.addEventListener("click", () => {
