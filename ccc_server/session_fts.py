@@ -84,6 +84,9 @@ SECTION_CHARS = 60000
 # background (never inline on a request thread).
 SECTION_SCHEMA_VERSION = 1
 _SECTION_MIGRATE_MIN_SIZE = 100_000
+# MEMORY-18: bumped past SECTION_SCHEMA_VERSION so both migrations run in
+# order off the same `PRAGMA user_version` counter.
+KIMI_SID_SCHEMA_VERSION = 2
 _TASK_TOOLS = ("TaskCreate", "TaskUpdate", "TodoWrite")
 # bm25 weights for ssec(sid, sec, turn0, turn1, body, tasks). Task/plan text
 # is the session's own statement of what it is working on -- stickier than
@@ -539,6 +542,14 @@ def parse_kimi(path: str) -> dict | None:
     sid = session_dir.name
     if not sid:
         return None
+    # MEMORY-18: Kimi's own on-disk dir name is `session_<uuid>`, but every
+    # other harness here (Claude, Codex) uses a bare UUID -- normalize to
+    # bare so search_sessions()/recall() ids are uniform across harnesses.
+    # Kimi-specific code that needs the prefixed form back (to look the
+    # session up in Kimi's own index) already has
+    # kimi_store._canonical_kimi_session_id() for that.
+    if sid.startswith("session_"):
+        sid = sid[len("session_"):]
     cwd = ""
     try:
         with open(session_dir / "state.json", "rb") as sf:
@@ -899,6 +910,28 @@ def _migrate_sections(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {SECTION_SCHEMA_VERSION}")
 
 
+def _kimi_sid_migration_pending(conn: sqlite3.Connection) -> int:
+    """Number of already-indexed Kimi transcripts still keyed by the old
+    `session_<uuid>` sid (0 once migrated to the bare-UUID form, or on a
+    fresh DB)."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= KIMI_SID_SCHEMA_VERSION:
+        return 0
+    n = conn.execute(
+        "SELECT COUNT(*) FROM file_cache WHERE engine = 'kimi' AND mtime >= 0",
+    ).fetchone()[0]
+    if n == 0:
+        conn.execute(f"PRAGMA user_version = {KIMI_SID_SCHEMA_VERSION}")
+    return n
+
+
+def _migrate_kimi_sids(conn: sqlite3.Connection) -> None:
+    """Invalidate the (mtime, size) gate for Kimi transcripts so the sync
+    that follows re-parses them with the normalized bare-UUID sid."""
+    with conn:
+        conn.execute("UPDATE file_cache SET mtime = -1 WHERE engine = 'kimi'")
+    conn.execute(f"PRAGMA user_version = {KIMI_SID_SCHEMA_VERSION}")
+
+
 def _ollama_base() -> str:
     return os.environ.get("CCC_OLLAMA_URL", "http://localhost:11434")
 
@@ -1233,6 +1266,17 @@ def _sync_index(conn: sqlite3.Connection, force: bool = False) -> None:
                 _start_background_sync()
                 return
             _migrate_sections(conn)
+            cur = conn.execute("SELECT path, sid, mtime, size, indexed FROM file_cache")
+            have = {r[0]: (r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
+
+        # MEMORY-18: one-time re-key of already-indexed Kimi sessions from
+        # `session_<uuid>` to bare UUID. Same background-deferral shape as
+        # the section migration above.
+        if _kimi_sid_migration_pending(conn):
+            if not force:
+                _start_background_sync()
+                return
+            _migrate_kimi_sids(conn)
             cur = conn.execute("SELECT path, sid, mtime, size, indexed FROM file_cache")
             have = {r[0]: (r[1], r[2], r[3], r[4]) for r in cur.fetchall()}
 

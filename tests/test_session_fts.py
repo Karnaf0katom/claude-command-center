@@ -536,5 +536,75 @@ def test_section_migration_runs_in_background_never_inline(fts_env, monkeypatch)
 
     monkeypatch.setattr(session_fts, "_parse_file", real_parse)
     session_fts._sync_index(conn, force=True)  # what the background worker runs
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == session_fts.SECTION_SCHEMA_VERSION
+    # Both migrations share one `PRAGMA user_version` counter and chain in
+    # the same force=True sync, so a fully-migrated DB lands on the higher
+    # (Kimi sid) version, not just the section one.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == session_fts.KIMI_SID_SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM ssec_map WHERE sid = ?", (sid,)).fetchone()[0] > 0
+
+
+def _write_kimi_wire(kimi_root: Path, bare_sid: str, prompt: str, reply: str, cwd: str = "/Users/test/kimi-proj"):
+    """<kimi_root>/<project>/session_<uuid>/agents/main/wire.jsonl, matching
+    the real ~/.kimi-code/sessions/*/session_<uuid> layout parse_kimi()
+    expects (glob is kimi_root.glob('*/*/agents/main/wire.jsonl'))."""
+    session_dir = kimi_root / "proj" / f"session_{bare_sid}"
+    wire_dir = session_dir / "agents" / "main"
+    wire_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "state.json").write_text(json.dumps({"cwd": cwd}), encoding="utf-8")
+    lines = [
+        json.dumps({"type": "turn.prompt", "time": 1000, "input": [{"type": "text", "text": prompt}]}),
+        json.dumps({
+            "type": "context.append_loop_event",
+            "time": 1001,
+            "event": {"type": "content.part", "part": {"type": "text", "text": reply}},
+        }),
+    ]
+    (wire_dir / "wire.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return session_dir
+
+
+def test_search_sessions_finds_kimi_session_normalizes_sid(fts_env):
+    """MEMORY-18: Kimi's on-disk dir is `session_<uuid>`, but search_sessions()
+    must return the bare UUID like every other harness."""
+    bare_sid = "99999999-1111-2222-3333-444444444444"
+    _write_kimi_wire(fts_env["kimi"], bare_sid, "debug the narwhal pipeline", "fixed the narwhal race condition")
+
+    results = session_fts.search_sessions("narwhal race condition")
+    assert len(results) > 0
+    assert results[0]["session_id"] == bare_sid
+    assert not results[0]["session_id"].startswith("session_")
+
+
+def test_kimi_sid_migration_rekeys_existing_rows(fts_env):
+    """A DB indexed before MEMORY-18 (user_version 1, Kimi rows keyed by the
+    old `session_<uuid>` sid) gets re-parsed under the bare-UUID sid, and the
+    stale prefixed row is gone."""
+    bare_sid = "88888888-1111-2222-3333-444444444444"
+    prefixed_sid = f"session_{bare_sid}"
+    session_dir = _write_kimi_wire(fts_env["kimi"], bare_sid, "quokka migration test", "quokka migration done")
+    wire_path = session_dir / "agents" / "main" / "wire.jsonl"
+
+    conn = session_fts._get_connection()
+    session_fts._init_db(conn)
+    st = os.stat(wire_path)
+    # Simulate a pre-MEMORY-18 DB: indexed under the old prefixed sid, section
+    # migration already done (user_version 1).
+    conn.execute(
+        "INSERT INTO file_cache (path, sid, mtime, size, indexed, cwd, engine) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (str(wire_path), prefixed_sid, st.st_mtime, st.st_size, "/Users/test/kimi-proj", "kimi"),
+    )
+    conn.execute(
+        "INSERT INTO sdoc VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (prefixed_sid, "old title", "quokka migration test", "", "", "", ""),
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+
+    session_fts._last_sync_ts = 0.0
+    session_fts._sync_index(conn, force=True)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == session_fts.KIMI_SID_SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM sdoc WHERE sid = ?", (prefixed_sid,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM sdoc WHERE sid = ?", (bare_sid,)).fetchone()[0] == 1
+    results = session_fts.search_sessions("quokka migration")
+    assert results[0]["session_id"] == bare_sid
