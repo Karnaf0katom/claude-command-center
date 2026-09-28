@@ -192,6 +192,51 @@ def _federation_fetch_peer_sessions(peer, limit):
     return {**payload, "stale": False}, None
 
 
+# Per-peer browser-reachable web URL (for embedding the peer's own CCC). One
+# routed phone_access_status call per peer per TTL, never per row; failures
+# are remembered briefly so a dead peer isn't re-dialed on every poll.
+_PEER_WEB_URL_CACHE = {}
+_PEER_WEB_URL_LOCK = threading.Lock()
+_PEER_WEB_URL_TTL = 300.0
+_PEER_WEB_URL_ERR_TTL = 30.0
+
+
+def _federation_peer_web_url(node_id, allow_fetch=True):
+    """{"web_url", "web_url_state"} for one peer, cached. State: ok | none
+    (no address published) | pin (address exists but the peer has a PIN, and
+    its SameSite=Strict cookie can't ride a cross-site frame) | unknown
+    (status call failed or not yet fetched)."""
+    now = time.time()
+    with _PEER_WEB_URL_LOCK:
+        hit = _PEER_WEB_URL_CACHE.get(node_id)
+        if hit and now < hit["expires"]:
+            return dict(hit["entry"])
+    if not allow_fetch:
+        if hit:
+            return dict(hit["entry"])
+        return {"web_url": None, "web_url_state": "unknown"}
+    from ccc_server import phone_access as _phone_access
+    res = _core._federation_proxy_session_action(
+        node_id, "phone_access_status", {"qr": False}, timeout=8.0)
+    if isinstance(res, dict) and res.get("ok"):
+        url = _phone_access.web_url_from_status(res)
+        if url and res.get("pin_set"):
+            entry = {"web_url": None, "web_url_state": "pin"}
+        elif url:
+            entry = {"web_url": url, "web_url_state": "ok"}
+        else:
+            entry = {"web_url": None, "web_url_state": "none"}
+        ttl = _PEER_WEB_URL_TTL
+    else:
+        entry = {"web_url": None, "web_url_state": "unknown"}
+        ttl = _PEER_WEB_URL_ERR_TTL
+        if hit and hit["entry"].get("web_url"):
+            entry = dict(hit["entry"])  # keep the last good address
+    with _PEER_WEB_URL_LOCK:
+        _PEER_WEB_URL_CACHE[node_id] = {"entry": entry, "expires": time.time() + ttl}
+    return dict(entry)
+
+
 def _federation_row_epoch(row):
     """Sort key for federated rows: engines report `timestamp` as epoch
     seconds or an ISO string, so normalize before comparing."""
@@ -213,11 +258,16 @@ def _federation_row_epoch(row):
     return 0.0
 
 
-def _federation_federated_sessions(limit=200):
+def _federation_federated_sessions(limit=200, peers_only=False):
     """One session list across every node: local + each paired peer, each
-    row carrying its owning node, global ref, and staleness."""
+    row carrying its owning node, global ref, and staleness. With
+    `peers_only` the local inventory is skipped (the sidebar already has the
+    local rows) and only peer rows are returned."""
     me = _federation_self_hello()
-    local = _federation_sessions_inventory(limit=limit)
+    if peers_only:
+        local = {"observed_at": time.time(), "sessions": []}
+    else:
+        local = _federation_sessions_inventory(limit=limit)
     sessions = []
     for row in local["sessions"]:
         row["node_name"] = me["display_name"]
@@ -230,14 +280,20 @@ def _federation_federated_sessions(limit=200):
     peers = federation.load_peers()
     if peers:
         def _one(peer):
-            return peer, _federation_fetch_peer_sessions(peer, limit)
+            result = _federation_fetch_peer_sessions(peer, limit)
+            # Only dial the address lookup for a peer that answered; a dead
+            # one reuses whatever is cached instead of a second timeout.
+            web = _federation_peer_web_url(
+                peer["node_id"], allow_fetch=result[0] is not None)
+            return peer, result, web
         with ThreadPoolExecutor(max_workers=min(4, len(peers))) as pool:
             results = list(pool.map(_one, peers))
-        for peer, (payload, err) in results:
+        for peer, (payload, err), web in results:
             entry = {
                 "node_id": peer["node_id"],
                 "name": peer.get("name"),
                 "self": False,
+                **web,
             }
             if payload:
                 stale = bool(payload.get("stale"))

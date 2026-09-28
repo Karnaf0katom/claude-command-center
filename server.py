@@ -26455,7 +26455,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     fed_limit = int((qs.get("limit") or ["200"])[0])
                 except ValueError:
                     fed_limit = 200
-                self.send_json(_federation_federated_sessions(limit=fed_limit))
+                self.send_json(_federation_federated_sessions(
+                    limit=fed_limit,
+                    peers_only=qs.get("peers_only", ["0"])[0] in ("1", "true")))
                 return
             if qs.get("all", ["0"])[0] in ("1", "true"):
                 engine_filter = (qs.get("engine", [""])[0] or "").strip().lower()

@@ -38,6 +38,8 @@ class TestFederatedSessionsSort(unittest.TestCase):
                                return_value={"node_id": "me", "display_name": "me"}), \
              mock.patch.object(fleet, "_federation_sessions_inventory", return_value=local), \
              mock.patch.object(fleet.federation, "load_peers", return_value=[peer]), \
+             mock.patch.object(fleet, "_federation_peer_web_url",
+                               return_value={"web_url": None, "web_url_state": "none"}), \
              mock.patch.object(fleet, "_federation_fetch_peer_sessions",
                                return_value=({**remote, "stale": False}, None)):
             out = fleet._federation_federated_sessions(limit=10)

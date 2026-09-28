@@ -823,6 +823,23 @@ def overview(include_qr: bool = True) -> dict:
     return out
 
 
+def web_url_from_status(status) -> str:
+    """Pure: the browser-reachable https URL of a node's CCC, from its
+    phone-access status payload, or "" when it has none. Prefers the entry
+    CCC created; otherwise reuses a `tailscale serve` root handler that
+    already proxies to CCC (set up by hand)."""
+    if not isinstance(status, dict) or not status.get("ok"):
+        return ""
+    if status.get("url"):
+        return str(status["url"])
+    plan = ((status.get("serve") or {}).get("plan")) or {}
+    host = str((status.get("tailscale") or {}).get("hostname") or "").strip()
+    port = plan.get("https_port")
+    if plan.get("action") != "reuse" or not host or not port:
+        return ""
+    return "https://" + host + ("" if int(port) == 443 else ":" + str(int(port))) + "/"
+
+
 # sub -> federation route action (see _FEDERATION_ROUTE_ACTIONS in fleet.py)
 PHONE_ACCESS_ROUTE_ACTIONS = {
     "status": "phone_access_status",
