@@ -116,10 +116,15 @@ class TestOptInPingRemoved(TelemetryTestBase):
             self.assertFalse(hasattr(self.server, name),
                              f"{name} should have been fully removed with the opt-in ping")
 
-    def test_opt_in_and_heartbeat_routes_are_gone(self):
+    def test_opt_in_and_heartbeat_routes_are_inert_stubs(self):
+        # Public API, so the routes stay, but only as no-ops: the handler
+        # block must not touch state, install ids, or the network.
         source = pathlib.Path(PROJECT_ROOT, "server.py").read_text(encoding="utf-8")
-        self.assertNotIn('"/api/telemetry/opt-in"', source)
-        self.assertNotIn('"/api/telemetry/heartbeat"', source)
+        start = source.index('if path in ("/api/telemetry/opt-in", "/api/telemetry/heartbeat"):')
+        block = source[start:source.index('if path == "/api/self-update":', start)]
+        self.assertIn('"retired": True', block)
+        for forbidden in ("_telemetry", "state", "install_id", "urlopen"):
+            self.assertNotIn(forbidden, block.replace("/api/telemetry/", ""))
 
     def test_status_route_still_present(self):
         # Public API — additive only, must stay even though it no longer

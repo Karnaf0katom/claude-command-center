@@ -30383,6 +30383,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             saved = _save_feature_flag(payload.get("name"), payload.get("on"))
             self.send_json(saved, 200 if saved.get("ok") else 400)
             return
+        if path in ("/api/telemetry/opt-in", "/api/telemetry/heartbeat"):
+            # Retired 2026-09-28 with the opt-in daily ping. Kept as no-ops
+            # because /api/* is public API and dashboard tabs opened before
+            # the upgrade keep calling these until they reload.
+            if path == "/api/telemetry/heartbeat":
+                self.send_response(204)
+                self.end_headers()
+            else:
+                self.send_json({"ok": True, "retired": True, "opt_in": False})
+            return
         if path == "/api/self-update":
             # Pull the latest main into the install dir and restart the server
             # in-place via os.execvp. The same-origin check above already
