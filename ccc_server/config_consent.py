@@ -975,8 +975,16 @@ def revoke(item_ids=None, ctx=None, via="ui"):
     """Remove CCC's content for the given items (default: all) and mark
     them declined."""
     ctx = ctx or default_ctx()
-    ids = item_ids or [i.id for i in all_items() if i.applicable(ctx)]
-    return decide({i: "decline" for i in ids}, ctx=ctx, via=via)
+    if not item_ids:
+        # "Everything CCC installed": WatchTower's own sync is only CCC's to
+        # undo when it ran on the user's approval through CCC.
+        state = load_state(ctx) or {"items": {}}
+        item_ids = [
+            i.id for i in all_items() if i.applicable(ctx) and (
+                i.id != "watchtower-skills"
+                or (state["items"].get(i.id) or {}).get("decision") == "approved")
+        ]
+    return decide({i: "decline" for i in item_ids}, ctx=ctx, via=via)
 
 
 def ack_notice(ctx=None):

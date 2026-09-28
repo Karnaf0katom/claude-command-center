@@ -35,6 +35,11 @@ FAKE_PYTHON = r"""#!/usr/bin/env bash
 # probes install-watchtower.sh runs, and records pip/daemon calls.
 log() { printf '%s\n' "$*" >> "$WT_FAKE_LOG"; }
 
+if [ "$1" = "-" ]; then
+  # Script on stdin (the consent check): run it for real.
+  exec /usr/bin/python3 "$@"
+fi
+
 if [ "$1" = "-c" ]; then
   code="$2"
   case "$code" in
@@ -127,6 +132,9 @@ exit 0
 
 FAKE_WT = r"""#!/usr/bin/env bash
 printf 'wt %s\n' "$*" >> "$WT_FAKE_LOG"
+if [ -n "${WT_SKIP_SKILL_SYNC:-}" ]; then
+  printf 'env WT_SKIP_SKILL_SYNC=%s\n' "$WT_SKIP_SKILL_SYNC" >> "$WT_FAKE_LOG"
+fi
 exit 0
 """
 
@@ -343,6 +351,31 @@ class TestAlreadyInstalled(WatchtowerInstallHarness):
         managed = self.make_checkout(self.home / ".ccc" / "watchtower")
         self.run_script(installed_root=self.set_installed(managed))
         self.assertIn("wt start", self.calls())
+
+    def _consent(self, decision):
+        state = self.home / ".claude" / "command-center"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "config-consent.json").write_text(
+            '{"items": {"watchtower-skills": {"decision": "%s"}}}' % decision)
+
+    def test_skills_are_not_synced_without_consent(self):
+        managed = self.make_checkout(self.home / ".ccc" / "watchtower")
+        self.run_script(installed_root=self.set_installed(managed))
+        self.assertNotIn("wt skills sync", self.calls())
+        self.assertIn("env WT_SKIP_SKILL_SYNC=1", self.calls())
+
+    def test_skills_are_not_synced_when_declined(self):
+        self._consent("declined")
+        managed = self.make_checkout(self.home / ".ccc" / "watchtower")
+        self.run_script(installed_root=self.set_installed(managed))
+        self.assertNotIn("wt skills sync", self.calls())
+
+    def test_skills_sync_once_approved(self):
+        self._consent("approved")
+        managed = self.make_checkout(self.home / ".ccc" / "watchtower")
+        self.run_script(installed_root=self.set_installed(managed))
+        self.assertIn("wt skills sync", self.calls())
+        self.assertIn("env WT_SKIP_SKILL_SYNC=0", self.calls())
 
     def test_nothing_runs_when_opted_out(self):
         managed = self.make_checkout(self.home / ".ccc" / "watchtower")

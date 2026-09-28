@@ -1278,7 +1278,9 @@ def cmd_consent(args):
         print(f"ccc: unknown item(s): {', '.join(unknown)} (see `ccc consent`)", file=sys.stderr)
         return 2
     if action == "revoke":
-        status, result = _post_json(base, "/api/config-consent/revoke", {"ids": targets, "via": "cli"})
+        # `revoke all` lets the server pick "everything CCC installed".
+        ids = [] if list(args.items) == ["all"] else targets
+        status, result = _post_json(base, "/api/config-consent/revoke", {"ids": ids, "via": "cli"})
     else:
         choice = "approve" if action == "approve" else "decline"
         status, result = _post_json(base, "/api/config-consent/decide",

@@ -191,7 +191,8 @@ show up on the kanban, against the issue, in the review queue.
 This goes the other way. It treats Claude Code's on-disk state as the
 source of truth: `~/.claude/projects/*.jsonl` transcripts, the
 `~/.claude/sessions/<pid>.json` live registry, and per-tool-call sidecar
-files written by two hooks we install into `~/.claude/settings.json`. If
+files written by hooks CCC adds to `~/.claude/settings.json` once you
+approve them (see [Your agent config](#your-agent-config)). If
 Claude Code is running anywhere on your machine, it shows up here. If you
 close the dashboard, your sessions keep running. If you open a terminal and
 iterate by hand, the card updates.
@@ -464,11 +465,34 @@ foreground with `./run.sh` or run it under your own process manager.
 To reach the dashboard from another machine, see `SECURITY.md` for the
 `CCC_BIND_HOST` and same-origin options before exposing the port.
 
-First launch (foreground or service) copies two hook scripts into
-`~/.claude/command-center/hooks/` and registers them in
-`~/.claude/settings.json`. After that, every Claude Code session on your
-machine (terminal, headless, or dashboard-spawned) writes sidecar state
-the UI uses for the kanban.
+First launch (foreground or service) copies CCC's hook scripts into
+`~/.claude/command-center/hooks/` and then **asks** before registering them
+in `~/.claude/settings.json` or installing any skill: the dashboard opens an
+**Agent config access** dialog with the exact diff for each change (headless:
+`ccc consent`). Once the hooks are approved, every Claude Code session on your
+machine (terminal, headless, or dashboard-spawned) writes sidecar state the
+UI uses for the kanban.
+
+### Your agent config
+
+CCC writes nothing into your agent config until you approve it. Each change
+is a separate item you can approve, skip, or remove later:
+
+| Item | File(s) | Needed for |
+|---|---|---|
+| Claude Code hooks | `~/.claude/settings.json` (6 hook entries) | live tool status, Needs-approval badges, answering AskUserQuestion from the dashboard, the Compacting badge |
+| Codex hook | `~/.codex/hooks.json` (1 PostCompact entry) | re-orienting Codex sessions after `/compact` |
+| Bundled skills | `~/.claude/skills/<name>/SKILL.md`, `~/.codex/skills/<name>/SKILL.md` | `ccc-orchestration`, `group-chat-checkin`, `superpowers-to-watchtower`, `fleet-verify` |
+| WatchTower skills | symlinks from `wt skills sync` | agents knowing the `wt` commands |
+
+Your other hooks, settings, key order, and indentation are kept; a symlinked
+`settings.json` stays a symlink; every file is backed up to
+`~/.claude/command-center/config-backups/` before CCC edits it. If CCC's
+version of an approved item changes in an update, it asks again with the new
+diff instead of applying it. **Settings > Maintenance > Agent config access**
+(or `ccc consent revoke all`) removes everything CCC installed. Upgrading from
+a version that installed these silently keeps them working and shows a
+one-time list with Keep / Remove. Details: [`docs/agent-config-consent.md`](docs/agent-config-consent.md).
 
 ## Core concepts
 
@@ -712,9 +736,10 @@ plain HTTP. On top of it sits a 12-skill orchestration pack
 ([`skills/README.md`](skills/README.md)) that turns spawn/inject/ask into
 concrete workflows — `pair-verify`, `standup`, `second-opinion`, `bug-race`,
 `docs-drift`, `release-audit`, and more — each with stated spawn cost, a
-dry-run mode, and an honest fallback when CCC is down. On startup the server copies the skill to
+dry-run mode, and an honest fallback when CCC is down. Once you approve it
+(see [Your agent config](#your-agent-config)), the server installs the skill to
 `~/.claude/skills/ccc-orchestration/SKILL.md` (set
-`CCC_SKIP_SKILL_INSTALL=1` to opt out) and writes its base URL to
+`CCC_SKIP_SKILL_INSTALL=1` to turn skill installs off entirely). It writes its base URL to
 `~/.claude/command-center/port.txt` so the skill can discover the running
 instance without hardcoding a port.
 
@@ -787,8 +812,9 @@ and the honest [inventory](docs/skills-ecosystem-inventory.md).
   (`spawns_subagents`, `fleet_aware`, `drives_browser`, `ccc_synergy`). stdlib-only
   and mtime-cached, so a dashboard can poll it for free.
 
-The `superpowers-to-watchtower` and `fleet-verify` skills install on startup
-alongside `ccc-orchestration` (opt out with `CCC_SKIP_SKILL_INSTALL=1`). What is
+The `superpowers-to-watchtower` and `fleet-verify` skills install alongside
+`ccc-orchestration` once you approve each one (`CCC_SKIP_SKILL_INSTALL=1` turns
+them all off). What is
 wired today is kept plainly separate from what is roadmap, in both the docs page
 and the matrix populated by `/api/skills`.
 
@@ -837,9 +863,10 @@ merge sidecar state, enrich cached GitHub issue data, and return flat rows;
 the client classifies them with rules like “has_push → Review” and
 “live + sidecar_has_writes → Working”.
 
-Hooks are the only invasive thing. On first run the server copies
-`hooks/post-tool-use.py` and `hooks/stop.py` to `~/.claude/command-center/hooks/`
-and merges entries into `~/.claude/settings.json`. After that, Claude Code
+Hooks are the only invasive thing, so they are opt-in. On first run the
+server copies the `hooks/*.py` scripts to `~/.claude/command-center/hooks/`
+and, only after you approve it, merges entries into `~/.claude/settings.json`.
+After that, Claude Code
 fires them after every tool invocation, each hook writes a tiny JSON file
 under `live-state/`, and the server reads those to answer "is this session
 actually doing something right now or is it idle waiting for input?".

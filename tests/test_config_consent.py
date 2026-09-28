@@ -308,6 +308,22 @@ class CleanUninstall(ConsentTestBase):
         self.assertEqual(json.loads(self.settings.read_text()), {"model": "sonnet"})
 
 
+class WatchTowerScope(ConsentTestBase):
+    def test_revoke_all_leaves_watchtower_alone_unless_approved_via_ccc(self):
+        calls = []
+        self.ctx.wt_bin = "/bin/wt-fake"
+        def fake_run(self_, ctx, *args, timeout=20):
+            calls.append(args)
+            return ("", None)
+        with mock.patch.object(cc.WatchTowerSkills, "_run", fake_run):
+            cc.revoke(ctx=self.ctx)
+            self.assertNotIn(("remove",), calls)
+            cc.decide({"watchtower-skills": "approve"}, ctx=self.ctx)
+            self.assertIn(("sync",), calls)
+            cc.revoke(ctx=self.ctx)
+            self.assertIn(("remove",), calls)
+
+
 class ExistingInstalls(ConsentTestBase):
     def seed_existing_install(self):
         existing = json.loads(json.dumps(USER_SETTINGS))
