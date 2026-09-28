@@ -26142,6 +26142,29 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 since_s = None
             self.send_json(build_session_census(since_s=since_s))
+        elif re.match(r"^/api/sessions/continuation-decision/.+$", path):
+            # ccc_server/continuation.py — "resume in place, or spawn a fresh
+            # session that continues it?" for one session, from cached
+            # per-session token/idle data only (no transcript scan). Powers
+            # `ccc send --new-if-large-and-stale` and its --dry-run preview.
+            from ccc_server import continuation as _continuation
+            query = urllib.parse.unquote(
+                path[len("/api/sessions/continuation-decision/"):]
+            )
+            qs = urllib.parse.parse_qs(parsed.query)
+
+            def _qs_int(key, default):
+                raw = (qs.get(key, [""])[0] or "").strip()
+                try:
+                    return int(raw) if raw else default
+                except ValueError:
+                    return default
+
+            large_threshold = _qs_int("large_threshold", _continuation.DEFAULT_LARGE_TOKENS)
+            stale_seconds = _qs_int("stale_seconds", _continuation.DEFAULT_STALE_SECONDS)
+            self.send_json(_continuation.decide_send_path(
+                query, large_threshold=large_threshold, stale_seconds=stale_seconds,
+            ))
         elif path == "/api/sessions/family":
             # Full family tree from the unified SessionGraph. Returns a nested
             # dict rooted at the topmost ancestor (orchestrator), with all
@@ -35329,6 +35352,45 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         "session_id": sid,
                         "cancelled_queued": result.get("cancelled_queued", 0),
                     })
+        elif path == "/api/sessions/spawn-continue-from":
+            # ccc_server/continuation.py — `ccc spawn --continue-from`: spawn
+            # a fresh session pointed at <sid>'s latest continuation
+            # successor instead of resuming it (a resume reloads the whole
+            # transcript into context). Rebinds the old chain's report routes
+            # to the new session unless the caller opts out.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            continue_from = str(payload.get("continue_from") or "").strip()
+            if not continue_from:
+                self.send_json({"ok": False, "error": "missing continue_from"}, 400)
+            else:
+                from ccc_server import continuation as _continuation
+                result = _continuation.spawn_continuation(
+                    continue_from,
+                    prompt=str(payload.get("prompt") or ""),
+                    model=payload.get("model"),
+                    effort=payload.get("effort") or payload.get("reasoning_effort"),
+                    report_to=payload.get("report_to"),
+                    dry_run=bool(payload.get("dry_run")),
+                    rebind_chain=payload.get("rebind_chain", True),
+                )
+                if not result.get("ok"):
+                    self.send_json(result, 400)
+                else:
+                    if not result.get("dry_run"):
+                        _log_activity(
+                            "spawn", "CONTINUE_FROM",
+                            f"from={continue_from} latest={result.get('latest_session_id')} "
+                            f"new={result.get('new_session_id')} "
+                            f"rebound={len(result.get('rebound') or [])}",
+                        )
+                    self.send_json(result)
         elif path == "/api/report-routes/rebind":
             # CCC-1202: repoint spawned children's return address. Selectors
             # (route_id / child_session_id / from_report_to) AND together;
@@ -35383,6 +35445,23 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # session UUID — that's the id users see in the TUI and commit
             # trailers now.
             sid = _resolve_bridge_session_alias(sid)
+            # MEMO-FIX-lineage: once `sid` has a recorded continuation
+            # successor (--continue-from, --new-if-large-and-stale, the F2
+            # button, or usage-limit auto-resume — all embed the same "Origin
+            # session id:" marker), forward to it here so every future
+            # message addressed to the old sid — a child's report, a
+            # WatchTower ticket notice, a peer message — follows the move
+            # with no rewrite of whatever already has the old sid written
+            # down. No-op while `sid` is still actively working its turn.
+            if sid:
+                try:
+                    from ccc_server import continuation as _continuation
+                    forwarded = _continuation.forward_target(sid)
+                except Exception:
+                    forwarded = sid
+                if forwarded != sid:
+                    _log_activity("inject", "LINEAGE_FORWARD", f"{sid} -> {forwarded}")
+                    sid = forwarded
             text = payload.get("text", "")
             mode = (payload.get("mode") or ("steer" if payload.get("steer") else "send") or "send")
             mode = str(mode).strip().lower()

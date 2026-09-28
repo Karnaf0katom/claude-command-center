@@ -73,6 +73,13 @@ All operations (except List) use `curl -s -X POST "$CCC_URL<endpoint>" -H "Conte
   *Payload:* `{"session_id": "<uuid>", "text": "...", "timeout_ms": 60000}`. 
   *Returns:* `{"ok": true, "text": "reply"}`. On timeout, work continues (you can re-ask or notify user). Requires a real engine `session_id`, not only a pending `spawn_id`.
 
+### Continuing Old Work: Refer, Don't Resume
+Injecting/resuming a session whose context is large AND has gone cold (idle past the prompt-cache TTL) reloads its whole transcript — a real case re-loaded 430k tokens to do a few merges. **Never `ccc send`/Inject a follow-up task into an old session just to pick up where it left off.** Instead, spawn a fresh session that continues it:
+- **CLI:** `ccc spawn --continue-from <old sid|prefix> "<task>"` — resolves to the latest successor in the session's continuation chain, reuses its cwd/engine/model/effort, and seeds the new session with a short brief (title, transcript path, `ccc brief`/tail-by-lines pointers) instead of the whole transcript.
+- **CLI (decide for you):** `ccc send <sid> "<task>" --new-if-large-and-stale` — sends normally unless the target is both large (context tokens) and stale (idle past the cache TTL), in which case it does the above instead. Add `--dry-run` to preview the decision without acting.
+- **API equivalent:** `POST /api/sessions/spawn-continue-from` with `{"continue_from": "<sid>", "prompt": "..."}`; `GET /api/sessions/continuation-decision/<sid>` for the large/stale decision `ccc send`'s flag uses.
+- Any child or WatchTower ticket already reporting to the old session is automatically rebound to the new one; delivery to the old sid keeps landing on its latest successor from then on.
+
 ### Group Chat Operations
 You can manage group chats programmatically via the API endpoints or manually via the UI.
 

@@ -1,0 +1,240 @@
+"""`ccc spawn --continue-from` / `ccc send --new-if-large-and-stale` CLI
+branching (MEMO-FIX-lineage). No live server, no live claude/gh/codex --
+_get_json/_post_json/_resolve_target are mocked, matching
+tests/test_ccc_doctor_freshness.py's pattern for exercising the `ccc`
+script directly.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import io
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+
+def _load_ccc_cli():
+    ccc_path = Path(__file__).resolve().parent.parent / "ccc"
+    loader = importlib.machinery.SourceFileLoader("ccc_cli_continuation", str(ccc_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _spawn_args(**overrides):
+    base = dict(
+        server="http://127.0.0.1:8099", prompt=["keep", "going"], continue_from=None,
+        dry_run=False, engine=None, model=None, effort=None, name=None,
+        cwd=None, worktree=False, report_to=None, confirm_blocked_model=False,
+        json=False,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def _send_args(**overrides):
+    base = dict(
+        server="http://127.0.0.1:8099", target="old-sid", text=["keep", "going"],
+        steer=False, queue=False, sender=None, new_if_large_and_stale=False,
+        large_threshold=150_000, stale_seconds=3600, dry_run=False,
+        model=None, effort=None, report_to=None, json=False,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+class ContinuationCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ccc = _load_ccc_cli()
+
+    def test_spawn_continue_from_posts_expected_payload(self):
+        ccc = self.ccc
+        posted = {}
+
+        def fake_post_json(base, path, payload, timeout=60):
+            posted["path"] = path
+            posted["payload"] = payload
+            return 200, {
+                "ok": True, "dry_run": False, "continue_from": "old-sid",
+                "latest_session_id": "old-sid", "new_session_id": "new-sid",
+                "engine": "claude", "rebound": ["rr_abc"],
+            }
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_post_json", side_effect=fake_post_json):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_spawn(_spawn_args(continue_from="old-sid", prompt=["keep", "going"]))
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted["path"], "/api/sessions/spawn-continue-from")
+        self.assertEqual(posted["payload"]["continue_from"], "old-sid")
+        self.assertEqual(posted["payload"]["prompt"], "keep going")
+        self.assertNotIn("dry_run", posted["payload"])
+        self.assertIn("new session new-sid", out.getvalue())
+
+    def test_spawn_continue_from_dry_run_forwards_flag(self):
+        ccc = self.ccc
+        posted = {}
+
+        def fake_post_json(base, path, payload, timeout=60):
+            posted["payload"] = payload
+            return 200, {"ok": True, "dry_run": True, "continue_from": "old-sid",
+                         "latest_session_id": "old-sid", "engine": "claude"}
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_post_json", side_effect=fake_post_json):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_spawn(_spawn_args(continue_from="old-sid", dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(posted["payload"]["dry_run"])
+        self.assertIn("[dry-run]", out.getvalue())
+
+    def test_spawn_continue_from_error_is_nonzero(self):
+        ccc = self.ccc
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_post_json", return_value=(400, {
+                 "ok": False, "error": "no session found for 'old-sid'",
+             })):
+            out = io.StringIO()
+            with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", out):
+                rc = ccc.cmd_spawn(_spawn_args(continue_from="old-sid"))
+        self.assertEqual(rc, 1)
+        self.assertIn("continue-from failed", out.getvalue())
+
+    def test_send_new_if_large_and_stale_takes_new_path_when_decided(self):
+        ccc = self.ccc
+        calls = []
+
+        def fake_get_json(base, path, timeout=10):
+            calls.append(("get", path))
+            return {"path": "new", "reason": "big and stale", "context_tokens": 200000,
+                    "idle_seconds": 7200, "resolved_session_id": "old-sid",
+                    "latest_session_id": "old-sid"}
+
+        def fake_post_json(base, path, payload, timeout=60):
+            calls.append(("post", path, payload))
+            return 200, {"ok": True, "dry_run": False, "continue_from": "old-sid",
+                         "latest_session_id": "old-sid", "new_session_id": "new-sid",
+                         "engine": "claude", "rebound": []}
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_get_json", side_effect=fake_get_json), \
+             mock.patch.object(ccc, "_post_json", side_effect=fake_post_json):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_send(_send_args(new_if_large_and_stale=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][0], "get")
+        self.assertIn("/api/sessions/continuation-decision/", calls[0][1])
+        self.assertEqual(calls[1], ("post", "/api/sessions/spawn-continue-from", {
+            "continue_from": "old-sid", "prompt": "keep going",
+        }))
+        self.assertIn("decision: new", out.getvalue())
+
+    def test_send_new_if_large_and_stale_sends_normally_when_not_warranted(self):
+        ccc = self.ccc
+        calls = []
+
+        def fake_get_json(base, path, timeout=10):
+            return {"path": "normal", "reason": "still warm", "context_tokens": 2000,
+                    "idle_seconds": 5, "resolved_session_id": "old-sid",
+                    "latest_session_id": "old-sid"}
+
+        def fake_post_json(base, path, payload, timeout=60):
+            calls.append((path, payload))
+            return 200, {"ok": True, "effect": "delivered"}
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_get_json", side_effect=fake_get_json), \
+             mock.patch.object(ccc, "_post_json", side_effect=fake_post_json):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_send(_send_args(new_if_large_and_stale=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "/api/inject-input")
+        self.assertEqual(calls[0][1]["session_id"], "old-sid")
+        self.assertIn("decision: normal", out.getvalue())
+
+    def test_send_dry_run_alone_never_sends_or_spawns(self):
+        ccc = self.ccc
+
+        def fake_get_json(base, path, timeout=10):
+            return {"path": "new", "reason": "big and stale", "context_tokens": 200000,
+                    "idle_seconds": 7200, "resolved_session_id": "old-sid",
+                    "latest_session_id": "old-sid"}
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_get_json", side_effect=fake_get_json), \
+             mock.patch.object(ccc, "_post_json") as post_json:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_send(_send_args(dry_run=True, new_if_large_and_stale=False))
+        self.assertEqual(rc, 0)
+        post_json.assert_not_called()
+        self.assertIn("decision: new", out.getvalue())
+
+    def test_send_dry_run_with_new_if_large_and_stale_previews_spawn(self):
+        ccc = self.ccc
+
+        def fake_get_json(base, path, timeout=10):
+            return {"path": "new", "reason": "big and stale", "context_tokens": 200000,
+                    "idle_seconds": 7200, "resolved_session_id": "old-sid",
+                    "latest_session_id": "old-sid"}
+
+        def fake_post_json(base, path, payload, timeout=60):
+            self.assertTrue(payload["dry_run"])
+            return 200, {"ok": True, "dry_run": True, "continue_from": "old-sid",
+                         "latest_session_id": "old-sid", "engine": "claude"}
+
+        with mock.patch.object(ccc, "_resolve_server", return_value="http://127.0.0.1:8099"), \
+             mock.patch.object(ccc, "_resolve_target", return_value=("old-sid", None)), \
+             mock.patch.object(ccc, "_get_json", side_effect=fake_get_json), \
+             mock.patch.object(ccc, "_post_json", side_effect=fake_post_json):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = ccc.cmd_send(_send_args(dry_run=True, new_if_large_and_stale=True))
+        self.assertEqual(rc, 0)
+        self.assertIn("[dry-run] would continue", out.getvalue())
+
+    def test_argparse_wires_new_flags(self):
+        ccc = self.ccc
+        import sys
+        old_argv = sys.argv
+        try:
+            sys.argv = ["ccc"]
+            with mock.patch.object(ccc, "cmd_spawn") as spawn_fn, \
+                 mock.patch.object(ccc, "cmd_send") as send_fn:
+                ccc.main(["spawn", "--continue-from", "abc123", "keep going"])
+                spawn_fn.assert_called_once()
+                got = spawn_fn.call_args[0][0]
+                self.assertEqual(got.continue_from, "abc123")
+                self.assertEqual(got.prompt, ["keep going"])
+
+                ccc.main([
+                    "send", "old-sid", "hi", "--new-if-large-and-stale",
+                    "--large-threshold", "99000", "--stale-seconds", "42", "--dry-run",
+                ])
+                send_fn.assert_called_once()
+                got = send_fn.call_args[0][0]
+                self.assertTrue(got.new_if_large_and_stale)
+                self.assertEqual(got.large_threshold, 99000)
+                self.assertEqual(got.stale_seconds, 42)
+                self.assertTrue(got.dry_run)
+        finally:
+            sys.argv = old_argv
+
+
+if __name__ == "__main__":
+    unittest.main()

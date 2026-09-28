@@ -13,6 +13,7 @@ command, without opening the dashboard:
     ccc spawn "fix the flaky test"            # new session, server defaults
     ccc spawn "…" --engine claude --model opus-5 --effort high
     ccc spawn "…" --name queue-drain --cwd ~/Apps/foo --report-to <sid>
+    ccc spawn --continue-from <old session> "keep going"   # new session, not a resume
     ccc models               # every engine's models, efforts, cost
     ccc models --engine claude --json
     ccc doctor               # per-engine CLI/auth/BYOK health, dry-run only
@@ -21,6 +22,7 @@ command, without opening the dashboard:
 
     ccc send <session> "message"        # fire-and-forget into a session
     ccc send <session> "…" --steer      # interrupt the current turn with it
+    ccc send <session> "…" --new-if-large-and-stale   # continuation instead of a cold resume, when warranted
     ccc ask <session> "question"        # send and wait for the reply text
 
     ccc recall "that bug with the flaky test"   # sessions that touched it
@@ -370,6 +372,35 @@ def cmd_send(args):
     if err:
         print(err, file=sys.stderr)
         return 1
+    if args.new_if_large_and_stale or args.dry_run:
+        qs = urllib.parse.urlencode({
+            "large_threshold": args.large_threshold, "stale_seconds": args.stale_seconds,
+        })
+        try:
+            decision = _get_json(
+                base, f"/api/sessions/continuation-decision/{urllib.parse.quote(sid, safe='')}?{qs}"
+            )
+        except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+            print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+            return 1
+        if not args.json:
+            ctx_k = decision.get("context_tokens") or 0
+            idle_s = int(decision.get("idle_seconds") or 0)
+            print(f"decision: {decision['path']} — {decision['reason']} "
+                  f"(context={ctx_k:,} tokens, idle={idle_s}s)")
+        if args.dry_run and not args.new_if_large_and_stale:
+            if args.json:
+                print(json.dumps(decision, indent=2))
+            return 0
+        if args.new_if_large_and_stale and decision["path"] == "new":
+            return _spawn_continue_from(base, decision.get("resolved_session_id") or sid, text, args)
+        if args.dry_run:
+            preview = {"path": "normal", "session_id": sid, "text": text}
+            if args.json:
+                print(json.dumps(preview, indent=2))
+            else:
+                print(f"[dry-run] would send normally to {sid}")
+            return 0
     payload = {"session_id": sid, "text": text}
     sender_sid = getattr(args, "sender", None) or os.environ.get("CLAUDE_SESSION_ID") or None
     if sender_sid:
@@ -1145,6 +1176,54 @@ def cmd_quota(args):
     return 0
 
 
+def _print_continue_from_result(result, status, args):
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        print(f"ccc: continue-from failed: {result.get('error') or f'HTTP {status}'}",
+              file=sys.stderr)
+        return 1
+    ctx_k = result.get("context_tokens")
+    ctx_note = f", {ctx_k:,} tokens" if ctx_k else ""
+    if result.get("dry_run"):
+        print(
+            f"[dry-run] would continue {result['continue_from']} "
+            f"(latest: {result['latest_session_id']}{ctx_note}) as a new "
+            f"{result['engine']} session"
+        )
+        if result.get("report_to"):
+            print(f"  reports to: {result['report_to']}")
+        return 0
+    print(
+        f"continued {result['continue_from']} (latest: {result['latest_session_id']}) "
+        f"-> new session {result['new_session_id']}"
+    )
+    rebound = result.get("rebound") or []
+    if rebound:
+        print(f"  rebound {len(rebound)} report route(s) from the old chain")
+    print("track it: ccc sessions")
+    return 0
+
+
+def _spawn_continue_from(base, sid, prompt, args):
+    payload = {"continue_from": sid, "prompt": prompt}
+    if getattr(args, "model", None):
+        payload["model"] = args.model
+    if getattr(args, "effort", None):
+        payload["effort"] = args.effort
+    if getattr(args, "report_to", None):
+        payload["report_to"] = args.report_to
+    if getattr(args, "dry_run", False):
+        payload["dry_run"] = True
+    try:
+        status, result = _post_json(base, "/api/sessions/spawn-continue-from", payload)
+    except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    return _print_continue_from_result(result, status, args)
+
+
 def cmd_spawn(args):
     base = _resolve_server(args.server)
     if not base:
@@ -1157,6 +1236,12 @@ def cmd_spawn(args):
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
         prompt = sys.stdin.read().strip()
+    if args.continue_from:
+        sid, err = _resolve_target(base, args.continue_from)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        return _spawn_continue_from(base, sid, prompt, args)
     if not prompt:
         print("ccc spawn: missing prompt (pass it as an argument or pipe it on stdin)",
               file=sys.stderr)
@@ -1324,6 +1409,14 @@ def main(argv=None):
     )
     p.add_argument("prompt", nargs="*",
                    help="the task prompt (or pipe it on stdin)")
+    p.add_argument("--continue-from", metavar="SESSION_ID",
+                   help="spawn a fresh session that continues this one's latest "
+                        "successor instead of resuming it (never reloads the old "
+                        "transcript into context) — model/effort/cwd/engine default "
+                        "to the old session's own; prompt becomes the Task after a "
+                        "generated brief")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --continue-from: show what would be spawned, don't spawn it")
     p.add_argument("--engine",
                    help="claude (default), codex, cursor, antigravity, kilo, "
                         "opencode, aider, hermes, kimi, devin, droid, grok, pi")
@@ -1363,7 +1456,32 @@ def main(argv=None):
                    help="queue behind the current turn instead of delivering now")
     p.add_argument("--from", dest="sender", metavar="SESSION_ID",
                    help="sender session id or name for peer attribution (defaults to $CLAUDE_SESSION_ID)")
-    p.add_argument("--json", action="store_true", help="raw inject result JSON")
+    p.add_argument("--new-if-large-and-stale", action="store_true",
+                   help="if the target is large (context tokens >= --large-threshold) "
+                        "AND stale (idle >= --stale-seconds, so resuming it would be a "
+                        "full prompt-cache miss), spawn a continuation instead of "
+                        "resuming — same as `ccc spawn --continue-from`, with `text` as "
+                        "its prompt. Otherwise sends normally.")
+    p.add_argument("--large-threshold", type=int, metavar="TOKENS",
+                   default=int(os.environ.get("CCC_LARGE_CONTEXT_TOKENS", 150_000)),
+                   help="context-token threshold for --new-if-large-and-stale "
+                        "(default 150000, or $CCC_LARGE_CONTEXT_TOKENS)")
+    p.add_argument("--stale-seconds", type=int, metavar="SECONDS",
+                   default=int(os.environ.get("CCC_STALE_SECONDS", 3600)),
+                   help="idle-time threshold for --new-if-large-and-stale, i.e. the "
+                        "prompt-cache TTL (default 3600, or $CCC_STALE_SECONDS)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show the large/stale decision (and, with "
+                        "--new-if-large-and-stale, what would be spawned) without "
+                        "sending or spawning anything")
+    p.add_argument("--model", help="with --new-if-large-and-stale: override the "
+                                    "spawned continuation's model")
+    p.add_argument("--effort", help="with --new-if-large-and-stale: override the "
+                                     "spawned continuation's reasoning effort")
+    p.add_argument("--report-to", metavar="SESSION_ID",
+                   help="with --new-if-large-and-stale: override the report-to the "
+                        "spawned continuation inherits (default: the old session's own)")
+    p.add_argument("--json", action="store_true", help="raw inject/decision result JSON")
     p.set_defaults(func=cmd_send)
 
     p = sub.add_parser(
