@@ -363,3 +363,16 @@ class ClientProtocolTests(unittest.TestCase):
                     os.environ.pop("CCC_CODEX_EXPERIMENTAL", None)
                 else:
                     os.environ["CCC_CODEX_EXPERIMENTAL"] = original
+
+
+def test_missing_cli_catalog_reports_installation_problem_before_sending():
+    from ccc_server import codex_client as client
+    with mock.patch.object(client, '_client_catalog', return_value={'ok': False, 'methods': []}), mock.patch.object(client, '_client_rpc') as send:
+        try:
+            client._client_operation({'method': 'turn/start', 'params': {}, 'context': {}})
+        except ValueError as error:
+            assert 'capabilities are unavailable' in str(error)
+            assert 'Codex CLI installation' in str(error)
+        else:
+            raise AssertionError('Expected unavailable capabilities to reject before sending')
+        send.assert_not_called()

@@ -691,6 +691,8 @@ def _client_operation(data):
     if not isinstance(method, str):
         raise ValueError("Choose an operation")
     catalog = _client_catalog()
+    if catalog.get("ok") is False:
+        raise ValueError("Codex capabilities are unavailable. Check the Codex CLI installation and retry.")
     selected = next((entry for entry in catalog.get("methods", []) if entry.get("method") == method), None)
     if not selected or not selected.get("available"):
         raise ValueError((selected or {}).get("unavailable_reason") or "Unknown Codex operation")
