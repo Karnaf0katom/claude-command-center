@@ -180,6 +180,18 @@ class TestInstallScript(unittest.TestCase):
     def test_clt_gate_passes_when_tools_installed(self):
         self.assertEqual(self._clt_gate(0).returncode, 0)
 
+    def test_clt_gate_ignores_darwin_lookalike_without_xcode_select(self):
+        # The Linux install-smoke image fakes `uname -s` = Darwin; its real
+        # /usr/bin/git must not be mistaken for Apple's stub.
+        if shutil.which("xcode-select") or not os.path.exists("/usr/bin/git"):
+            self.skipTest("needs a non-macOS host with /usr/bin/git")
+        result = _run_install_script_function(
+            "require_macos_clt",
+            prelude='uname() { printf "Darwin"; }',
+            env_extra={"PATH": "/usr/bin:/bin"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 class TestInstallBehavior(unittest.TestCase):
     PUBLIC_REPO_URL = "https://github.com/amirfish1/claude-command-center"

@@ -135,6 +135,8 @@ warn_if_no_claude_cli() {
 # "python3 unknown found" or a failed clone on a blank Mac.
 require_macos_clt() {
   [ "$(uname -s)" = "Darwin" ] || return 0
+  # Every real macOS has xcode-select; without it this isn't Apple's stub setup.
+  command -v xcode-select >/dev/null 2>&1 || return 0
   xcode-select -p >/dev/null 2>&1 && return 0
   local c stubs=""
   for c in git "$PYTHON3"; do
