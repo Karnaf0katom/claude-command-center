@@ -8740,6 +8740,13 @@
         via = 'watchtower';
       } else if (row.continued_from_session_id) {
         via = 'resumed';
+      } else if (row.spawn_caller) {
+        // Recorded at session start by hooks/session-start.py: the launching
+        // script/app, so scripted `claude -p` runs don't read as "Terminal".
+        el.hidden = false;
+        el.textContent = 'via: ' + row.spawn_caller;
+        el.title = 'Launched by ' + row.spawn_caller + ' (recorded at session start).';
+        return;
       } else {
         via = 'terminal';
       }

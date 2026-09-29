@@ -4964,9 +4964,17 @@ def _decode_spawn_marker_file(path):
     lane = str(data.get("lane") or "").strip().lower()
     if lane not in _SPAWN_MARKER_LANES:
         lane = "workers" if via else ""
-    if not lane:
+    # Caller-only markers (hooks/session-start.py) carry no lane: they name who
+    # launched the session and must never move it between lanes.
+    caller = str(data.get("caller") or "").strip()[:80]
+    parent = str(data.get("parent_session_id") or "").strip()[:166]
+    if not lane and not caller and not parent:
         return None
-    marker = {"lane": lane}
+    marker = {"lane": lane} if lane else {}
+    if caller:
+        marker["caller"] = caller
+    if parent:
+        marker["parent_session_id"] = parent
     kind = str(data.get("kind") or "").strip()[:_SPAWN_MARKER_VALUE_MAX_CHARS]
     if kind:
         marker["kind"] = kind
@@ -5035,6 +5043,12 @@ def _apply_spawn_markers(rows, markers=None):
             via = marker.get("spawned_via")
             if via:
                 row["spawned_via"] = via
+            caller = marker.get("caller")
+            if caller:
+                row["spawn_caller"] = caller
+            mparent = marker.get("parent_session_id")
+            if mparent and mparent != str(sid) and not row.get("parent_session_id"):
+                row["parent_session_id"] = mparent
     return rows
 
 
@@ -14690,7 +14704,7 @@ _ARCHIVE_LIST_FIELDS = (
     "stale_tool_threshold_s", "stale_tool_queued_input", "subagent_count",
     "subagent_in_flight_count", "subagent_recent", "workflows", "session_state", "goal",
     "goal_status", "parent_session_id", "continued_from_session_id",
-    "hermes_parent_session_id", "spawned_via",
+    "hermes_parent_session_id", "spawned_via", "spawn_caller",
     "hermes_continued_from", "hermes_child_session_ids",
     "hermes_lineage_session_ids", "hermes_lineage_count", "hermes_is_parent",
     "model", "reasoning_effort", "latest_input_tokens", "lifetime_tokens", "cost_usd", "cost_breakdown_usd",

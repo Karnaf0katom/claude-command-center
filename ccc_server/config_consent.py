@@ -59,6 +59,7 @@ CLAUDE_HOOK_SPECS = (
     ("PostToolUse", "post-tool-use.py", None),
     ("Notification", "notification.py", None),
     ("Stop", "stop.py", None),
+    ("SessionStart", "session-start.py", 5),
     ("PreCompact", "pre-compact.py", None),
     ("PostCompact", "post-compact.py", None),
 )
@@ -67,7 +68,7 @@ CODEX_HOOK_SPECS = (
 )
 HOOK_SCRIPT_NAMES = (
     "pre-tool-use.py", "post-tool-use.py", "notification.py", "stop.py",
-    "pre-compact.py", "post-compact.py", "_reorient_shared.py",
+    "session-start.py", "pre-compact.py", "post-compact.py", "_reorient_shared.py",
     "post-compact-codex.py",
 )
 
