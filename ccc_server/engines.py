@@ -6269,6 +6269,15 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
         "--json",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
+        # This fallback only runs when the app-server path (native
+        # thread/turn persistence) is unavailable, so it's already a
+        # fire-and-forget one-shot CCC tracks via its own spawn log, not a
+        # resumable native thread. Racing the same holder that caused the
+        # fallback to write ~/.codex's shared rollout/sqlite state produces
+        # a permanently orphaned thread the Codex desktop app can't open
+        # (OPS-1275) even though the run itself completes correctly.
+        # --ephemeral skips that disk persistence entirely.
+        "--ephemeral",
         "--model", model_to_use,
         "--cd", spawn_cwd,
     ]
