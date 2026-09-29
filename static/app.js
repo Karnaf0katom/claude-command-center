@@ -69756,8 +69756,14 @@
     return null;
   }
 
+  let _emnInstalled = null;        // engine -> bool, null until first probe (declared early: sync runs at init)
+  let _emnForced = '';             // engine named by a failed spawn
+  let _emnBusy = '';               // engine whose install terminal we opened
   function syncSpawnEngineDependentUi() {
     const engine = getSpawnEngine();
+    if (typeof refreshEngineMissingNotice === 'function') {
+      if (_emnInstalled) renderEngineMissingNotice(); else refreshEngineMissingNotice();
+    }
     const worktreeSupported = spawnSupportsWorktree(engine);
     if ($convInputEffortSelect) {
       // Ladders differ in extent per engine, so the options are rebuilt rather
@@ -78806,6 +78812,98 @@
     })();
   }
 
+  // ── Composer notice: selected engine not installed ─────────────
+  // Same cheap detection as the Settings Engines page (/api/engines/installed,
+  // a PATH/candidate lookup, no subprocess). Shown before the user sends, and
+  // also after a spawn that still failed with engine_not_installed.
+  function _emnLabel(engine) {
+    const m = (typeof ENGINE_HUB_META !== 'undefined' && ENGINE_HUB_META[engine]) || null;
+    return (m && m.label) || spawnEngineLabel(engine);
+  }
+  async function refreshEngineMissingNotice(opts) {
+    try {
+      const r = await fetch('/api/engines/installed' + (opts && opts.fresh ? '?fresh=1' : ''));
+      const d = await r.json();
+      const map = {};
+      (d.engines || []).forEach(e => { if (e.kind === 'spawn') map[e.engine] = !!e.installed; });
+      _emnInstalled = map;
+    } catch (_) { /* keep the last answer; never block the composer on this */ }
+    renderEngineMissingNotice();
+  }
+  function renderEngineMissingNotice() {
+    const el = document.getElementById('engineMissingNotice');
+    if (!el) return;
+    const engine = _emnForced || getSpawnEngine();
+    const map = _emnInstalled;
+    const isNew = (typeof currentConversation !== 'undefined' && currentConversation === '__new__');
+    const missing = !!map && map[engine] === false;
+    if (!isNew || !missing) {
+      if (_emnForced && map && map[_emnForced] !== false) _emnForced = '';
+      el.hidden = true; el.innerHTML = '';
+      return;
+    }
+    const label = _emnLabel(engine);
+    const others = Object.keys(map).filter(k => map[k] && SPAWN_DEFAULT_ENGINES.includes(k));
+    const none = !Object.keys(map).some(k => map[k]);
+    const cmd = (ENGINE_HUB_META[engine] && ENGINE_HUB_META[engine].cmd) || engine;
+    el.innerHTML = '';
+    const msg = document.createElement('span');
+    msg.className = 'emn-msg';
+    msg.textContent = _emnBusy === engine
+      ? 'Finish the install in the terminal that just opened. This updates on its own.'
+      : label + " isn't installed on this Mac." + (none ? ' No agent is installed yet.' : '');
+    el.appendChild(msg);
+    const add = (text, cls, fn, disabled) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = text; if (cls) b.className = cls;
+      if (disabled) b.disabled = true;
+      b.addEventListener('click', fn);
+      el.appendChild(b);
+    };
+    if (none) {
+      add('Review engines', 'emn-primary', () => {
+        if (typeof openSettingsModal === 'function') { _settingsCurrentSection = 'engines'; openSettingsModal(); }
+      });
+    } else {
+      add('Install ' + label, 'emn-primary', () => installMissingEngine(engine), _emnBusy === engine);
+    }
+    if (!none && others.length) {
+      const alt = others.includes('claude') ? 'claude' : others[0];
+      add('Use ' + _emnLabel(alt) + ' instead', '', () => { _emnForced = ''; setSpawnEngine(alt); renderEngineMissingNotice(); });
+    }
+    el.hidden = false;
+  }
+  async function installMissingEngine(engine) {
+    _emnBusy = engine;
+    renderEngineMissingNotice();
+    let opened = false;
+    try {
+      const res = await fetch('/api/onboarding/install-terminal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ engine }),
+      });
+      const data = await res.json().catch(() => ({}));
+      opened = !!(data && data.ok);
+    } catch (_) {}
+    if (!opened) {
+      _emnBusy = '';
+      showOpToast('Could not open a terminal. Open Settings, Engines to install ' + _emnLabel(engine) + '.', 'error');
+      renderEngineMissingNotice();
+      return;
+    }
+    // Re-detect on a short loop until it appears (cheap lookup, capped).
+    let tries = 0;
+    const tick = async () => {
+      tries += 1;
+      await refreshEngineMissingNotice({ fresh: true });
+      if (_emnInstalled && _emnInstalled[engine]) { _emnBusy = ''; _emnForced = ''; renderEngineMissingNotice(); return; }
+      if (tries < 60 && _emnBusy === engine) setTimeout(tick, 4000);
+      else { _emnBusy = ''; renderEngineMissingNotice(); }
+    };
+    setTimeout(tick, 4000);
+  }
+  window.addEventListener('focus', () => { if (_emnInstalled) refreshEngineMissingNotice({ fresh: true }); });
+
   async function spawnFromInlineInput(body) {
     const spawnAskedAt = Date.now();
     const subject = spawnFirstSentence(body);
@@ -78953,6 +79051,13 @@
         restoreDraftAfterFailure();
         flashRed();
         if (missingCwd) offerCreateMissingSpawnCwd(launchCwd, body);
+        else if (data.error_code === 'engine_not_installed') {
+          // Friendly notice with an Install button instead of raw error text;
+          // the prompt was already restored above.
+          _emnForced = data.engine || engine;
+          _emnInstalled = Object.assign({}, _emnInstalled || {}, { [_emnForced]: false });
+          setTimeout(() => { renderEngineMissingNotice(); refreshEngineMissingNotice({ fresh: true }); }, 120);
+        }
         else showOpToast('Spawn failed: ' + (data.error || 'HTTP ' + res.status), 'error');
         console.error('[New session] spawn failed', data);
       }

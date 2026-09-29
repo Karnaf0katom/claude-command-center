@@ -172,3 +172,37 @@ def test_login_command_covers_devin_and_grok(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(bindir))
     assert server._onboarding_login_command("devin")["argv"][1:] == ["auth", "login"]
     assert server._onboarding_login_command("grok")["argv"][1:] == ["login"]
+
+
+def test_spawn_failure_gets_stable_engine_not_installed_code(monkeypatch, tmp_path):
+    _isolated_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("CCC_CLAUDE_BIN", "")
+    resolved = server._resolve_claude_bin()
+    assert not resolved["available"] and resolved["code"] == "claude_unavailable"
+    failed = {"ok": False, "error": resolved["reason"], "code": resolved["code"]}
+    out = server._annotate_engine_not_installed(dict(failed), "/api/sessions/spawn")
+    assert out["error_code"] == "engine_not_installed" and out["engine"] == "claude"
+    assert out["error"] == resolved["reason"] and out["code"] == "claude_unavailable"
+    # Per-engine endpoints and the grok `not_installed` code.
+    assert server._annotate_engine_not_installed(
+        {"ok": False, "code": "codex_unavailable"}, "/api/sessions/spawn-codex"
+    )["engine"] == "codex"
+    assert server._annotate_engine_not_installed(
+        {"ok": False, "code": "not_installed"}, "/api/sessions/spawn-grok"
+    )["engine"] == "grok"
+
+
+def test_engine_not_installed_code_only_on_matching_failures():
+    ok = {"ok": True, "code": "claude_unavailable"}
+    assert "error_code" not in server._annotate_engine_not_installed(ok, "/api/sessions/spawn")
+    other = {"ok": False, "error": "missing prompt"}
+    assert "error_code" not in server._annotate_engine_not_installed(other, "/api/sessions/spawn")
+    wrong_path = {"ok": False, "code": "claude_unavailable"}
+    assert "error_code" not in server._annotate_engine_not_installed(wrong_path, "/api/other")
+
+
+def test_composer_notice_is_wired_to_error_code():
+    js = (ROOT / "static" / "app.js").read_text()
+    assert "engine_not_installed" in js and "engineMissingNotice" in js
+    assert "/api/engines/installed" in js

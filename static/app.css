@@ -29797,3 +29797,21 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 }
 
 .eng-quick { min-width: 68px; padding: 3px 12px; font-size: 11.5px; }
+
+/* Composer notice: the selected engine is not installed on this Mac. */
+.engine-missing-notice {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin: 0 0 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.4;
+  color: var(--text); background: var(--surface, var(--bg));
+  border: 1px solid var(--border); border-left: 3px solid var(--amber, #d9a441);
+  border-radius: 6px;
+}
+.engine-missing-notice[hidden] { display: none; }
+.engine-missing-notice .emn-msg { flex: 1 1 200px; min-width: 0; }
+.engine-missing-notice .emn-msg code { font-size: 11.5px; opacity: .85; }
+.engine-missing-notice button {
+  font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 5px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+}
+.engine-missing-notice button.emn-primary { background: var(--accent, #4c8dff); border-color: transparent; color: #fff; }
+.engine-missing-notice button:disabled { opacity: .6; cursor: default; }

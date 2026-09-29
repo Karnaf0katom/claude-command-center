@@ -25456,6 +25456,35 @@ def _spawn_stream_idle_sleep_s(consecutive_empty):
 _STATIC_GZIP_CACHE = {}
 
 
+def _annotate_engine_not_installed(data, path):
+    """Stable machine-readable marker for "the engine CLI is not installed".
+
+    Spawn endpoints return per-engine codes (`claude_unavailable`, grok uses
+    `not_installed`, ...). Add `error_code: "engine_not_installed"` and
+    `engine` alongside so clients need not know that zoo. Only adds fields.
+    """
+    try:
+        if not isinstance(data, dict) or data.get("ok") is not False:
+            return data
+        m = re.match(r"^/api/sessions/spawn(?:-([a-z0-9-]+))?$", (path or "").rstrip("/"))
+        if not m:
+            return data
+        code = str(data.get("code") or "")
+        engine = None
+        if code == "not_installed":
+            engine = m.group(1) or "claude"
+        else:
+            cm = re.match(r"^([a-z0-9]+)_unavailable$", code)
+            if cm:
+                engine = cm.group(1)
+        if engine:
+            data["error_code"] = "engine_not_installed"
+            data["engine"] = engine
+    except Exception:
+        pass
+    return data
+
+
 class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
     def _is_morning_path(self, path):
         """True if the request targets the (opt-in) Morning sub-feature."""
@@ -28226,7 +28255,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Cheap on-disk inventory of every engine CCC knows (spawnable
             # bin resolvers + read-only session stores). Backs the First
             # Flight tour welcome chips.
-            self.send_json(_engines_installed())
+            _q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self.send_json(_engines_installed(fresh=(_q.get("fresh") or [""])[0] in ("1", "true")))
         elif path == "/api/github/quota":
             # W6-1: authoritative GraphQL quota, read IN BAND. `gh api
             # rate_limit`'s .resources.graphql block is NOT this token's
@@ -37190,6 +37220,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 _publish_queue_dashboard_event(response_path, data, status)
         except Exception:
             pass
+        if status >= 400 and self.command == "POST":
+            data = _annotate_engine_not_installed(data, urllib.parse.urlparse(self.path).path)
         body_str = json.dumps(data)
         etag_val = None
         if etag:
