@@ -156,10 +156,34 @@
     {
       id: 'first-queue',
       kind: 'spotlight',
-      anchor: ['#queuePanel', '#statusRailQueuePane', '[data-rail-tab="queue"]'],
+      anchor: ['#filesQueueCreate', '#queuePanel', '#statusRailQueuePane', '[data-rail-tab="queue"]'],
       reveal: 'queue',
-      title: 'Your first queue',
-      body: 'A queue is a list of tickets workers drain. You do not need to file a ticket now. When you are ready, this is where depth, health, and the next ticket show up.'
+      title: 'Create your first queue',
+      body: 'A queue is a list of tickets that workers finish for you. Press + next to Queue to create one. Or pick a session and press Create queue for this session, below the list.'
+    },
+    {
+      id: 'first-ticket',
+      kind: 'spotlight',
+      anchor: ['#filesQueueAdd', '#sidebarQueueList', '#queuePanel', '[data-rail-tab="queue"]'],
+      reveal: 'queue',
+      title: 'File your first ticket',
+      body: 'Press + Add to file a ticket. Write one small task, like a note to a teammate. Nothing runs yet, so it is safe to try.'
+    },
+    {
+      id: 'auto-drain',
+      kind: 'spotlight',
+      anchor: ['.fq-health-drain-toggle', '#queueHealthStrip', '#queuePanel', '[data-rail-tab="queue"]'],
+      reveal: 'queue',
+      title: 'Auto-drain starts the work',
+      body: 'Auto-drain lets workers pick up open tickets on their own. New queues start with it off, so you decide when work begins. Once a queue exists, its row here has an on and off toggle.'
+    },
+    {
+      id: 'queue-model',
+      kind: 'spotlight',
+      anchor: ['.fq-status-plan', '.fq-health-config', '#filesQueueCreate', '#queuePanel', '[data-rail-tab="queue"]'],
+      reveal: 'queue',
+      title: "Pick the workers' model",
+      body: 'Each queue can set the engine, model, and effort its workers use. Open the gear on a queue (or press +) and look under Worker. Left blank, workers use the defaults in Settings, Engines.'
     },
     {
       id: 'orchestration',
@@ -180,9 +204,9 @@
     {
       id: 'health',
       kind: 'spotlight',
-      anchor: ['[data-tour="watchtower"]', '#cccServerStatusChip', '#settingsBtn'],
+      anchor: ['#cccSystemPill'],
       title: 'Server health',
-      body: 'The status chip and More menu show whether the dashboard, the execution worker, and the WatchTower queue server are up. Green means all three are online.'
+      body: 'The System chip at the bottom left of the sidebar shows server health. Open it to see whether the dashboard, the execution worker, and the WatchTower queue server are up.'
     },
     {
       id: 'finale',
