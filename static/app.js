@@ -16448,6 +16448,10 @@
     if (document.body.classList.contains('kanban-split')) return false;
     return true;
   }
+  // Sidebar Jobs tab badge: failed + stale jobs (blank when all healthy or unloaded).
+  function _jobsTabCount() {
+    try { return (window.CCCJobsTab && window.CCCJobsTab.attentionCount()) || 0; } catch (_) { return 0; }
+  }
   function _activateSidebarTabFromMobileNav(targetTab) {
     // Reuse the existing tab bar's own click handler by clicking its
     // matching button when present. Coding/Workers/Queues still work
@@ -18557,7 +18561,7 @@
   function _currentSidebarTabForSwipe() {
     try {
       const t = localStorage.getItem('ccc-sidebar-tab');
-      return (t === 'issues' || t === 'queues' || t === 'inprogress' || t === 'archived' || t === 'coding' || t === 'workers') ? t : 'coding';
+      return (t === 'issues' || t === 'queues' || t === 'inprogress' || t === 'archived' || t === 'coding' || t === 'workers' || t === 'jobs') ? t : 'coding';
     } catch (_) { return 'coding'; }
   }
   function _swipeActionButtonForRow(row) {
@@ -33511,7 +33515,7 @@
     const _sidebarTab = (() => {
       try {
         const t = localStorage.getItem('ccc-sidebar-tab');
-        return (t === 'issues' || t === 'queues' || t === 'inprogress' || t === 'archived' || t === 'coding' || t === 'workers') ? t : 'coding';
+        return (t === 'issues' || t === 'queues' || t === 'inprogress' || t === 'archived' || t === 'coding' || t === 'workers' || t === 'jobs') ? t : 'coding';
       } catch (_) { return 'coding'; }
     })();
     const _activeDraftInputBefore = document.activeElement;
@@ -38199,12 +38203,14 @@
         ['inprogress', 'Active', ((_openAskConvs && _openAskConvs.length) || 0) + ((_visibleSessionConvs && _visibleSessionConvs.length) || 0) + ((_gcItems && _gcItems.length) || 0)],
         ['issues', 'Issues', (_ghIssueConvs && _ghIssueConvs.length) || 0],
         ['queues', 'Queues', ((_uxqHealthCache && _uxqHealthCache.queues) || []).length],
+        ['jobs', 'Jobs', _jobsTabCount()],
         ...(_otherTabCount > 0 ? [_otherTabDef] : []),
       ]
       : [
         ['inprogress', 'Active', ((_openAskConvs && _openAskConvs.length) || 0) + ((_visibleSessionConvs && _visibleSessionConvs.length) || 0) + ((_gcItems && _gcItems.length) || 0)],
         ['coding', 'Coding', _allTabCodingConvs.length],
         ['workers', 'Workers', _allTabWorkerConvs.length],
+        ['jobs', 'Jobs', _jobsTabCount()],
         ...(_otherTabCount > 0 ? [_otherTabDef] : []),
       ];
     const _tabBarHtml = '<div class="conv-tab-bar" data-role="conv-tab-bar">'
@@ -38231,6 +38237,7 @@
         .replace('aria-expanded="false"', 'aria-expanded="true"'));
     const _tabBody = _sidebarTab === 'issues' ? (_forceOpen(_ghIssuesHtml, 'conv-ghissues-section') || _tabEmpty('open issues'))
       : _sidebarTab === 'queues' ? '<div class="shared-queue-host shared-queue-host-sidebar" id="sidebarQueueHost"></div>'
+      : _sidebarTab === 'jobs' ? '<div class="jobs-host" id="sidebarJobsHost"></div>'
       : (_sidebarTab === 'archived' || _sidebarTab === 'coding' || _sidebarTab === 'workers') ? (_forceOpen(_archivedHtml, 'conv-archived-section') || _tabEmpty('sessions'))
       // _readyToMergeHtml is built at its declaration below the In-progress
       // assembly, so it has to be concatenated here rather than inside
@@ -38239,7 +38246,7 @@
       // `||` fallback keeps the empty-state text when BOTH are empty while
       // still showing ready-to-merge rows when only In-progress is empty.
       : ((_readyToMergeHtml + _forceOpen(_inProgressHtml, 'conv-inprogress-section')) || _tabEmpty('in-progress sessions'));
-    const _showMoreRowsHtml = _sidebarRowsOmitted
+    const _showMoreRowsHtml = (_sidebarRowsOmitted && _sidebarTab !== 'jobs')
       ? '<div class="archive-empty-state"><button type="button" class="conv-window-btn" data-role="sidebar-show-more">Show '
         + Math.min(SIDEBAR_RENDER_MORE_ROWS, _sidebarRowsOmitted)
         + ' more sessions</button><div>' + _sidebarRowsOmitted + ' older rows are not rendered yet.</div></div>'
@@ -38354,6 +38361,8 @@
     _convListRenderVersion++;
     _updateConvTabBarHeightVar($convList);
     _mountSharedQueuePanel();
+    // Jobs tab: refill the fresh host from cached data (no flicker, no fetch).
+    try { if (_sidebarTab === 'jobs' && window.CCCJobsTab) window.CCCJobsTab.mount(); } catch (_) {}
     // The Workers lane emits the activity containers empty (see CCC-1061 above)
     // so their live contents stay out of the structural signature. Fill them
     // here, immediately after the reset, or the block flashes blank until the
