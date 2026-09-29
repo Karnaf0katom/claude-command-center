@@ -21,6 +21,7 @@ import threading
 import time
 
 from ccc_server import core as _core
+from ccc_server import wt_review as _wt_review
 from ccc_server.github_issues import github_rate_limited
 
 # ---------------------------------------------------------------------------
@@ -748,10 +749,15 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
     claimable_by_q = {}  # queue → open items a worker is ALLOWED to claim
     in_progress_by_q = {}  # queue → items currently claimed/in progress
     in_review_by_q = {}  # queue → items closed by a worker, awaiting a gate (WT-5)
+    blocked_by_q = {}  # queue → open items waiting on an unsatisfied blocked_by (WT-4)
     last_activity_q = {}  # queue → most-recent item-touch epoch (any status)
     last_progress_q = {}  # queue → most-recent close OR claim epoch (WT health semantics)
     try:
-        for it in ((_core._q.list_items() if items is None else items) or []):
+        all_items = (_core._q.list_items() if items is None else items) or []
+        # One ref index per pass (not per row) for the WT-4 dependency check.
+        by_ref = _wt_review.refs_index(all_items) if any(
+            it.get("blocked_by") for it in all_items if isinstance(it, dict)) else {}
+        for it in all_items:
             qn = _norm(it.get("project"))
             if not qn or qn == "?":
                 continue
@@ -782,6 +788,12 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
             # claimable=True; un-runnable issues must not trigger drain state.
             if it.get("status") == "open":
                 if it.get("claimable") is False:
+                    continue
+                # Dependency gating (WT-4): WatchTower skips a ticket until
+                # every blocked_by ref is closed as completed, so it is not
+                # claimable work and must not read as an unstaffed queue.
+                if it.get("blocked_by") and _wt_review.blocker_verdict(it, by_ref)[0] != "ok":
+                    blocked_by_q[qn] = blocked_by_q.get(qn, 0) + 1
                     continue
                 # Readiness gating, the other half of WatchTower's claim
                 # filter. `claim_next` skips needs-shaping/needs-spec tickets
@@ -910,6 +922,7 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
             "claimable": claimable,
             "in_progress": int(in_progress_by_q.get(q, 0)),
             "in_review": int(in_review_by_q.get(q, 0)),
+            "blocked": int(blocked_by_q.get(q, 0)),
             "closed": int(closed_by_q.get(q, 0)),
             "total": int(total_by_q.get(q, 0)),
             "gated": int(gated_by_q.get(q, 0)),

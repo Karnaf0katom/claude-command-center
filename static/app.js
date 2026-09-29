@@ -45952,6 +45952,48 @@
       : stage.indexOf('review:') === 0 ? (stage.slice(7).trim() || 'submitter') : 'submitter';
     return 'awaits review · ' + who;
   }
+  // WT-4 ticket dependencies: WatchTower skips a ticket until every blocked_by
+  // ref is closed as completed. Port of watchtower.queue.blocker_verdict
+  // (also ccc_server/wt_review.py) -> ['ok'|'waiting'|'stuck', blockerRef].
+  // The ref index is built once per item-list identity, never per row.
+  let _uxqRefIndexMemo = { src: null, map: null };
+  function _uxqRefIndex(items) {
+    if (_uxqRefIndexMemo.src !== items) {
+      const map = new Map();
+      (items || []).forEach(it => { if (it && it.ref) map.set(String(it.ref), it); });
+      _uxqRefIndexMemo = { src: items, map };
+    }
+    return _uxqRefIndexMemo.map;
+  }
+  function _uxqBlockerVerdict(it, byRef) {
+    let waiting = '';
+    for (const raw of ((it && it.blocked_by) || [])) {
+      const ref = String(raw);
+      const b = byRef.get(ref);
+      if (!b) continue;
+      let state = 'satisfied';
+      if (b.status !== 'closed') state = 'waiting';
+      else if (b.product_nack) state = 'stuck';
+      else {
+        const un = b.resolution && Array.isArray(b.resolution.unresolved) ? b.resolution.unresolved : [];
+        if (un.some(x => String(x || '').trim())) state = 'stuck';
+      }
+      if (state === 'stuck') {
+        if ((it.blocker_escalated || []).indexOf(ref) !== -1 && !it.needs_input) continue;
+        return ['stuck', ref];
+      }
+      if (state === 'waiting' && !waiting) waiting = ref;
+    }
+    return waiting ? ['waiting', waiting] : ['ok', ''];
+  }
+  // The blocker an open ticket is waiting on ('' when none). Stuck blockers
+  // are already escalated to needs_input by WatchTower with the blocker named
+  // in block_question, so they surface as the normal needs-input state.
+  function _uxqWaitingOn(it, items) {
+    if (!it || it.status !== 'open' || !Array.isArray(it.blocked_by) || !it.blocked_by.length) return '';
+    const v = _uxqBlockerVerdict(it, _uxqRefIndex(items || (_uxqItemsCache && _uxqItemsCache.items) || []));
+    return v[0] === 'waiting' ? v[1] : '';
+  }
   function _uxqFilterItems(items, statusFilter, typeFilter) {
     const source = Array.isArray(items) ? items : [];
     const recentClosedCutoff = Date.now() - 12 * 60 * 60 * 1000;
@@ -48217,6 +48259,10 @@
       .find(x => x && _uxqProjectKey(x.project) === key);
     const depth = row ? (Number(row.depth) || 0) : 0;
     const age = row ? _uxqFmtAge(row.oldest_open_age_seconds) : '';
+    // WT-4: open tickets held back by an unfinished blocker, counted apart
+    // from ready ones. Same item list the rows render from; no extra fetch.
+    const blockedCount = (items || []).filter(it => it && _uxqProjectKey(it.project) === key
+      && _uxqWaitingOn(it, items)).length;
     const workers = (liveWorkers || []).filter(w => w && _uxqProjectKey(w.queue) === key);
     // CCC-789 follow-up: a read-only "Auto-drain off" line left no path to
     // actually change it (or claim types/worker count) from this compact
@@ -48303,6 +48349,9 @@
       // CCC-976: the queue name is already shown in the picker above this
       // strip — dropped the redundant fq-status-proj label from this row.
       + (row ? ('<span class="fq-status-depth" title="' + escapeAttr(depth + ' open') + '">' + depth + '</span>'
+          + (blockedCount ? '<span class="fq-status-sep">·</span><span class="fq-status-blocked" title="'
+            + escapeAttr(blockedCount + ' open ticket' + (blockedCount === 1 ? '' : 's') + ' waiting on another ticket (blocked_by); not ready to claim')
+            + '">' + blockedCount + ' blocked</span>' : '')
           + '<span class="fq-status-sep">·</span>'
           + '<span class="fq-status-age" title="' + escapeAttr('oldest ' + age) + '">' + escapeHtml(age) + '</span>') : '')
       + (workers.length ? '<span class="fq-status-live">LIVE</span>' : '')
@@ -48468,7 +48517,8 @@
       const _hasUnresolved = it => _uxqUnresolvedNotes(it).length > 0;
       const _isWaitingToDrain = it => {
         if (_effectiveStatus(it) !== 'open') return false;
-        return !_isStaleClaim(it) && it.claimable !== false && it.watchtower_runnable !== false && !_unready(it);
+        return !_isStaleClaim(it) && it.claimable !== false && it.watchtower_runnable !== false && !_unready(it)
+          && !_uxqWaitingOn(it, items);
       };
       // WIP → needs input → unresolved attention → claimable work →
       // non-claimable, unready, or otherwise inert open work → clean closes.
@@ -48539,7 +48589,16 @@
         } else if (it.priority) {
           c.push('<span class="fq-chip fq-prio-' + escapeAttr(it.priority) + ' fq-priority-chip">' + escapeHtml(it.priority) + priorityBumpHtml + '</span>');
         }
-        if (it.readiness) c.push('<span class="fq-chip fq-ready-' + escapeAttr(it.readiness) + '">' + escapeHtml(_readyShort[it.readiness] || it.readiness) + '</span>');
+        // Readiness is meaningless once closed; while a blocker is still open
+        // the ticket is not READY either, so name what it waits on (WT-4).
+        const waitingOn = _uxqWaitingOn(it, items);
+        if (waitingOn) {
+          c.push('<span class="fq-chip fq-waiting-on" role="button" tabindex="0" data-blocker-ref="' + escapeAttr(waitingOn) + '"'
+            + ' title="' + escapeAttr('Blocked by ' + waitingOn + ': no worker picks this up until it closes as completed. Click to open ' + waitingOn + '.') + '">'
+            + 'waiting on ' + escapeHtml(waitingOn) + '</span>');
+        } else if (it.readiness && it.status !== 'closed') {
+          c.push('<span class="fq-chip fq-ready-' + escapeAttr(it.readiness) + '">' + escapeHtml(_readyShort[it.readiness] || it.readiness) + '</span>');
+        }
         if (it.value || it.confidence) c.push('<span class="fq-chip fq-vc" title="value / confidence">' + escapeHtml(it.value || '-') + '/' + escapeHtml(it.confidence || '-') + '</span>');
         return c.length ? '<div class="fq-chips">' + c.join('') + '</div>' : '';
       };
@@ -48763,6 +48822,13 @@
             showOpToast('Priority update failed: ' + e, 'error');
             bumpBtn.disabled = false;
           }
+          return;
+        }
+        // "waiting on REF" chip opens the blocker, not the blocked row.
+        const waitChip = ev.target && ev.target.closest && ev.target.closest('.fq-waiting-on[data-blocker-ref]');
+        if (waitChip) {
+          ev.stopPropagation();
+          _uxqOpenItemDetail(waitChip.getAttribute('data-blocker-ref'));
           return;
         }
         const row = ev.target && ev.target.closest && ev.target.closest('.fq-row[data-ref]');
