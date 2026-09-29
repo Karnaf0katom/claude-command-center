@@ -1,0 +1,1 @@
+- The lane map no longer shows a Task subagent as "landed" while it is still thinking or narrating between tool calls.

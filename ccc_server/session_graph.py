@@ -538,6 +538,13 @@ def _agent_transcript_active(path, mtime, size):
     hasn't answered yet. Truncated trailing lines (mid-write) parse as the
     previous record, which reads as active — correct, since a write was
     literally in flight.
+
+    Claude Code writes each content block of a message as its own record
+    (thinking, then text, then tool_use), and every record but the last
+    carries an explicit ``"stop_reason": null``. So a thinking-only record,
+    or a text record with a null stop_reason (narration before a tool call),
+    is mid-message, not the report; reading it as final showed a lane
+    "landed" while its transcript was still being written (CCC-1219).
     """
     key = str(path)
     cached = _AGENT_ACTIVE_CACHE.get(key)
@@ -556,12 +563,14 @@ def _agent_transcript_active(path, mtime, size):
                 continue
             rtype = rec.get("type")
             if rtype == "assistant":
-                content = (rec.get("message") or {}).get("content") or []
-                has_tool_use = any(
-                    isinstance(b, dict) and b.get("type") == "tool_use"
-                    for b in content
+                msg = rec.get("message") or {}
+                content = msg.get("content") or []
+                types = {b.get("type") for b in content if isinstance(b, dict)}
+                active = (
+                    "tool_use" in types
+                    or "text" not in types
+                    or ("stop_reason" in msg and msg["stop_reason"] is None)
                 )
-                active = has_tool_use
                 break
             elif rtype == "user":
                 active = True

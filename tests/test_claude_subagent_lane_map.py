@@ -80,6 +80,26 @@ class ClaudeSubagentLaneMapTests(unittest.TestCase):
         active = _agent_transcript_active(transcript_file, st.st_mtime, st.st_size)
         self.assertTrue(active)
 
+    def _active_for(self, records):
+        transcript_file = self.tmp_path / "agent-stream.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        st = transcript_file.stat()
+        return _agent_transcript_active(transcript_file, st.st_mtime, st.st_size)
+
+    def test_agent_transcript_mid_message_blocks_read_active(self):
+        # CCC-1219: Claude Code writes each content block as its own record
+        # with stop_reason null until the last; a thinking-only or pre-tool
+        # text record is mid-message, not the final report.
+        thinking = {"type": "assistant", "message": {"stop_reason": None, "content": [{"type": "thinking", "thinking": ""}]}}
+        narration = {"type": "assistant", "message": {"stop_reason": None, "content": [{"type": "text", "text": "Now let me edit"}]}}
+        final = {"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Report"}]}}
+        attachment = {"type": "attachment", "attachment": {"type": "deferred_tools_record"}}
+        self.assertTrue(self._active_for([attachment, thinking]))
+        self.assertTrue(self._active_for([thinking, narration]))
+        self.assertFalse(self._active_for([thinking, final, attachment]))
+
 
 if __name__ == "__main__":
     unittest.main()
