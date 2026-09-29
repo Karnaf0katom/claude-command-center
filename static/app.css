@@ -22784,6 +22784,10 @@ body.has-gc-reader .pwa-install-banner {
 .fq-row.is-blocked .fq-note { color: #ff7b72; }
 /* in_review (WT-5 gate): closed by its worker, waiting on accept/reject. */
 .fq-chip.fq-review { background: rgba(163,113,247,0.20); color: #d2a8ff; }
+/* WT-4 dependency: replaces READY while a blocked_by ticket is unfinished. */
+.fq-chip.fq-waiting-on { background: rgba(139,148,158,0.18); color: var(--text-muted, #8b949e); cursor: pointer; }
+.fq-chip.fq-waiting-on:hover, .fq-chip.fq-waiting-on:focus-visible { color: var(--text, #e6edf3); text-decoration: underline; }
+.fq-status-blocked { color: var(--text-muted, #8b949e); white-space: nowrap; }
 .fq-row.is-in_review .fq-status { background: #a371f7; box-shadow: 0 0 0 3px rgba(163,113,247,0.18); }
 /* Blocked panel inside the ticket detail modal. */
 /* ── Ticket Detail Modal (world-class redesign CCC-387/388) ── */
@@ -29916,6 +29920,7 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 a.job-chip:hover { background: rgba(110,140,175,0.3); }
 .job-chip-more { font-size: 10.5px; color: var(--text-muted); }
 .job-when { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+.job-next { flex: 0 0 auto; margin-left: auto; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--text); }
 .st-failed .job-when { color: var(--red); }
 .jobs-hist { display: inline-flex; gap: 2px; align-items: center; }
 .jobs-hist i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); display: block; }

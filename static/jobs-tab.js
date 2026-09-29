@@ -99,6 +99,19 @@
     return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
+  // "9:00pm" today, "tmrw 2:00am", "Sun 7:30am" within a week, else "Oct 8".
+  function nextLabel(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const t = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).replace(' ', '').toLowerCase();
+    const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((day(d) - day(new Date())) / 86400000);
+    if (days <= 0) return t;
+    if (days === 1) return 'tmrw ' + t;
+    if (days < 7) return d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + t;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+
   function headerHtml() {
     const hosts = _data.hosts || {};
     const h = hosts.hermes || {};
@@ -191,7 +204,9 @@
       + '<div class="job-line1"><span class="job-dot" title="' + esc(j.status) + '"></span>'
       + '<span class="job-name" title="' + esc(j.name) + '">' + esc(shortName(j.name)) + '</span>'
       + (_host === 'all' ? '<span class="job-host">' + (j.host === 'hermes' ? 'Hermes' : 'Laptop') + '</span>' : '')
-      + '<span class="job-desc-inline" title="' + esc(nodash(j.description)) + '">' + esc(nodash(j.description)) + '</span></div>'
+      + '<span class="job-desc-inline" title="' + esc(nodash(j.description)) + '">' + esc(nodash(j.description)) + '</span>'
+      + (j.next_run_at && j.enabled !== false ? '<span class="job-next" title="Next run: ' + esc(fmtLocal(j.next_run_at)) + ' (' + esc(rel(j.next_run_at)) + ')">Next ' + esc(nextLabel(j.next_run_at)) + '</span>' : '')
+      + '</div>'
       + '<div class="job-line2">' + stripHtml(j) + '<span class="job-mid">' + mid + '</span>'
       + '<span class="job-when" title="' + esc(tipBits.join('\n')) + '">' + esc(j.last_run_at ? rel(j.last_run_at) : '') + '</span></div>';
     if (open) {
