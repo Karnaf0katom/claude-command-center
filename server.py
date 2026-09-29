@@ -22526,7 +22526,11 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
         return claude_path, _parse_conversation_event
     codex_path = _resolve_codex_rollout_path(conversation_id)
     if codex_path and codex_path.is_file():
-        if repo_path and _codex_rollout_is_stub(codex_path):
+        if _codex_rollout_is_stub(codex_path):
+            if not repo_path:
+                row = _codex_thread_row(conversation_id) or {}
+                cwd = row.get("cwd") or ""
+                repo_path = _git_toplevel_for_existing_dir(cwd) or cwd if cwd else None
             exec_log = _find_ccc_spawn_log_for_thread(conversation_id, repo_path)
             if exec_log:
                 return exec_log, _parse_codex_exec_log_event
@@ -22676,6 +22680,10 @@ def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
     → path) cache is preserved across calls; only the stat is re-run.
     """
     try:
+        if _detect_session_engine(conversation_id) == "codex":
+            resolved, _ = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
+            st = Path(resolved).stat()
+            return (st.st_mtime_ns, st.st_size)
         with _CONV_PATH_CACHE_LOCK:
             path = _CONV_PATH_CACHE.get(conversation_id)
         if path is not None:
@@ -22988,6 +22996,21 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
     their resulting structured event stream before returning it.
     """
     windowed = bool(tail) or (before is not None)
+    if _detect_session_engine(conversation_id) == "codex":
+        _, source_parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
+        if source_parser is _parse_codex_exec_log_event:
+            native_path = _resolve_codex_rollout_path(conversation_id)
+            recovered = _codex_recover_log_conversation(conversation_id, native_path)
+            # The capture may have changed after reader selection. Never
+            # fall through to parsing a capture from a different thread.
+            recovered = recovered or {"events": [], "last_line": 0}
+            if windowed:
+                recovered = _window_parsed_conversation_events(recovered, tail=tail, before=before)
+            else:
+                recovered["events"] = [event for event in recovered["events"] if event["line"] > after_line]
+            if before is None:
+                recovered["events"] = _merge_synthetic_conversation_events(recovered["events"], _get_queued_events_for_session(conversation_id))
+            return recovered
     if use_cache and not windowed:
         mtime = _conv_parse_jsonl_mtime(conversation_id, repo_path=repo_path)
         if mtime[0] > 0:
@@ -23305,14 +23328,19 @@ def _conv_overlay_fingerprint(session_id):
             state = None
         if state is None:
             return None
-        if not rq and not tq and not state:
+        captures = _codex_capture_fingerprint(session_id)
+        if not rq and not tq and not state and not captures:
             return ()
-        return json.dumps([rq, tq, state], sort_keys=True, default=str)
+        return json.dumps([rq, tq, state, captures], sort_keys=True, default=str)
     except Exception:
         return None
 
 
 def _conv_response_bytes_get(conversation_id, after_line, window=None):
+    if _detect_session_engine(conversation_id) == "codex":
+        native_path = _resolve_codex_rollout_path(conversation_id)
+        if native_path and _codex_rollout_is_stub(native_path):
+            return None
     mtime = _conv_parse_jsonl_mtime(conversation_id)
     if mtime[0] <= 0:
         return None
@@ -25286,6 +25314,7 @@ _adopt_ccc_module("wire_tail")
 _adopt_ccc_module("kimi_store")
 
 _adopt_ccc_module("codex_parse")
+_adopt_ccc_module("codex_log_recovery")
 # Test-patched globals kept here; ccc_server/pending_inputs.py reads them via _core.
 _pending_terminal_input_queue: dict = {}   # session_id → [text, ...]
 
@@ -37070,6 +37099,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return
         is_codex = parser is _parse_codex_event
         codex_token_usage = None
+        native_path = _resolve_codex_rollout_path(conversation_id) if is_codex or parser is _parse_codex_exec_log_event else None
+        if parser is _parse_codex_exec_log_event or (native_path and _codex_rollout_is_stub(native_path)):
+            self._stream_codex_capture(conversation_id, native_path, after_line)
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -37166,6 +37199,47 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 time.sleep(0.3)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # Client disconnected
+
+    def _stream_codex_capture(self, conversation_id, filepath, after_line):
+        """Stream capture changes independently of the empty rollout's mtime."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        last_key = None
+        last_keepalive = time.time()
+        try:
+            while True:
+                native = Path(filepath).stat()
+                if _codex_native_recovery_metadata(filepath) is None:
+                    # Native and recovered sources have different line
+                    # offsets. Reload the pane rather than append duplicates.
+                    self.wfile.write(b"event: source_reset\ndata: {}\n\n")
+                    self.wfile.flush()
+                    return
+                # A resume writes a new per-turn log. Rediscover before
+                # fingerprinting so an unchanged old capture cannot hide it.
+                recovered = _codex_recover_log_conversation(conversation_id, filepath)
+                key = (native.st_mtime_ns, native.st_size,
+                       _codex_capture_fingerprint(conversation_id))
+                if key != last_key:
+                    last_key = key
+                    result = recovered or {"events": [], "last_line": after_line}
+                    result["events"] = [event for event in result["events"]
+                                        if event["line"] > after_line]
+                    if result["events"]:
+                        after_line = result["last_line"]
+                        self.wfile.write(f"data: {json.dumps(result)}\n\n".encode())
+                        self.wfile.flush()
+                        last_keepalive = time.time()
+                if time.time() - last_keepalive >= 5:
+                    self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                    self.wfile.flush()
+                    last_keepalive = time.time()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     # Allowlist of content types worth compressing. JSON/JS/HTML/CSS shrink
     # ~5-10x; binaries (PNG/JPG/etc) are already compressed and gzipping
