@@ -1,0 +1,2 @@
+- The Mac app is now named "CCC" (CCC.app), so it is easy to find in Finder and Spotlight. Existing installs keep working and update in place.
+- The Mac app now updates itself silently in the background and installs on quit, with no "new version is available" prompt. "Check for Updates..." stays in the app menu.

@@ -321,7 +321,7 @@ final class CCCWebWindow: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindow
         // (CCC-71: "red X closes the app, then an error appears").
         win.isReleasedWhenClosed = false
         if isMain {
-            win.title = "Command Center for Claude, Codex, Antigravity — v\(CCC_BUNDLE_VERSION)"
+            win.title = "CCC — v\(CCC_BUNDLE_VERSION)"
             win.minSize = NSSize(width: CCC_MAIN_MIN_WIDTH, height: CCC_MAIN_MIN_HEIGHT)
             win.setFrameAutosaveName("CCCMainWindow")
             win.titlebarAppearsTransparent = false
@@ -555,9 +555,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let watchdogGrace: TimeInterval = 18  // seconds overlay may stay up before we act
     // Sparkle drives "Check for Updates…" via the appcast at SUFeedURL in
     // Info.plist. Public EdDSA key (SUPublicEDKey) verifies the DMG signature.
-    // startingUpdater: true means Sparkle will run its scheduled background
-    // check (interval and "automatically check" flag are controlled by the
-    // user via the standard Sparkle update prompt the first time it runs).
+    // Info.plist sets SUEnableAutomaticChecks + SUAutomaticallyUpdate, so
+    // Sparkle checks on a schedule, downloads silently, and installs on
+    // quit with no prompt (and no first-run permission question).
     var updaterController: SPUStandardUpdaterController!
     let updaterDelegate = CCCUpdaterDelegate()
     var updaterStarted = false
@@ -673,7 +673,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // App menu (label comes from CFBundleName — see Info.plist)
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Command Center",
+        appMenu.addItem(withTitle: "About CCC",
                         action: #selector(showAbout),
                         keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
@@ -701,7 +701,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             keyEquivalent: "")
             appMenu.addItem(NSMenuItem.separator())
         }
-        appMenu.addItem(withTitle: "Hide Command Center",
+        appMenu.addItem(withTitle: "Hide CCC",
                         action: #selector(NSApplication.hide(_:)),
                         keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others",
@@ -712,7 +712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(NSApplication.unhideAllApplications(_:)),
                         keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Command Center",
+        appMenu.addItem(withTitle: "Quit CCC",
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
         appMenuItem.submenu = appMenu
@@ -976,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      action: #selector(showMainWindowFromStatusItem),
                      keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Quit Command Center",
+        menu.addItem(withTitle: "Quit CCC",
                      action: #selector(NSApplication.terminate(_:)),
                      keyEquivalent: "")
         statusItem?.menu = menu
@@ -1027,7 +1027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "Command Center for Claude, Codex, Antigravity"
+        alert.messageText = "CCC"
         alert.informativeText = """
         One inbox for all your AI agents.
 
@@ -1078,7 +1078,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let restart = NSAlert()
         restart.messageText = "Restart required"
-        restart.informativeText = "Quit and reopen Command Center for the new server target to take effect."
+        restart.informativeText = "Quit and reopen CCC for the new server target to take effect."
         restart.alertStyle = .informational
         restart.addButton(withTitle: "Quit Now")
         restart.addButton(withTitle: "Later")

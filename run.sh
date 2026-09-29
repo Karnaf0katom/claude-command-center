@@ -125,7 +125,7 @@ load_service() {
       # into the same gui/<uid> session collides with it — launchctl fails
       # with a bare "Bootstrap failed: 5: Input/output error" that gives no
       # hint why. Detect that case and say so instead of leaving the raw error.
-      if pgrep -f "Command Center for Claude, Codex, Antigravity.app/Contents/MacOS/CCC" >/dev/null 2>&1; then
+      if pgrep -f "(CCC|Command Center for Claude, Codex, Antigravity)\.app/Contents/MacOS/CCC" >/dev/null 2>&1; then
         cat >&2 <<'EOF'
 
 That failure is expected: the CCC.app is currently open, and it shares its

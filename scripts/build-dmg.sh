@@ -127,11 +127,12 @@ VOL_NAME="CCC v${VERSION}"
 # ---------------------------------------------------------------------------
 WORK_DIR="$(mktemp -d -t ccc-dmg-build)"
 trap 'rm -rf "$WORK_DIR"' EXIT
-# The bundle's filesystem name is what Finder displays in the DMG and
-# in /Applications (CFBundleDisplayName is a softer hint that Finder
-# often ignores for .app bundles). So we name the bundle the long
-# descriptive name on disk.
-APP_BUNDLE_NAME="Command Center for Claude, Codex, Antigravity.app"
+# The bundle's filesystem name is what Finder and Spotlight display, so it is
+# the short "CCC". Builds before this one shipped as "Command Center for
+# Claude, Codex, Antigravity.app"; Sparkle 2 updates in place and keeps the
+# installed folder name, so both names exist in the wild. The bundle
+# identifier (com.github.claude-command-center) is unchanged.
+APP_BUNDLE_NAME="CCC.app"
 APP_DIR="$WORK_DIR/$APP_BUNDLE_NAME"
 STAGING_DIR="$WORK_DIR/staging"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$STAGING_DIR"
@@ -174,12 +175,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleDisplayName</key><string>Command Center for Claude, Codex, Antigravity</string>
+  <key>CFBundleDisplayName</key><string>CCC</string>
   <key>CFBundleExecutable</key><string>CCC</string>
   <key>CFBundleIconFile</key><string>CCC</string>
   <key>CFBundleIdentifier</key><string>com.github.claude-command-center</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Command Center for Claude+</string>
+  <key>CFBundleName</key><string>CCC</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
@@ -195,7 +196,14 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <key>SUFeedURL</key><string>https://ccc.amirfish.ai/appcast.xml</string>
   <key>SUPublicEDKey</key><string>+oU5VeStRaidpogMHUktYpr/JxKuSn9wY1xEgN106lY=</string>
   <key>SUEnableInstallerLauncherService</key><true/>
+  <!-- Silent updates: check hourly, download in the background, install on
+       quit/relaunch, never prompt. SUEnableAutomaticChecks being set also
+       suppresses Sparkle's first-launch "check automatically?" question.
+       "Check for Updates..." in the app menu stays available. -->
   <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUAutomaticallyUpdate</key><true/>
+  <key>SUAllowsAutomaticUpdates</key><true/>
+  <key>SUSendProfileInfo</key><false/>
   <key>SUScheduledCheckInterval</key><integer>3600</integer>
   <key>NSMicrophoneUsageDescription</key><string>Command Center requires microphone access to dictate speech into conversation and group chat text inputs.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Command Center requires speech recognition permission to dictate spoken words into text inputs.</string>
@@ -337,7 +345,7 @@ Public release builds are signed with a Developer ID and notarized by Apple.'
 fi
 
 cat > "$STAGING_DIR/README.txt" <<EOF
-Command Center for Claude, Codex, Antigravity — v${VERSION}
+CCC — v${VERSION}
 One inbox for all your AI agents.
 
 1. Drag "${APP_BUNDLE_NAME%.app}" onto the Applications folder.
