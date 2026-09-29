@@ -137,7 +137,8 @@
       const label = k === 'all' ? 'All' : k === 'hermes' ? 'Hermes' : 'Laptop';
       return '<button type="button" class="jobs-seg-btn' + (k === _host ? ' is-active' : '') + '" data-jobs-host="' + k + '">' + label + '</button>';
     }).join('');
-    return '<div class="jobs-head"><div class="jobs-seg">' + seg + '</div>'
+    return '<div class="jobs-head"><div class="jobs-seg">' + seg
+      + '<button type="button" class="jobs-add-btn" data-jobs-add title="Create a scheduled job: an agent session writes and enables it">+ Add</button></div>'
       + '<div class="jobs-summary' + (bad ? ' is-bad' : '') + '">' + esc(parts.join(' · ')) + '</div></div>';
   }
 
@@ -286,7 +287,133 @@
     });
   }
 
+  // ── "+ Add": create a job through an agent session ──────────────────────
+  // CCC never writes systemd units or LaunchAgents itself. The dialog composes
+  // a prompt and spawns a normal session (window.cccSpawnPromptSession, the
+  // composer's Run path) that creates the job and checks it shows up here.
+  function composePrompt(f) {
+    const host = f.host === 'laptop' ? 'laptop' : 'hermes';
+    const lines = [
+      'Create a new scheduled job and confirm it shows up in the CCC Jobs tab.',
+      '',
+      'What it should do: ' + f.what,
+      'When it should run: ' + f.when,
+      'Repo / project folder: ' + f.repo,
+      '',
+      'Pick a short kebab-case job name from what it does. Write the script the job runs inside the repo (committed there, not in /tmp).',
+    ];
+    if (host === 'hermes') {
+      lines.push(
+        'Host: the Hermes VM (reach it with `ssh hermes`; use sudo there).',
+        '- Create /etc/systemd/system/<name>.service and /etc/systemd/system/<name>.timer.',
+        '- The service has a one-line Description=, WorkingDirectory= set to the repo checkout on Hermes (if the folder above is a laptop path, use the matching checkout on the VM), and User=hermes.',
+        '- Translate the schedule into OnCalendar= (or OnUnitActiveSec= for "every N" schedules) on the timer.',
+        '- Run `sudo systemctl daemon-reload` and `sudo systemctl enable --now <name>.timer`.'
+      );
+    } else {
+      lines.push(
+        'Host: this laptop (launchd).',
+        '- Create ~/Library/LaunchAgents/<label>.plist, where <label> uses the same reverse-DNS prefix the existing scheduled LaunchAgents there use, followed by <name>.',
+        '- Use StartCalendarInterval for clock times or StartInterval for "every N" schedules; set WorkingDirectory to the repo.',
+        '- StandardOutPath and StandardErrorPath go under ~/Library/Logs/<name>/.',
+        '- Load it with `launchctl bootstrap gui/$(id -u) <plist>`.'
+      );
+    }
+    lines.push(
+      '',
+      'The job script must end by printing one line `CCC_OUTCOME: <one plain sentence about what this run did>` so the Jobs row shows a readable outcome, and must print any ticket refs or PR URLs it creates.',
+      '',
+      'Then force-refresh GET /api/jobs on the CCC dashboard (it caches for ~45s) until the new job is listed, and report its name, schedule, next run time, and the files you created.'
+    );
+    return lines.join('\n');
+  }
+
+  function closeAddDialog() {
+    const d = document.getElementById('jobsAddDialog');
+    if (d) d.remove();
+  }
+
+  async function openAddDialog() {
+    closeAddDialog();
+    const host = _host === 'laptop' ? 'laptop' : 'hermes';
+    const wrap = document.createElement('div');
+    wrap.id = 'jobsAddDialog';
+    wrap.className = 'jobs-add-overlay';
+    wrap.innerHTML = '<form class="jobs-add-card" role="dialog" aria-modal="true" aria-label="Add a scheduled job" novalidate>'
+      + '<div class="jobs-add-title">Add a scheduled job</div>'
+      + '<div class="jobs-add-sub">An agent session creates it and checks it appears here.</div>'
+      + '<label>Host<select name="host">'
+      + '<option value="hermes"' + (host === 'hermes' ? ' selected' : '') + '>Hermes</option>'
+      + '<option value="laptop"' + (host === 'laptop' ? ' selected' : '') + '>Laptop</option></select></label>'
+      + '<label>Repo / project folder<input name="repo" list="jobsAddRepos" autocomplete="off" placeholder="/path/to/repo"></label>'
+      + '<datalist id="jobsAddRepos"></datalist>'
+      + '<label>What should it do<textarea name="what" rows="3" placeholder="e.g. Summarize yesterday\'s failed CI runs and file tickets"></textarea></label>'
+      + '<label>When<input name="when" autocomplete="off" placeholder="e.g. daily 7am, every 2h, Sundays 7:30am"></label>'
+      + '<div class="jobs-add-error" role="alert" hidden></div>'
+      + '<div class="jobs-add-actions"><button type="button" class="jobs-add-cancel">Cancel</button>'
+      + '<button type="submit" class="jobs-add-submit">Start agent</button></div>'
+      + '</form>';
+    document.body.appendChild(wrap);
+    const form = wrap.querySelector('form');
+    const err = wrap.querySelector('.jobs-add-error');
+    wrap.addEventListener('mousedown', e => { if (e.target === wrap) closeAddDialog(); });
+    wrap.querySelector('.jobs-add-cancel').addEventListener('click', closeAddDialog);
+    wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); closeAddDialog(); } });
+    form.elements.what.focus();
+    form.addEventListener('input', e => { if (e.target.classList) e.target.classList.remove('is-invalid'); });
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const f = {
+        host: form.elements.host.value,
+        repo: form.elements.repo.value.trim(),
+        what: form.elements.what.value.trim(),
+        when: form.elements.when.value.trim(),
+      };
+      const missing = [['repo', 'a repo or folder'], ['what', 'what it should do'], ['when', 'when it runs']]
+        .filter(x => !f[x[0]]);
+      form.querySelectorAll('.is-invalid').forEach(el => el.classList.remove('is-invalid'));
+      if (missing.length) {
+        missing.forEach(x => form.elements[x[0]].classList.add('is-invalid'));
+        err.textContent = 'Fill in ' + missing.map(x => x[1]).join(', ') + '.';
+        err.hidden = false;
+        form.elements[missing[0][0]].focus();
+        return;
+      }
+      if (typeof window.cccSpawnPromptSession !== 'function') {
+        err.textContent = 'Session spawning is not available on this page.';
+        err.hidden = false;
+        return;
+      }
+      const btn = form.querySelector('.jobs-add-submit');
+      btn.disabled = true; btn.textContent = 'Starting...';
+      // Spawn where the job lives when that folder is on this machine.
+      const local = _repoPaths.indexOf(f.repo) !== -1;
+      const res = await window.cccSpawnPromptSession({
+        prompt: composePrompt(f),
+        name: 'New job: ' + f.what.split('\n')[0].slice(0, 60),
+        repoPath: local ? f.repo : '',
+      });
+      if (res && res.ok) { closeAddDialog(); return; }
+      btn.disabled = false; btn.textContent = 'Start agent';
+      err.textContent = 'Could not start the session: ' + ((res && res.error) || 'unknown error');
+      err.hidden = false;
+    });
+    // Repo suggestions: the same list the composer's folder picker uses.
+    try {
+      const r = await fetch('/api/repo/list', { cache: 'no-store' });
+      const d = await r.json();
+      const repos = (d && Array.isArray(d.repos)) ? d.repos : [];
+      _repoPaths = repos.map(x => x && x.path).filter(Boolean);
+      const dl = document.getElementById('jobsAddRepos');
+      if (dl) dl.innerHTML = _repoPaths.map(p => '<option value="' + esc(p) + '"></option>').join('');
+      const input = form.elements.repo;
+      if (input && !input.value && d && d.current) input.value = d.current;
+    } catch (_) {}
+  }
+  let _repoPaths = [];
+
   function onClick(ev) {
+    if (ev.target.closest('[data-jobs-add]')) { openAddDialog(); return; }
     const seg = ev.target.closest('[data-jobs-host]');
     if (seg) {
       _host = seg.getAttribute('data-jobs-host');
@@ -351,5 +478,5 @@
     else render(); // keep relative times fresh
   }, 5000);
 
-  window.CCCJobsTab = { mount: mount, attentionCount: attentionCount };
+  window.CCCJobsTab = { mount: mount, attentionCount: attentionCount, composePrompt: composePrompt, openAddDialog: openAddDialog };
 })();

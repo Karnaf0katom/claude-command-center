@@ -70669,6 +70669,49 @@
       setTimeout(() => { $kptRunBtn.disabled = false; $kptRunBtn.textContent = 'Run'; }, 2000);
     });
   }
+  // Spawn a session from a composed prompt, the same way the composer's Run
+  // does (engine/model/effort from the composer, optimistic placeholder that
+  // auto-selects and follows the spawn). For surfaces outside this closure,
+  // e.g. the Jobs tab's "+ Add" (static/jobs-tab.js). Resolves {ok, error?}.
+  window.cccSpawnPromptSession = async function (opts) {
+    const prompt = String((opts && opts.prompt) || '').trim();
+    const repoPath = String((opts && opts.repoPath) || '').trim()
+      || (typeof getSpawnCwd === 'function' && getSpawnCwd()) || '';
+    if (!prompt) return { ok: false, error: 'empty prompt' };
+    const engine = getSpawnEngine();
+    const subject = String((opts && opts.name) || '').trim() || (prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt);
+    const tempPid = 'tmp-' + Date.now();
+    insertPendingSpawnCard(tempPid, subject, spawnSourceForEngine(engine));
+    const dropPlaceholder = () => {
+      pendingSpawns.delete(tempPid);
+      delete columnOverrides['spawning-' + tempPid];
+      conversationsData = conversationsData.filter(x => x.id !== 'spawning-' + tempPid);
+      renderSidebar(filterConversations($convSearch.value));
+    };
+    try {
+      const choice = currentSpawnChoice(engine);
+      const body = buildSpawnBody({ engine, model: choice.model, effort: choice.effort, prompt, repoPath });
+      if (opts && opts.name) body.name = String(opts.name).slice(0, 80);
+      body.idempotency_key = durableActionId('spawn');
+      const res = await fetch(spawnEndpointForEngine(engine), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) { dropPlaceholder(); return { ok: false, error: data.error || ('HTTP ' + res.status) }; }
+      if (repoPath) assignSpawnedSessionToDefaultObject(data, repoPath);
+      const realSpawnId = data.spawn_id || data.pid;
+      if (realSpawnId) adoptPendingSpawnPid(tempPid, realSpawnId, data.log, data.session_id);
+      setTimeout(refreshConversationList, 600);
+      setTimeout(refreshConversationList, 1500);
+      setTimeout(refreshConversationList, 3000);
+      return { ok: true, session_id: data.session_id || '' };
+    } catch (e) {
+      dropPlaceholder();
+      return { ok: false, error: (e && e.message) || 'network error' };
+    }
+  };
+
   // ── New-session modal ──
   // Single-field: just the prompt body. Card title is derived from the first
   // sentence at submit time. Subject was redundant — users almost never typed

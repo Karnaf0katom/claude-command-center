@@ -29892,6 +29892,37 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 }
 .jobs-seg-btn:hover { color: var(--text); background: var(--surface-2); }
 .jobs-seg-btn.is-active { color: var(--text); background: var(--surface-2); border-color: var(--accent, #6e8caf); }
+.jobs-add-btn {
+  flex: 0 0 auto; margin-left: 4px; padding: 3px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+  background: transparent; color: var(--accent, #6e8caf);
+  border: 1px solid var(--accent, #6e8caf); border-radius: 4px;
+}
+.jobs-add-btn:hover { background: var(--surface-2); }
+.jobs-add-overlay {
+  position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.jobs-add-card {
+  width: min(440px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 9px;
+  padding: 16px; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.jobs-add-title { font-size: 14px; font-weight: 600; }
+.jobs-add-sub { font-size: 11px; color: var(--text-muted); margin-top: -5px; }
+.jobs-add-card label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; font-weight: 600; color: var(--text-muted); }
+.jobs-add-card input, .jobs-add-card select, .jobs-add-card textarea {
+  font: inherit; font-size: 12px; font-weight: 400; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; padding: 5px 7px; resize: vertical;
+}
+.jobs-add-card .is-invalid { border-color: var(--red); }
+.jobs-add-error { font-size: 11px; color: var(--red); }
+.jobs-add-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.jobs-add-actions button {
+  padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 4px;
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+}
+.jobs-add-actions .jobs-add-submit { background: var(--accent, #6e8caf); border-color: var(--accent, #6e8caf); color: #fff; }
+.jobs-add-actions .jobs-add-submit:disabled { opacity: 0.6; cursor: default; }
 .jobs-summary { font-size: 11px; color: var(--text-muted); }
 .jobs-summary.is-bad { color: var(--red); }
 .jobs-empty { padding: 18px 6px; color: var(--text-muted); text-align: center; }
