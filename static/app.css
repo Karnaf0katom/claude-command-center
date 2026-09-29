@@ -10309,9 +10309,10 @@
     background: rgba(255, 213, 100, 0.16);
     color: #ffd564;
     font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-align: center;
+    font-weight: 600;
+    text-align: left;
+    white-space: pre-line;
+    font-variant-numeric: tabular-nums;
     animation: convSearchPulse 0.85s ease-in-out infinite alternate;
   }
   @keyframes convSearchPulse {

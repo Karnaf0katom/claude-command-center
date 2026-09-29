@@ -15769,12 +15769,47 @@
   }
   renderConversationSearchHistoryOptions();
 
+  // CCC-1213: a bare "SEARCHING..." hid what the wait was. Each backend
+  // call the search makes is tracked here and listed with its endpoint and
+  // live elapsed time, so a slow search names the call it is stuck on.
+  let _convSearchCalls = [];   // [{ label, path, start, end, hits, failed }]
+  let _convSearchTick = 0;
+  function _trackConvSearchCall(label, path, req, countHits) {
+    const call = { label, path, start: Date.now(), end: 0, hits: null, failed: false };
+    _convSearchCalls.push(call);
+    _paintConvSearchStatus();
+    return req.then(data => {
+      call.end = Date.now();
+      if (data && data._failed) call.failed = true;
+      else call.hits = countHits(data);
+      _paintConvSearchStatus();
+      return data;
+    });
+  }
+  function _paintConvSearchStatus() {
+    if (!$convSearchStatus || $convSearchStatus.hidden) return;
+    const now = Date.now();
+    const secs = (ms) => (ms / 1000).toFixed(1) + 's';
+    const lines = _convSearchCalls.map(c => {
+      if (!c.end) return '\u23f3 ' + c.label + ' ' + c.path + ' \u00b7 waiting ' + secs(now - c.start);
+      if (c.failed) return '\u2717 ' + c.label + ' ' + c.path + ' \u00b7 failed after ' + secs(c.end - c.start);
+      return '\u2713 ' + c.label + ' ' + c.path + ' \u00b7 ' + secs(c.end - c.start)
+        + (c.hits != null ? ' \u00b7 ' + c.hits + (c.hits === 1 ? ' hit' : ' hits') : '');
+    });
+    $convSearchStatus.textContent = lines.length ? lines.join('\n') : 'Starting search (waiting for typing to pause)\u2026';
+  }
   function setConversationSearchLoading(isLoading, query) {
     if (!$convSearchStatus) return;
     const q = String(query || '').trim();
     isLoading = !!(isLoading && q);
     $convSearchStatus.hidden = !isLoading;
-    $convSearchStatus.textContent = isLoading ? 'SEARCHING...' : '';
+    if (isLoading) {
+      _paintConvSearchStatus();
+      if (!_convSearchTick) _convSearchTick = setInterval(_paintConvSearchStatus, 100);
+    } else {
+      $convSearchStatus.textContent = '';
+      if (_convSearchTick) { clearInterval(_convSearchTick); _convSearchTick = 0; }
+    }
     $convSearchStatus.setAttribute('aria-busy', isLoading ? 'true' : 'false');
     const wrap = $convSearch && $convSearch.closest('.search-wrap');
     if (wrap) wrap.classList.toggle('is-searching', isLoading);
@@ -61539,6 +61574,7 @@
       setConversationSearchLoading(false, q);
       return Promise.resolve();
     }
+    _convSearchCalls = [];
     setConversationSearchLoading(true, q);
     // NOTE: _historyState is deliberately NOT reset here. Clearing the map at
     // fetch start makes every in-flight re-render collapse the list to
@@ -61556,18 +61592,22 @@
     if (window._historyIndexStatus && window._historyIndexStatus.semantic && window._historyIndexStatus.semantic.available) {
       params.set('semantic', '1');
     }
-    const historyReq = fetch('/api/search-history?' + params.toString())
-      .then(r => r.ok ? r.json() : { results: [] })
-      .catch(() => ({ results: [] }))
+    const countResults = (d) => ((d && d.results) || []).length;
+    const historyReq = _trackConvSearchCall('History index', '/api/search-history',
+      fetch('/api/search-history?' + params.toString())
+        .then(r => r.ok ? r.json() : { results: [], _failed: true })
+        .catch(() => ({ results: [], _failed: true })), countResults);
     const recallParams = new URLSearchParams({ q, limit: '50' });
-    const recallReq = fetch('/api/search-recall-sessions?' + recallParams.toString())
-      .then(r => r.ok ? r.json() : { results: [] })
-      .catch(() => ({ results: [] }))
+    const recallReq = _trackConvSearchCall('Recall', '/api/search-recall-sessions',
+      fetch('/api/search-recall-sessions?' + recallParams.toString())
+        .then(r => r.ok ? r.json() : { results: [], _failed: true })
+        .catch(() => ({ results: [], _failed: true })), countResults);
     const matchedRepo = _bestRepoMatchForQuery(qLower);
     const repoReq = matchedRepo
-      ? fetch('/api/conversations?repo_path=' + encodeURIComponent(matchedRepo.path) + '&include_old=1')
-        .then(r => r.ok ? r.json() : [])
-        .catch(() => [])
+      ? _trackConvSearchCall('Repo ' + (matchedRepo.label || _pathLeaf(matchedRepo.path) || matchedRepo.path), '/api/conversations',
+        fetch('/api/conversations?repo_path=' + encodeURIComponent(matchedRepo.path) + '&include_old=1')
+          .then(r => r.ok ? r.json() : Object.assign([], { _failed: true }))
+          .catch(() => Object.assign([], { _failed: true })), d => (Array.isArray(d) ? d.length : 0))
       : Promise.resolve([]);
     // All three augmentations land in _historyState as they resolve, but the
     // repaint happens ONCE after all settle. Repainting per fetch (recall,
@@ -64806,6 +64846,7 @@
     // Debounced history fetch; on completion, re-render with augmentation.
     if (_historyFetchTimer) clearTimeout(_historyFetchTimer);
     const q = $convSearch.value;
+    _convSearchCalls = [];
     if (q.trim()) setConversationSearchLoading(true, q);
     else setConversationSearchLoading(false, q);
     _historyFetchTimer = setTimeout(() => {
