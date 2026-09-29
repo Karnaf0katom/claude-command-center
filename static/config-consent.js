@@ -5,7 +5,8 @@
  * folders) is an item with the exact diff. Nothing is written until the user
  * approves it here or with `ccc consent`.
  *
- * - First run (or a new/changed item): the dialog opens on its own.
+ * - First run (or a new/changed item for an installed agent): a small
+ *   OK / Not now message opens on its own; "Details" expands the full list.
  * - Installs from before this gate: a one-time "already in your config" list
  *   with Keep / Remove.
  * - Settings > Maintenance > Agent config access reopens it any time, with
@@ -38,6 +39,8 @@
   let $modal = null;
   let mode = 'auto';
   let focusId = '';
+  let expanded = false;
+  const ENGINE_LABEL = { claude: 'Claude Code', codex: 'Codex' };
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
@@ -48,8 +51,11 @@
     try { return new URLSearchParams(location.search).has('ccc_popout'); } catch (_) { return false; }
   }
 
+  // needs_review for an agent that is installed here (older servers: all).
+  function due(i) { return i.auto_review === undefined ? i.needs_review : i.auto_review; }
+
   function signature(s) {
-    return (s.items || []).filter((i) => i.needs_review)
+    return (s.items || []).filter(due)
       .map((i) => i.id + ':' + i.status).sort().join('|') + (s.notice && s.notice.pending ? '|notice' : '');
   }
 
@@ -86,7 +92,7 @@
     const $pill = document.getElementById('configConsentPill');
     const $text = document.getElementById('configConsentPillText');
     if (!$pill || !state) return;
-    const n = state.needs_review || 0;
+    const n = state.auto_review === undefined ? (state.needs_review || 0) : state.auto_review;
     const hooks = hooksItem();
     if (n > 0) {
       $pill.hidden = false;
@@ -167,6 +173,41 @@
       + '</div>';
   }
 
+  function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+  // "CCC will add 4 skills and 6 hooks to your Claude Code setup. ..." from
+  // the items actually waiting, for the agents actually installed.
+  function summaryHtml(review, carried) {
+    const present = (state && state.engines_present) || { claude: true, codex: false };
+    const names = [];
+    review.forEach((i) => (i.engines || ['claude']).forEach((e) => {
+      const l = ENGINE_LABEL[e];
+      if (l && present[e] !== false && names.indexOf(l) < 0) names.push(l);
+    }));
+    const where = 'your ' + (names.join(' and ') || 'agent') + ' setup';
+    const safe = 'It only adds its own files (backed up first, undo anytime) and changes nothing else.';
+    if (!review.length) {
+      const n = carried.length;
+      return 'Earlier versions of CCC added ' + plural(n, 'item') + ' to your agent setup. '
+        + 'They keep working, and you can remove any of them in Details.';
+    }
+    const skills = review.filter((i) => i.id.indexOf('skill:') === 0).length;
+    const wtSkills = review.some((i) => i.id === 'watchtower-skills');
+    const hooks = review.reduce((a, i) => a + (i.hook_count || 0), 0);
+    const parts = [];
+    if (skills) parts.push(plural(skills, 'skill'));
+    if (hooks) parts.push(plural(hooks, 'hook'));
+    if (wtSkills) parts.push('the WatchTower skills');
+    const list = parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0];
+    const allChanged = review.every((i) => i.status === 'changed');
+    const lead = allChanged
+      ? 'CCC has updated ' + list + ' in ' + where + '.'
+      : 'CCC will add ' + list + ' to ' + where + '.';
+    const why = hooks && (skills || wtSkills) ? 'They let the dashboard show live status and let your agents use CCC.'
+      : hooks ? 'They let the dashboard show live status.' : 'They let your agents use CCC.';
+    return esc(lead + ' ' + safe + ' ' + why);
+  }
+
   function section(title, note, items) {
     if (!items.length) return '';
     return '<div class="cfgc-section"><div class="cfgc-sec-title">' + esc(title) + '</div>'
@@ -185,13 +226,16 @@
     $modal.innerHTML = '<div class="upd-backdrop" data-role="cfgc-backdrop"></div>'
       + '<div class="upd-dialog cfgc-dialog">'
       + '<div class="upd-title" id="cfgConsentTitle">Agent config access</div>'
+      + '<div class="cfgc-brief" data-role="cfgc-brief"></div>'
       + '<div class="cfgc-intro" data-role="cfgc-intro"></div>'
       + '<div class="cfgc-body" data-role="cfgc-body"></div>'
       + '<div class="upd-error" data-role="cfgc-error"></div>'
       + '<div class="upd-actions cfgc-actions">'
       + '<button type="button" class="upd-btn cfgc-revoke-all" data-role="cfgc-revoke-all">Remove everything CCC installed</button>'
       + '<span class="cfgc-spacer"></span>'
+      + '<button type="button" class="upd-btn cfgc-details-btn" data-role="cfgc-details">Details</button>'
       + '<button type="button" class="upd-btn" data-role="cfgc-later">Not now</button>'
+      + '<button type="button" class="upd-btn upd-primary" data-role="cfgc-ok">OK</button>'
       + '<button type="button" class="upd-btn" data-role="cfgc-approve-all">Approve all</button>'
       + '<button type="button" class="upd-btn upd-primary" data-role="cfgc-save">Save choices</button>'
       + '</div></div>';
@@ -200,6 +244,8 @@
     $modal.querySelector('[data-role="cfgc-later"]').addEventListener('click', () => close(true));
     $modal.querySelector('[data-role="cfgc-save"]').addEventListener('click', () => save(false));
     $modal.querySelector('[data-role="cfgc-approve-all"]').addEventListener('click', () => save(true));
+    $modal.querySelector('[data-role="cfgc-ok"]').addEventListener('click', () => save('auto'));
+    $modal.querySelector('[data-role="cfgc-details"]').addEventListener('click', () => { expanded = true; render(); });
     $modal.querySelector('[data-role="cfgc-revoke-all"]').addEventListener('click', revokeAll);
     $modal.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { e.stopPropagation(); close(true); }
@@ -212,7 +258,10 @@
     const items = (state && state.items) || [];
     const noticeIds = new Set(((state && state.notice && state.notice.items) || []).map((i) => i.id));
     const noticeOn = !!(state && state.notice && state.notice.pending);
-    const review = items.filter((i) => i.needs_review);
+    const compact = mode === 'auto' && !expanded;
+    // Automatic prompt: only agents that are installed. The Settings entry
+    // (manage mode) lists everything.
+    const review = items.filter((i) => (mode === 'auto' ? due(i) : i.needs_review));
     const carried = noticeOn ? items.filter((i) => noticeIds.has(i.id) && !i.needs_review) : [];
     const rest = mode === 'manage'
       ? items.filter((i) => !i.needs_review && !(noticeOn && noticeIds.has(i.id))) : [];
@@ -220,13 +269,18 @@
       + 'status and your agents can use CCC. It only changes the files listed below, only after you say so, '
       + 'keeps everything else in them as-is, and saves a backup of each file first ('
       + '<code>' + esc((state && state.backups_dir) || '') + '</code>). You can undo any of it here later.';
+    m.querySelector('.cfgc-dialog').classList.toggle('cfgc-compact', compact);
+    m.querySelector('[data-role="cfgc-brief"]').innerHTML = summaryHtml(review, carried);
     m.querySelector('[data-role="cfgc-intro"]').innerHTML = intro;
     m.querySelector('[data-role="cfgc-body"]').innerHTML =
       section('Needs your OK', 'Nothing here is written until you approve it.', review)
       + section('Already in your config', 'An earlier version of CCC installed these without asking. They keep working; remove any you don\'t want.', carried)
       + section(review.length || carried.length ? 'Everything else' : 'What CCC may change', '', rest)
       + (!review.length && !carried.length && !rest.length ? '<div class="cfgc-muted">Nothing to review.</div>' : '');
-    m.querySelector('[data-role="cfgc-approve-all"]').hidden = !review.length;
+    m.querySelector('[data-role="cfgc-approve-all"]').hidden = !review.length || compact;
+    m.querySelector('[data-role="cfgc-save"]').hidden = compact;
+    m.querySelector('[data-role="cfgc-ok"]').hidden = !compact;
+    m.querySelector('[data-role="cfgc-details"]').hidden = !compact;
     m.querySelector('[data-role="cfgc-revoke-all"]').hidden = mode !== 'manage' || !items.some((i) => i.installed);
     const $err = m.querySelector('[data-role="cfgc-error"]');
     $err.classList.remove('visible');
@@ -239,6 +293,7 @@
 
   function open(opts) {
     mode = (opts && opts.mode) || 'manage';
+    expanded = true;
     focusId = (opts && opts.focus) || '';
     return load().then(() => {
       if (!state) return;
@@ -277,13 +332,13 @@
   function save(approveAll) {
     const decisions = {};
     (state.items || []).forEach((item) => {
-      if (approveAll && item.needs_review) { decisions[item.id] = 'approve'; return; }
+      if (approveAll && (approveAll === 'auto' ? due(item) : item.needs_review)) { decisions[item.id] = 'approve'; return; }
       const name = 'cfgc-' + item.id.replace(/[^a-z0-9-]/gi, '_');
       const picked = $modal.querySelector('input[name="' + CSS.escape(name) + '"]:checked');
       if (picked && picked.value) decisions[item.id] = picked.value;
     });
     const noticeOn = !!(state.notice && state.notice.pending);
-    const pendingLeft = (state.items || []).some((i) => i.needs_review && !decisions[i.id]);
+    const pendingLeft = (state.items || []).some((i) => due(i) && !decisions[i.id]);
     setBusy(true);
     const steps = [];
     if (Object.keys(decisions).length) steps.push(() => post('/api/config-consent/decide', { decisions }));
@@ -343,14 +398,15 @@
 
   function maybeAutoOpen(tries) {
     if (!state || isPopout()) return;
-    const due = (state.needs_review || 0) > 0 || (state.notice && state.notice.pending);
-    if (!due || snoozed(state) || ($modal && $modal.classList.contains('open'))) return;
+    const anyDue = (state.items || []).some(due) || (state.notice && state.notice.pending);
+    if (!anyDue || snoozed(state) || ($modal && $modal.classList.contains('open'))) return;
     if (otherOverlayOpen()) {
       // Onboarding or another dialog is up: ask once it's gone.
       if ((tries || 0) < 200) setTimeout(() => maybeAutoOpen((tries || 0) + 1), 3000);
       return;
     }
     mode = 'auto';
+    expanded = false;
     focusId = '';
     render();
     ensureModal().classList.add('open');

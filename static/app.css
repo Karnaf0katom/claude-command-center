@@ -11716,7 +11716,13 @@
   .cfgc-d-del { color: #f85149; }
   .cfgc-d-hunk { color: var(--accent); }
   .cfgc-d-file { color: var(--text); font-weight: 600; }
-  .cfgc-actions { align-items: center; }
+  .cfgc-brief { font-size: 13px; color: var(--text); line-height: 1.55; }
+  .cfgc-compact { width: min(440px, 94vw); }
+  .cfgc-compact .cfgc-intro, .cfgc-compact .cfgc-body, .cfgc-compact .cfgc-revoke-all { display: none; }
+  .cfgc-dialog:not(.cfgc-compact) .cfgc-brief { display: none; }
+  .cfgc-details-btn { margin-right: auto; background: none; border-color: transparent;
+    color: var(--accent); padding-left: 0; }
+  .cfgc-actions { align-items: center; flex-wrap: wrap; }
   .cfgc-spacer { flex: 1 1 auto; }
   .cfgc-revoke-all { color: #f85149; }
 

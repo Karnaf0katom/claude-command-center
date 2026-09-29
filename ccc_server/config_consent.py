@@ -115,6 +115,7 @@ class Ctx:
     ccc_root: Path
     hook_scripts_dir: Path
     codex_present: bool = False
+    claude_present: bool = True
     wt_bin: str = ""
     hook_command: Optional[Callable[[str], str]] = None
 
@@ -177,11 +178,18 @@ def default_ctx():
     except Exception:
         codex_present = codex_home.is_dir()
     try:
+        claude_present = (bool(_core._resolve_claude_bin().get("available"))
+                          or (home / ".claude" / "projects").is_dir()
+                          or (home / ".claude" / "settings.json").is_file())
+    except Exception:
+        claude_present = (home / ".claude" / "projects").is_dir()
+    try:
         hook_command = _core._ccc_hook_command
     except Exception:
         hook_command = None
     return Ctx(home=home, state_dir=state_dir, ccc_root=ccc_root,
                hook_scripts_dir=scripts_dir, codex_present=codex_present,
+               claude_present=claude_present,
                wt_bin=_find_wt(), hook_command=hook_command)
 
 
@@ -580,6 +588,10 @@ class ClaudeHooks:
                "answering AskUserQuestion from the dashboard, the Compacting badge, "
                "and precise turn-end detection for Claude sessions.")
     default_indent = 2
+    engines = ("claude",)
+
+    def hook_count(self):
+        return len(CLAUDE_HOOK_SPECS)
 
     def applicable(self, ctx):
         return True
@@ -612,6 +624,10 @@ class CodexHooks(ClaudeHooks):
                "you to trust it once on the next `codex` launch. Other tools' "
                "entries are kept as-is.")
     depends = "Re-orienting Codex sessions on their task after /compact."
+    engines = ("codex",)
+
+    def hook_count(self):
+        return len(CODEX_HOOK_SPECS)
 
     def applicable(self, ctx):
         return ctx.codex_present
@@ -639,6 +655,7 @@ class CodexHooks(ClaudeHooks):
 
 class BundledSkill:
     kind = "skill"
+    engines = ("claude", "codex")
 
     def __init__(self, name, blurb):
         self.name = name
@@ -728,6 +745,7 @@ class BundledSkill:
 class WatchTowerSkills:
     id = "watchtower-skills"
     kind = "skill"
+    engines = ("claude", "codex")
     title = "WatchTower skills"
     summary = ("Runs `wt skills sync`, which symlinks WatchTower's bundled skills "
                "(watchtower, critique, wt-triage-queue, ...) into each agent's skills "
@@ -890,6 +908,10 @@ def _load_or_init(ctx):
 
 # ── Public operations ──────────────────────────────────────────────────────
 
+def _engine_present(ctx, engine):
+    return bool(ctx.claude_present if engine == "claude" else ctx.codex_present if engine == "codex" else False)
+
+
 def overview(ctx=None):
     """Every applicable item with its decision, status, and diffs."""
     ctx = ctx or default_ctx()
@@ -906,8 +928,13 @@ def overview(ctx=None):
         digest = _hash(item.proposal(ctx))
         record = state["items"].get(item.id)
         status = _status(record, digest)
+        engines = list(getattr(item, "engines", ()))
+        relevant = any(_engine_present(ctx, e) for e in engines)
         out.append({
             "id": item.id,
+            "engines": engines,
+            "engine_installed": relevant,
+            "hook_count": item.hook_count() if hasattr(item, "hook_count") else 0,
             "kind": item.kind,
             "title": item.title,
             "summary": item.summary,
@@ -920,6 +947,9 @@ def overview(ctx=None):
             "installed": plan.installed,
             "up_to_date": plan.up_to_date,
             "needs_review": status in ("pending", "changed") and not _skipped_by_env(item),
+            # needs_review, but only for an agent that is installed here; the
+            # dashboard opens its prompt on this, not on needs_review.
+            "auto_review": relevant and status in ("pending", "changed") and not _skipped_by_env(item),
             "skipped_by_env": _skipped_by_env(item),
             "error": plan.error,
             "changes": plan.files,
@@ -930,6 +960,8 @@ def overview(ctx=None):
         "ok": True,
         "items": out,
         "needs_review": sum(1 for i in out if i["needs_review"]),
+        "auto_review": sum(1 for i in out if i["auto_review"]),
+        "engines_present": {"claude": bool(ctx.claude_present), "codex": bool(ctx.codex_present)},
         "notice": {
             "pending": bool(notice.get("pending")),
             "items": [i for i in out if i["id"] in (notice.get("items") or [])],

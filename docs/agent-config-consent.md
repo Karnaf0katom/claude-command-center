@@ -30,11 +30,13 @@ WatchTower's own `group-chat-checkin`). CCC never writes or removes through it.
 
 ## How approval works
 
-- **First run**: the dashboard opens **Agent config access** with every item,
-  what it is for, the files it touches, and the exact diff. Approve or Skip
-  each one, or Approve all. Nothing is written for an item you haven't
-  decided on. **Not now** hides the dialog for a day; the topbar pill keeps
-  counting what's left.
+- **First run**: if Claude Code or Codex is installed, the dashboard shows one
+  short message ("CCC will add N skills and M hooks to your ... setup") with
+  **OK** (approve everything waiting) and **Not now** (hides it for a day; the
+  topbar pill keeps counting). **Details** expands the full **Agent config
+  access** list: every item, what it is for, the files it touches, and the
+  exact diff, with Approve or Skip each. Items for an agent that is not
+  installed are not offered automatically; Settings lists them.
 - **Headless**: `ccc consent` lists items, `ccc consent show <item>` prints the
   diff, `ccc consent approve|decline <item...|all>` decides. The server log
   prints a `[consent]` line on start while anything is waiting.
@@ -75,7 +77,7 @@ approved, and marks every item declined.
 
 ## API
 
-- `GET /api/config-consent`: items with `status` (`pending`, `changed`,
+- `GET /api/config-consent`: items (with `engines`, `engine_installed`, `hook_count`, `auto_review`; top level `auto_review`, `engines_present`) with `status` (`pending`, `changed`,
   `enabled`, `declined`), `changes` / `removal` diffs, and the one-time notice.
 - `POST /api/config-consent/decide` `{"decisions": {"<id>": "approve"|"decline"}}`
 - `POST /api/config-consent/revoke` `{"ids": [...]}` (omit for all)

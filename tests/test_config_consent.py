@@ -371,6 +371,26 @@ class ExistingInstalls(ConsentTestBase):
         self.assertFalse(self.skill_file("ccc-orchestration").exists())
 
 
+class InstalledEngines(ConsentTestBase):
+    def test_auto_review_only_for_installed_engines(self):
+        self.ctx.claude_present = False
+        self.ctx.codex_present = True
+        ov = cc.overview(self.ctx)
+        by = {i["id"]: i for i in ov["items"]}
+        self.assertFalse(by["claude-hooks"]["auto_review"])
+        self.assertTrue(by["claude-hooks"]["needs_review"])
+        self.assertTrue(by["codex-hooks"]["auto_review"])
+        self.assertEqual(by["claude-hooks"]["hook_count"], 6)
+        self.assertEqual(ov["engines_present"], {"claude": False, "codex": True})
+
+    def test_nothing_installed_means_no_auto_review(self):
+        self.ctx.claude_present = False
+        self.ctx.codex_present = False
+        ov = cc.overview(self.ctx)
+        self.assertEqual(ov["auto_review"], 0)
+        self.assertGreater(ov["needs_review"], 0)
+
+
 class Formatting(unittest.TestCase):
     def test_detect_indent(self):
         self.assertEqual(cc._detect_indent('{\n  "a": 1\n}', 4), 2)
