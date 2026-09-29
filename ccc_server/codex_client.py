@@ -692,6 +692,8 @@ def _client_operation(data):
         raise ValueError("Choose an operation")
     catalog = _client_catalog()
     if catalog.get("ok") is False:
+        if catalog.get("code") == "codex_native_package_missing":
+            raise ValueError(catalog["error"])
         raise ValueError("Codex capabilities are unavailable. Check the Codex CLI installation and retry.")
     selected = next((entry for entry in catalog.get("methods", []) if entry.get("method") == method), None)
     if not selected or not selected.get("available"):

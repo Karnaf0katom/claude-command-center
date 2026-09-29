@@ -1235,10 +1235,17 @@ def _resolve_codex_bin():
       {available: True,  bin: "<abs path>", source: "env|path|bundle"}
       {available: False, reason: "<human readable>", bin: None}
     """
+    def usable(bin_path, source):
+        from ccc_server.codex_cli_health import ensure_codex_cli_health
+        health = ensure_codex_cli_health(bin_path)
+        if health is not None and not health.get("available"):
+            return {**health, "bin": None, "source": source}
+        return {**(health or {}), "available": True, "bin": str(bin_path), "source": source}
+
     env_bin = os.environ.get("CCC_CODEX_BIN")
     if env_bin:
         if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
-            return {"available": True, "bin": env_bin, "source": "env"}
+            return usable(env_bin, "env")
         return {
             "available": False,
             "bin": None,
@@ -1250,15 +1257,15 @@ def _resolve_codex_bin():
     # (/opt/homebrew/bin/codex -> /Applications/Codex.app/...); os.path.isfile
     # follows symlinks, so a dangling one falls through to the candidates.
     if which_bin and os.path.isfile(which_bin):
-        return {"available": True, "bin": which_bin, "source": "path"}
+        return usable(which_bin, "path")
     if os.path.isfile(_core.CODEX_APP_BUNDLE_PATH) and os.access(_core.CODEX_APP_BUNDLE_PATH, os.X_OK):
-        return {"available": True, "bin": _core.CODEX_APP_BUNDLE_PATH, "source": "bundle"}
+        return usable(_core.CODEX_APP_BUNDLE_PATH, "bundle")
     # launchd services (the engine worker especially) run with a minimal PATH
     # that omits user bins like ~/.local/bin, where the standalone Codex CLI
     # installs. Same fallback the Gemini/Cursor resolvers use.
     for candidate in _core._iter_common_cli_candidates("codex"):
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return {"available": True, "bin": str(candidate), "source": "candidate"}
+            return usable(candidate, "candidate")
     return {
         "available": False,
         "bin": None,

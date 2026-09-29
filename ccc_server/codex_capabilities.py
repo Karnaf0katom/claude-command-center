@@ -1274,6 +1274,10 @@ def get_codex_catalog() -> dict:
         }
     if not isinstance(resolved, dict) or not resolved.get("available") or not resolved.get("bin"):
         reason = resolved.get("reason") if isinstance(resolved, dict) else None
+        if isinstance(resolved, dict) and resolved.get("code") == "codex_native_package_missing":
+            return {"ok": False, "version": "", "fingerprint": "", "methods": [],
+                    "server_requests": [], "notifications": [], "error": reason,
+                    "code": resolved["code"], "repair_command": resolved.get("repair_command")}
         return {
             "ok": False,
             "version": "",
