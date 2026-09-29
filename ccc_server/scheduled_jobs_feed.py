@@ -17,6 +17,7 @@ thread never waits on ssh (except the very first call, bounded).
 
 from __future__ import annotations
 
+import os
 import plistlib
 import re
 import subprocess
@@ -45,14 +46,14 @@ for t in /etc/systemd/system/*.timer; do
   svc=$(systemctl show "$tn" -p Unit --value 2>/dev/null)
   [ -n "$svc" ] || continue
   echo "@@CCCJOB:SVC"
-  systemctl show "$svc" --timestamp=unix -p Description,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,InvocationID 2>/dev/null
+  systemctl show "$svc" --timestamp=unix -p Description,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,InvocationID,WorkingDirectory,ExecStart 2>/dev/null
   echo "@@CCCJOB:HIST"
   journalctl -u "$svc" --since -7d _PID=1 -o short-unix --no-pager -q 2>/dev/null \
     | grep -E "Deactivated successfully|Failed with result" | cut -c1-400 | tail -n 60
   inv=$(systemctl show "$svc" -p InvocationID --value 2>/dev/null)
   echo "@@CCCJOB:OUT"
   if [ -n "$inv" ]; then
-    journalctl "_SYSTEMD_INVOCATION_ID=$inv" -o cat --no-pager -q 2>/dev/null | tail -n 60 | cut -c1-400
+    journalctl "_SYSTEMD_INVOCATION_ID=$inv" -o cat --no-pager -q 2>/dev/null | tail -n 150 | cut -c1-400
   fi
   echo "@@CCCJOB:ENDUNIT"
 done
@@ -105,15 +106,95 @@ def human_seconds(sec):
     return f"{sec}s"
 
 
+_SYSTEMD_NOISE_RE = re.compile(
+    r"^(Finished|Started|Starting|Stopped|Stopping|Deactivated|Consumed)\b|"
+    r": (Deactivated successfully|Consumed .* CPU time|Failed with result)|"
+    r"^\S+\.(service|timer): ")
+
+
+def _authored(lines):
+    out = [_ANSI_RE.sub("", ln).rstrip() for ln in lines]
+    return [ln for ln in out if ln.strip() and not _SYSTEMD_NOISE_RE.search(ln.strip())]
+
+
 def pick_outcome(lines):
-    """Last CCC_OUTCOME: line (prefix stripped), else last non-empty line."""
-    cleaned = [_ANSI_RE.sub("", ln).rstrip() for ln in lines]
-    cleaned = [ln for ln in cleaned if ln.strip()]
+    """(text, kind): last CCC_OUTCOME: line -> ('..','summary'); else the last
+    job-authored line -> ('..','output'); else ('', '')."""
+    cleaned = _authored(lines)
     for ln in reversed(cleaned):
         s = ln.strip()
         if s.startswith("CCC_OUTCOME:"):
-            return s[len("CCC_OUTCOME:"):].strip()[:300]
-    return cleaned[-1].strip()[:300] if cleaned else ""
+            return s[len("CCC_OUTCOME:"):].strip()[:300], "summary"
+    return (cleaned[-1].strip()[:300], "output") if cleaned else ("", "")
+
+
+_NOT_WT_PREFIX = {
+    "UTF", "SHA", "ISO", "MD", "AES", "RSA", "HTTP", "HTTPS", "TLS", "SSL", "TCP", "UDP", "GPT",
+    "CVE", "UTC", "GMT", "IPV", "RFC", "PDF", "JSON", "USD", "EUR", "HTML", "CSS", "UUID", "TS",
+    "ES", "X", "PR", "HTTP", "ECMA", "WGS", "EXIT", "PID", "SIG", "ERR", "ENOENT", "TZ", "GB", "MB",
+}
+_WT_RE = re.compile(r"(?<![\w./#:=-])([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)*)-(\d{1,5})(?![\w.-]|/)")
+_GH_RE = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(pull|issues)/(\d+)")
+_PR_RE = re.compile(r"\bPR #(\d+)")
+
+
+def extract_tickets(lines, limit=12):
+    """Ticket/PR/issue refs a run printed: GitHub URLs, bare 'PR #N', WatchTower refs."""
+    text = "\n".join(_ANSI_RE.sub("", ln) for ln in lines)
+    found, seen = [], set()
+
+    def add(ref, kind, url=None, repo=None):
+        key = (kind, ref, repo)
+        if key in seen or len(found) >= limit:
+            return
+        seen.add(key)
+        d = {"ref": ref, "kind": kind}
+        if url:
+            d["url"] = url
+        if repo:
+            d["repo"] = repo
+        found.append(d)
+
+    urls = {}
+    for m in _GH_RE.finditer(text):
+        owner, repo, typ, num = m.groups()
+        kind = "pr" if typ == "pull" else "issue"
+        urls[(kind, num)] = True
+        add(f"PR #{num}" if kind == "pr" else f"#{num}", kind, m.group(0).rstrip(".,)"), f"{owner}/{repo}")
+    for m in _PR_RE.finditer(text):
+        if ("pr", m.group(1)) not in urls:
+            add(f"PR #{m.group(1)}", "pr")
+    stripped = _GH_RE.sub(" ", text)
+    for m in _WT_RE.finditer(stripped):
+        if m.group(1).split("-")[0] in _NOT_WT_PREFIX or len(m.group(1)) < 2:
+            continue
+        add(m.group(0), "watchtower")
+    return found
+
+
+def nodash(s):
+    """No em-dashes in user copy: ' \u2014 ' -> ': '."""
+    return (s or "").replace(" \u2014 ", ": ").replace("\u2014", ":")
+
+
+_PROJ_RE = re.compile(r"/(?:Apps|dev|opt|srv|repos|src|projects|code)/([^/]+)")
+_CONTAINER_DIRS = {"tools", "_test-demos", "scratch", "clients"}
+
+
+def project_from_paths(paths):
+    """(project, repo_path) from candidate absolute paths; ('Other', None) if unknown."""
+    for path in paths:
+        if not path or not path.startswith("/"):
+            continue
+        m = _PROJ_RE.search(path)
+        if m:
+            name, end = m.group(1), m.end()
+            if name in _CONTAINER_DIRS:
+                nxt = re.match(r"/([^/]+)", path[end:])
+                if nxt and "." not in nxt.group(1)[-4:]:
+                    name, end = nxt.group(1), end + nxt.end()
+            return name, path[:end]
+    return "Other", None
 
 
 def _fmt_hhmm(hour, minute, tzname, ref=None):
@@ -197,6 +278,52 @@ def format_systemd_schedule(timers_calendar, timers_monotonic=None):
     return "On demand"
 
 
+
+def _local_minutes(hour, minute, tzname):
+    hhmm = _fmt_hhmm(hour, minute, tzname)
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def systemd_timeline(timers_calendar, timers_monotonic=None):
+    """Structured schedule for the 24h strip: {kind, minutes[], weekdays[], interval_s}."""
+    minutes, weekdays, interval = [], [], None
+    for line in timers_calendar or []:
+        m = re.search(r"OnCalendar=(.*?)\s*;", line)
+        if not m:
+            continue
+        wd, date, tm, tz = _parse_calendar_spec(m.group(1).strip())
+        if wd and wd not in weekdays:
+            weekdays.append(wd.replace("..", "-"))
+        tmm = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?$", tm or "")
+        step = re.match(r"^\*:(?:\d+)/(\d+)(?::\d{2})?$", tm or "")
+        if tmm:
+            minutes.append(_local_minutes(int(tmm.group(1)), int(tmm.group(2)), tz))
+        elif step:
+            interval = int(step.group(1)) * 60
+        elif re.match(r"^\*:\d{2}", tm or ""):
+            interval = 3600
+    if not minutes and interval is None:
+        for line in timers_monotonic or []:
+            m = re.search(r"OnUnitActiveUSec=(.*?)\s*;", line)
+            if m:
+                interval = _parse_span_s(m.group(1))
+                break
+    if interval:
+        return {"kind": "interval", "interval_s": interval, "minutes": [], "weekdays": []}
+    if minutes:
+        return {"kind": "times", "minutes": sorted(set(minutes)), "weekdays": weekdays, "interval_s": None}
+    return {"kind": "none", "minutes": [], "weekdays": [], "interval_s": None}
+
+
+def _parse_span_s(val):
+    """'1h 30min' / '5min' / '30s' -> seconds (None if unparseable)."""
+    total, hit = 0, False
+    for n, unit in re.findall(r"(\d+(?:\.\d+)?)\s*(d|h|min|m|s)\b", val or ""):
+        hit = True
+        total += float(n) * {"d": 86400, "h": 3600, "min": 60, "m": 60, "s": 1}[unit]
+    return int(total) if hit and total else None
+
+
 # ── Hermes parsing ──────────────────────────────────────────────────────────
 
 def _parse_show(block_lines):
@@ -275,19 +402,24 @@ def parse_hermes_output(text, now=None):
         else:
             status = "ok"
 
-        outcome = pick_outcome(u["OUT"])
-        if not outcome and status == "failed":
-            outcome = f"Failed ({result or 'error'}, exit {exit_code})"
-        if not outcome and start is None and status != "disabled":
-            outcome = "Not run yet"
+        outcome, outcome_kind = pick_outcome(u["OUT"])
+        wd = (s.get("WorkingDirectory") or "").lstrip("!-")
+        exec_paths = re.findall(r"(?:path=|argv\[\]=|\s)(/[^\s;]+)", s.get("ExecStart") or "")
+        exec_paths = [x for x in exec_paths if not x.startswith(("/bin", "/usr", "/sbin"))]
+        project, repo_path = project_from_paths([wd] + exec_paths)
+        if project == "Other" and wd and wd not in ("/", "~") and wd.startswith("/") and wd.count("/") > 1:
+            project, repo_path = wd.rstrip("/").rsplit("/", 1)[-1], wd
 
         jobs.append({
             "id": f"hermes:{svc}",
             "name": name,
             "host": "hermes",
             "manager": "systemd",
-            "description": s.get("Description", ""),
+            "description": nodash(s.get("Description", "")),
+            "project": project,
+            "repo_path": repo_path,
             "schedule": format_systemd_schedule(t.get("TimersCalendar"), t.get("TimersMonotonic")),
+            "timeline": systemd_timeline(t.get("TimersCalendar"), t.get("TimersMonotonic")),
             "enabled": timer_enabled,
             "status": status,
             "last_run_at": _iso(start),
@@ -296,6 +428,8 @@ def parse_hermes_output(text, now=None):
             "next_run_at": _iso(nxt) if timer_enabled else None,
             "history": history,
             "outcome": outcome,
+            "outcome_kind": outcome_kind,
+            "tickets": extract_tickets(u["OUT"]),
         })
     return jobs
 
@@ -319,6 +453,123 @@ def collect_hermes(timeout_s=SSH_CONNECT_TIMEOUT_S):
 # ── Laptop ──────────────────────────────────────────────────────────────────
 
 _WEEKDAY_NAMES = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
+
+
+
+_INTERPRETERS = {"bash", "sh", "zsh", "env", "python", "python3", "node", "caffeinate", "nice", "open", "osascript", "ruby", "perl", "uv", "npx"}
+_SCRIPT_DESC_CACHE = {}  # path -> (mtime, text)
+
+
+def _expand(path):
+    return os.path.expanduser(path.replace("$HOME", "~")) if path else path
+
+
+def launchd_program_paths(data):
+    """ProgramArguments minus the launchd-jobs wrapper and its label argument."""
+    args = data.get("ProgramArguments") or ([data["Program"]] if data.get("Program") else [])
+    label = data.get("Label")
+    out = []
+    for a in args:
+        if not isinstance(a, str):
+            continue
+        if a == label or a.startswith("com.") and "/" not in a:
+            continue
+        a = _expand(a)
+        if os.path.basename(os.path.dirname(a)) == "launchd-jobs":
+            continue
+        out.append(a)
+    return out
+
+
+def script_path(data):
+    """First ProgramArguments entry that is a script/binary, not an interpreter or flag."""
+    for a in launchd_program_paths(data):
+        base = os.path.basename(a)
+        if a.startswith("-") or base in _INTERPRETERS or base.rstrip("0123456789.") in _INTERPRETERS:
+            continue
+        if "/" in a or re.search(r"\.(sh|py|js|mjs|rb|pl)$", a):
+            return a
+    return None
+
+
+def _script_first_comment(path):
+    """One-line purpose from a script's leading comment/docstring (mtime-cached)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    hit = _SCRIPT_DESC_CACHE.get(path)
+    if hit and hit[0] == st.st_mtime:
+        return hit[1]
+    text = ""
+    try:
+        with open(path, "rb") as fb:
+            raw = fb.read(2048)
+        if b"\0" in raw:
+            return ""
+        head = raw.decode("utf-8", "replace").splitlines()[:25]
+        for i, ln in enumerate(head):
+            t = ln.strip()
+            if not t or t.startswith("#!") or t.startswith("# -*-") or t.startswith("# Copyright") or t.startswith("# SPDX"):
+                continue
+            if t.startswith("#") and not t.startswith("#!/"):
+                t = t.lstrip("#").strip()
+            elif t.startswith(('"""', "\'\'\'")):
+                t = t.strip("\"'").strip()
+            elif t.startswith("//"):
+                t = t.lstrip("/").strip()
+            else:
+                break
+            if t and not t.lower().startswith(("usage", "set ", "shellcheck")):
+                text = re.sub(r"^[\w./-]+\.(sh|py|js|mjs)\s*[:\u2014-]+\s*", "", t)
+                break
+    except Exception:
+        text = ""
+    text = nodash(text)[:110]
+    _SCRIPT_DESC_CACHE[path] = (st.st_mtime, text)
+    return text
+
+
+def launchd_description(data):
+    if data.get("Comment"):
+        return nodash(str(data["Comment"]))[:110]
+    sp = script_path(data)
+    if not sp:
+        return "Runs a shell command"
+    base = os.path.basename(sp)
+    if re.search(r"\.(sh|py|js|mjs|rb|pl)$", base):
+        got = _script_first_comment(sp)
+        if got:
+            return got
+    args = launchd_program_paths(data)
+    rest = [a for a in args[args.index(sp) + 1:] if not a.startswith("-")][:1] if sp in args else []
+    return "Runs " + " ".join([base] + rest)
+
+
+def launchd_timeline(data):
+    interval = data.get("StartInterval")
+    if interval:
+        try:
+            return {"kind": "interval", "interval_s": int(interval), "minutes": [], "weekdays": []}
+        except Exception:
+            pass
+    cal = data.get("StartCalendarInterval")
+    items = [cal] if isinstance(cal, dict) else [c for c in (cal or []) if isinstance(c, dict)]
+    minutes, weekdays, hourly = [], [], False
+    for it in items:
+        h, m = it.get("Hour"), it.get("Minute", 0)
+        if isinstance(h, int) and isinstance(m, int):
+            minutes.append(h * 60 + m)
+        else:
+            hourly = True
+        wd = it.get("Weekday")
+        if wd is not None and _WEEKDAY_NAMES.get(wd) and _WEEKDAY_NAMES[wd] not in weekdays:
+            weekdays.append(_WEEKDAY_NAMES[wd])
+    if hourly and not minutes:
+        return {"kind": "interval", "interval_s": 3600, "minutes": [], "weekdays": []}
+    if minutes:
+        return {"kind": "times", "minutes": sorted(set(minutes)), "weekdays": weekdays, "interval_s": None}
+    return {"kind": "none", "minutes": [], "weekdays": [], "interval_s": None}
 
 
 def is_scheduled_plist(data):
@@ -423,7 +674,7 @@ def collect_laptop(now=None):
         info = lc.get(label)
         logs = [x for x in (data.get("StandardOutPath"), data.get("StandardErrorPath")) if x]
         last_run = None
-        outcome = ""
+        outcome, outcome_kind, tickets = "", "", []
         for lp in logs:
             try:
                 path = Path(lp).expanduser()
@@ -434,20 +685,26 @@ def collect_laptop(now=None):
                 last_run = mt
                 tail = _sj._read_file_tail(path, max_lines=20)
                 if tail and tail.strip():
-                    outcome = pick_outcome(tail.splitlines())
+                    outcome, outcome_kind = pick_outcome(tail.splitlines())
+                    tickets = extract_tickets(tail.splitlines())
         exit_code = info.get("status") if info else None
         status = laptop_status(
             pid=info.get("pid") if info else None, exit_code=exit_code, loaded=info is not None,
             last_run_epoch=last_run, period_s=_expected_period_s(data), now=now)
-        if not outcome and status == "failed":
-            outcome = f"Exited with status {exit_code}"
+        wd = _expand(data.get("WorkingDirectory") or "")
+        project, repo_path = project_from_paths(launchd_program_paths(data) + [wd])
+        if project == "Other" and wd.startswith("/") and wd.count("/") > 2 and wd != str(Path.home()):
+            project, repo_path = wd.rstrip("/").rsplit("/", 1)[-1], wd
         jobs.append({
             "id": f"laptop:{label}",
             "name": label,
             "host": "laptop",
             "manager": "launchd",
-            "description": "",
+            "description": launchd_description(data),
+            "project": project,
+            "repo_path": repo_path,
             "schedule": format_launchd_schedule(data),
+            "timeline": launchd_timeline(data),
             "enabled": info is not None,
             "status": status,
             "last_run_at": _iso(last_run),
@@ -456,19 +713,21 @@ def collect_laptop(now=None):
             "next_run_at": None,
             "history": [],
             "outcome": outcome,
+            "outcome_kind": outcome_kind,
+            "tickets": tickets,
         })
     return jobs
 
 
 # ── Ordering + payload ──────────────────────────────────────────────────────
 
-_STATUS_RANK = {"failed": 0, "stale": 1, "running": 2, "unknown": 3, "ok": 3, "disabled": 9}
-
-
 def sort_jobs(jobs):
-    def key(j):
-        return (_STATUS_RANK.get(j["status"], 5), j.get("next_run_at") or "9999", j["name"])
-    return sorted(jobs, key=key)
+    """Most recent run first; disabled at the bottom. (The UI groups by project.)"""
+    return sorted(jobs, key=lambda j: (
+        j["status"] == "disabled",
+        # newest first: invert the ISO string ordering via negative epoch
+        -(datetime.fromisoformat(j["last_run_at"]).timestamp() if j.get("last_run_at") else 0),
+        j["name"]))
 
 
 def summarize(jobs):

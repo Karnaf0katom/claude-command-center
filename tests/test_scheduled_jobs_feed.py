@@ -14,7 +14,9 @@ LastTriggerUSec=Tue 2026-09-29 16:00:01 UTC
 ActiveState=active
 UnitFileState=enabled
 @@CCCJOB:SVC
-Description=BYM scheduled release
+Description=BYM scheduled release — pin next, PR to main
+WorkingDirectory=/home/hermes/Apps/BYM+Finie
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash scripts/x.sh ; ignore_errors=no }
 ActiveState=inactive
 Result=success
 ExecMainStatus=0
@@ -27,6 +29,10 @@ InvocationID=abc
 1790697700.6 host systemd[1]: bym-ship.service: Deactivated successfully.
 @@CCCJOB:OUT
 starting
+Finished bym-ship.service - x.
+bym-ship.service: Consumed 3s CPU time.
+filed BECKY-TEACH-4 and BECKY-12 -> https://github.com/acme/repo/issues/125
+opened https://github.com/acme/repo/pull/1857 and PR #9; SHA-256 UTF-8 2026-09-29 v1.2.3-4
 CCC_OUTCOME: merged PR #12
 \x1b[32mdone\x1b[0m
 @@CCCJOB:ENDUNIT
@@ -39,6 +45,7 @@ ActiveState=inactive
 UnitFileState=disabled
 @@CCCJOB:SVC
 Description=off
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /opt/ccc-cloud/scripts/backup.sh ; ignore_errors=no }
 ActiveState=inactive
 Result=success
 ExecMainStatus=0
@@ -82,18 +89,49 @@ class HermesParse(unittest.TestCase):
 
     def test_outcome_prefers_ccc_outcome_and_strips_ansi(self):
         self.assertEqual(self.jobs["bym-ship"]["outcome"], "merged PR #12")
-        self.assertEqual(f.pick_outcome(["a", "\x1b[32mdone\x1b[0m", ""]), "done")
+        self.assertEqual(self.jobs["bym-ship"]["outcome_kind"], "summary")
+        self.assertEqual(f.pick_outcome(["a", "\x1b[32mdone\x1b[0m", ""]), ("done", "output"))
+
+    def test_outcome_drops_systemd_lines(self):
+        lines = ["Finished x.service - y.", "x.service: Deactivated successfully.", "x.service: Consumed 3s CPU time."]
+        self.assertEqual(f.pick_outcome(lines), ("", ""))
+        self.assertEqual(self.jobs["bad"]["outcome"], "")
+
+    def test_description_project_and_dashes(self):
+        j = self.jobs["bym-ship"]
+        self.assertEqual(j["description"], "BYM scheduled release: pin next, PR to main")
+        self.assertEqual((j["project"], j["repo_path"]), ("BYM+Finie", "/home/hermes/Apps/BYM+Finie"))
+        self.assertEqual(self.jobs["off"]["project"], "ccc-cloud")
+        self.assertEqual(self.jobs["bad"]["project"], "Other")
+
+    def test_ticket_extraction(self):
+        refs = {(t["kind"], t["ref"]) for t in self.jobs["bym-ship"]["tickets"]}
+        self.assertIn(("watchtower", "BECKY-TEACH-4"), refs)
+        self.assertIn(("watchtower", "BECKY-12"), refs)
+        self.assertIn(("issue", "#125"), refs)
+        self.assertIn(("pr", "PR #1857"), refs)
+        self.assertIn(("pr", "PR #9"), refs)
+        self.assertNotIn(("watchtower", "SHA-256"), refs)
+        self.assertNotIn(("watchtower", "UTF-8"), refs)
+        self.assertFalse([r for k, r in refs if k == "watchtower" and r.startswith(("v1", "2026"))])
+        self.assertEqual(len(refs), len(self.jobs["bym-ship"]["tickets"]))
+
+    def test_timeline(self):
+        tl = self.jobs["bym-ship"]["timeline"]
+        self.assertEqual(tl["kind"], "times")
+        self.assertEqual(len(tl["minutes"]), 2)
+        self.assertEqual(self.jobs["bad"]["timeline"], {"kind": "interval", "interval_s": 3600, "minutes": [], "weekdays": []})
 
     def test_disabled_and_failed(self):
         self.assertEqual(self.jobs["off"]["status"], "disabled")
         self.assertIsNone(self.jobs["off"]["next_run_at"])
         self.assertEqual(self.jobs["bad"]["status"], "failed")
-        self.assertIn("exit 3", self.jobs["bad"]["outcome"])
+        self.assertEqual(self.jobs["bad"]["exit_code"], 3)
         self.assertEqual(self.jobs["bad"]["schedule"], "Every 1h")
 
-    def test_sorting_failed_first_disabled_last(self):
+    def test_sorting_recent_first_disabled_last(self):
         order = [j["name"] for j in f.sort_jobs(list(self.jobs.values()))]
-        self.assertEqual(order[0], "bad")
+        self.assertEqual(order[0], "bad")  # same start, name tie-break
         self.assertEqual(order[-1], "off")
 
     def test_summary(self):
@@ -116,6 +154,16 @@ class Schedules(unittest.TestCase):
         self.assertEqual(
             f.format_launchd_schedule({"StartCalendarInterval": {"Weekday": 0, "Hour": 7, "Minute": 15}}),
             "Weekly Sun 07:15")
+
+    def test_launchd_wrapper_and_project(self):
+        d = {"Label": "com.x.job", "ProgramArguments": [
+            "/Users/u/dev/ops/launchd-jobs/job", "com.x.job", "/bin/bash", "/Users/u/dev/ops/job.sh"]}
+        self.assertEqual(f.script_path(d), "/Users/u/dev/ops/job.sh")
+        self.assertEqual(f.project_from_paths(f.launchd_program_paths(d))[0], "ops")
+        self.assertEqual(f.project_from_paths(["/Users/u/dev/tools/indexing/.venv/bin/x"])[0], "indexing")
+        self.assertEqual(f.project_from_paths(["/etc/foo"]), ("Other", None))
+        tl = f.launchd_timeline({"StartCalendarInterval": {"Weekday": 0, "Hour": 7, "Minute": 15}})
+        self.assertEqual((tl["minutes"], tl["weekdays"]), ([435], ["Sun"]))
 
     def test_laptop_filter_drops_daemons(self):
         self.assertTrue(f.is_scheduled_plist({"StartInterval": 60}))

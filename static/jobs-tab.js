@@ -21,6 +21,7 @@
     return 'hermes';
   })();
   const _expanded = new Set();
+  const _collapsed = new Set((function () { try { return JSON.parse(localStorage.getItem('ccc-jobs-collapsed') || '[]'); } catch (_) { return []; } })());
   const _logs = new Map(); // id -> text | null (loading)
 
   function esc(s) {
@@ -64,8 +65,9 @@
   }
 
   function attentionCount() {
-    if (!_data || !_data.summary || !_data.summary.all) return 0;
-    return _data.summary.all.attention || 0;
+    if (!_data || !_data.summary) return 0;
+    const sm = _data.summary[_host === 'all' ? 'all' : _host];
+    return (sm && sm.attention) || 0;
   }
 
   function updateBadge() {
@@ -80,6 +82,21 @@
   function visibleJobs() {
     const jobs = (_data && _data.jobs) || [];
     return _host === 'all' ? jobs : jobs.filter(j => j.host === _host);
+  }
+
+  // No em-dashes in user copy.
+  function nodash(t) { return String(t == null ? '' : t).replace(/ — /g, ': ').replace(/—/g, ':'); }
+
+  function hueOf(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 360;
+    return h;
+  }
+
+  function fmtLocal(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
   function headerHtml() {
@@ -111,40 +128,112 @@
       + '<div class="jobs-summary' + (bad ? ' is-bad' : '') + '">' + esc(parts.join(' · ')) + '</div></div>';
   }
 
-  function historyHtml(hist) {
-    if (!hist || !hist.length) return '';
-    return '<span class="jobs-hist" title="Last ' + hist.length + ' runs (7d)">'
-      + hist.slice(-14).map(x => '<i class="' + (x.ok ? 'ok' : 'bad') + '" title="' + esc(x.at) + '"></i>').join('') + '</span>';
+  // 24h strip: ticks at launch times (local), a "now" marker, weekday label for
+  // weekly jobs, and a filled band for short intervals.
+  function stripHtml(j) {
+    const tl = j.timeline || {};
+    let ticks = '';
+    let label = '';
+    if (tl.kind === 'interval' && tl.interval_s) {
+      if (tl.interval_s <= 3600) {
+        ticks = '<i class="job-band' + (tl.interval_s <= 900 ? ' dense' : '') + '"></i>';
+      } else if (tl.interval_s >= 86400) {
+        ticks = '<i class="job-tick" style="left:0"></i>';
+        label = 'every ' + Math.round(tl.interval_s / 86400) + 'd';
+      } else {
+        for (let m = 0; m < 1440; m += tl.interval_s / 60) ticks += '<i class="job-tick" style="left:' + (m / 14.4).toFixed(2) + '%"></i>';
+      }
+    } else if (tl.kind === 'times') {
+      ticks = (tl.minutes || []).map(m => '<i class="job-tick" style="left:' + (m / 14.4).toFixed(2) + '%"></i>').join('');
+      if (tl.weekdays && tl.weekdays.length) label = tl.weekdays.length > 2 ? tl.weekdays[0] + '+' : tl.weekdays.join(',');
+    }
+    const n = new Date();
+    const nowPct = ((n.getHours() * 60 + n.getMinutes()) / 14.4).toFixed(2);
+    const tip = j.schedule + (j.next_run_at ? '\nNext: ' + fmtLocal(j.next_run_at) + ' (' + rel(j.next_run_at) + ')' : '');
+    return '<span class="job-strip" title="' + esc(tip) + '"><span class="job-track">' + ticks
+      + '<i class="job-now" style="left:' + nowPct + '%"></i></span>'
+      + '<span class="job-wd">' + esc(label) + '</span></span>';
+  }
+
+  function chipHtml(t) {
+    const label = esc(t.ref);
+    if (t.kind === 'watchtower') {
+      const q = String(t.ref).replace(/-\d+$/, '');
+      return '<a role="button" tabindex="0" class="job-chip watchtower-ticket-link" data-watchtower-ticket="' + esc(t.ref)
+        + '" data-watchtower-queue="' + esc(q) + '">' + label + '</a>';
+    }
+    if (t.url) return '<a class="job-chip" href="' + esc(t.url) + '" target="_blank" rel="noopener" title="' + esc(t.repo || '') + '">' + label + '</a>';
+    return '<span class="job-chip">' + label + '</span>';
+  }
+
+  function chipsHtml(tickets, max) {
+    const list = tickets || [];
+    const shown = list.slice(0, max);
+    return shown.map(chipHtml).join('') + (list.length > max ? '<span class="job-chip-more">+' + (list.length - max) + '</span>' : '');
+  }
+
+  function outcomeHtml(j) {
+    if (!j.outcome) return '';
+    const text = nodash(j.outcome);
+    return '<span class="job-outcome' + (j.outcome_kind === 'output' ? ' is-raw' : '') + '" title="' + esc(text) + '">'
+      + (j.outcome_kind === 'output' ? '<span class="job-out-label">output </span>' : '') + esc(text) + '</span>';
   }
 
   function rowHtml(j) {
     const open = _expanded.has(j.id);
-    const outcome = j.outcome || (j.last_run_at && j.status !== 'failed' ? 'Completed' + (j.last_duration_s ? ' in ' + dur(j.last_duration_s) : '') : '');
-    const lastBits = [];
-    if (j.last_run_at) lastBits.push(rel(j.last_run_at));
-    else lastBits.push(j.status === 'disabled' ? 'never run' : 'not run yet');
-    if (j.last_duration_s != null && j.last_duration_s >= 1) lastBits.push(dur(j.last_duration_s));
-    if (j.exit_code) lastBits.push('exit ' + j.exit_code);
-    const next = j.next_run_at ? 'next ' + rel(j.next_run_at) : '';
+    const tipBits = ['Status: ' + j.status];
+    if (j.last_run_at) tipBits.push('Last run: ' + fmtLocal(j.last_run_at));
+    if (j.last_duration_s != null) tipBits.push('Duration: ' + dur(j.last_duration_s || 0.4));
+    if (j.exit_code) tipBits.push('Exit code: ' + j.exit_code);
+    const mid = (j.outcome_kind === 'summary' || !(j.tickets && j.tickets.length))
+      ? outcomeHtml(j) : '<span class="job-chips">' + chipsHtml(j.tickets, 5) + '</span>';
     let h = '<div class="job-row st-' + esc(j.status) + (open ? ' is-open' : '') + '" data-job-id="' + esc(j.id) + '">'
       + '<div class="job-line1"><span class="job-dot" title="' + esc(j.status) + '"></span>'
       + '<span class="job-name" title="' + esc(j.name) + '">' + esc(shortName(j.name)) + '</span>'
-      + '<span class="job-host">' + (j.host === 'hermes' ? 'Hermes' : 'Laptop') + '</span>'
-      + '<span class="job-sched">' + esc(j.schedule) + '</span></div>'
-      + '<div class="job-line2"><span>' + esc(lastBits.join(' · ')) + '</span>'
-      + historyHtml(j.history)
-      + (next ? '<span class="job-next">' + esc(next) + '</span>' : '')
-      + (j.status !== 'ok' && j.status !== 'running' ? '<span class="job-flag">' + esc(j.status) + '</span>' : '')
-      + '</div>';
-    if (outcome) h += '<div class="job-outcome" title="' + esc(outcome) + '">' + esc(outcome) + '</div>';
+      + (_host === 'all' ? '<span class="job-host">' + (j.host === 'hermes' ? 'Hermes' : 'Laptop') + '</span>' : '')
+      + '<span class="job-desc-inline" title="' + esc(nodash(j.description)) + '">' + esc(nodash(j.description)) + '</span></div>'
+      + '<div class="job-line2">' + stripHtml(j) + '<span class="job-mid">' + mid + '</span>'
+      + '<span class="job-when" title="' + esc(tipBits.join('\n')) + '">' + esc(j.last_run_at ? rel(j.last_run_at) : '') + '</span></div>';
     if (open) {
       const log = _logs.get(j.id);
+      const facts = [];
+      facts.push(j.schedule);
+      if (j.next_run_at) facts.push('next ' + rel(j.next_run_at));
+      if (j.last_run_at) facts.push('last ' + fmtLocal(j.last_run_at));
+      if (j.last_duration_s != null) facts.push('took ' + dur(j.last_duration_s || 0.4));
+      if (j.exit_code) facts.push('exit ' + j.exit_code);
       h += '<div class="job-detail">'
-        + (j.description ? '<div class="job-desc">' + esc(j.description) + '</div>' : '')
-        + (outcome ? '<div class="job-outcome-full">' + esc(outcome) + '</div>' : '')
+        + (j.description ? '<div class="job-desc">' + esc(nodash(j.description)) + '</div>' : '')
+        + '<div class="job-facts">' + esc(facts.join(' · ')) + '</div>'
+        + (j.repo_path ? '<div class="job-facts">' + esc(j.repo_path) + '</div>' : '')
+        + (j.history && j.history.length ? '<div class="job-facts">7d ' + historyHtml(j.history) + '</div>' : '')
+        + (j.outcome ? '<div class="job-outcome-full">' + (j.outcome_kind === 'output' ? '<span class="job-out-label">last output </span>' : '') + esc(nodash(j.outcome)) + '</div>' : '')
+        + (j.tickets && j.tickets.length ? '<div class="job-chips">' + chipsHtml(j.tickets, 50) + '</div>' : '')
         + '<pre class="job-log">' + (log == null ? 'Loading log...' : esc(log)) + '</pre></div>';
     }
     return h + '</div>';
+  }
+
+  function historyHtml(hist) {
+    return '<span class="jobs-hist">' + hist.slice(-14).map(x => '<i class="' + (x.ok ? 'ok' : 'bad') + '" title="' + esc(x.at) + '"></i>').join('') + '</span>';
+  }
+
+  function groupsHtml(jobs) {
+    const groups = new Map(); // server order = most recent run first, so groups inherit that order
+    jobs.forEach(j => {
+      const k = j.project || 'Other';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(j);
+    });
+    return Array.from(groups.entries()).map(([name, list]) => {
+      const collapsed = _collapsed.has(name);
+      return '<div class="conv-folder-group jobs-group">'
+        + '<div class="conv-folder-group-header" style="--chip-hue:' + hueOf(name) + ';" role="button" tabindex="0" data-jobs-group="' + esc(name) + '">'
+        + '<button type="button" class="conv-folder-group-arrow" tabindex="-1">' + (collapsed ? '▸' : '▾') + '</button>'
+        + '<span class="conv-folder-group-chip">' + esc(name) + '</span>'
+        + '<span class="conv-folder-group-count">' + list.length + '</span></div>'
+        + (collapsed ? '' : list.map(rowHtml).join('')) + '</div>';
+    }).join('');
   }
 
   function render() {
@@ -156,7 +245,7 @@
     } else {
       const jobs = visibleJobs();
       html = headerHtml()
-        + (jobs.length ? '<div class="jobs-list">' + jobs.map(rowHtml).join('') + '</div>'
+        + (jobs.length ? '<div class="jobs-list">' + groupsHtml(jobs) + '</div>'
           : '<div class="jobs-empty">No scheduled jobs' + (_host === 'hermes' && (_data.hosts.hermes || {}).status !== 'online' ? ' (Hermes unreachable)' : '') + '.</div>');
     }
     if (html !== _lastHtml || !el.firstChild) {
@@ -187,10 +276,19 @@
     if (seg) {
       _host = seg.getAttribute('data-jobs-host');
       try { localStorage.setItem(HOST_KEY, _host); } catch (_) {}
+      updateBadge();
       render();
       return;
     }
-    if (ev.target.closest('.job-detail')) return;
+    const grp = ev.target.closest('[data-jobs-group]');
+    if (grp) {
+      const g = grp.getAttribute('data-jobs-group');
+      if (_collapsed.has(g)) _collapsed.delete(g); else _collapsed.add(g);
+      try { localStorage.setItem('ccc-jobs-collapsed', JSON.stringify(Array.from(_collapsed))); } catch (_) {}
+      render();
+      return;
+    }
+    if (ev.target.closest('.job-detail') || ev.target.closest('a.job-chip')) return;
     const row = ev.target.closest('[data-job-id]');
     if (!row) return;
     const id = row.getAttribute('data-job-id');
