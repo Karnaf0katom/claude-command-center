@@ -12,6 +12,10 @@ def render_session_state(body: str, app_path: Path) -> str:
     source = app_path.read_text(encoding="utf-8")
     start = source.index("function renderSessionStateBlock(body)")
     end = source.index("\n  function normalizeTaskNotificationField", start)
+    # The Needs-you action helpers (CCC-1218) sit just above the renderer.
+    helpers = source.rfind("// CCC-1218:", 0, start)
+    if helpers != -1:
+        start = helpers
     function_source = source[start:end]
     harness = f"""
 function escapeHtml(value) {{
@@ -22,6 +26,11 @@ function escapeHtml(value) {{
     .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }}
+const escapeAttr = escapeHtml;
+function renderInline(value) {{
+  return escapeHtml(value).replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+}}
+const document = {{ addEventListener() {{}} }};
 {function_source}
 process.stdout.write(renderSessionStateBlock(process.argv[1]));
 """
@@ -93,6 +102,55 @@ class TestSessionStateCard(unittest.TestCase):
             self.assertIn("font-size: 15px", styles)
             self.assertIn(".session-state-block .ssb-reason {", styles)
             self.assertIn("font-size: 13px", styles)
+
+    def test_needs_you_offers_restart_for_ccc_kickstart(self):
+        html = render_session_state(
+            "NEXT_STEP_USER: Run `launchctl kickstart -k gui/$(id -u)/com.github.claude-command-center`"
+            " and the `.worker` service, then reload CCC to see the new models.",
+            PROJECT_ROOT / "static" / "app.js",
+        )
+
+        self.assertIn('class="ssb-row ssb-actions"', html)
+        self.assertIn('data-ssb-act="restart"', html)
+        self.assertNotIn('data-ssb-act="run"', html)
+        self.assertNotIn('data-ssb-act="reload"', html)
+        self.assertIn('<code class="md-code">', html)
+
+    def test_needs_you_offers_run_copy_open_and_reply(self):
+        html = render_session_state(
+            "NEXT_STEP_USER: Decide whether to ship; if yes run `brew upgrade ccc`, "
+            "open https://example.com/docs and review ~/dev/scratch/plan.md.",
+            PROJECT_ROOT / "static" / "app.js",
+        )
+
+        self.assertIn('data-ssb-act="run" data-ssb-value="brew upgrade ccc"', html)
+        self.assertIn('data-ssb-act="copy" data-ssb-value="brew upgrade ccc"', html)
+        self.assertIn('href="https://example.com/docs"', html)
+        self.assertIn('>Open example.com</a>', html)
+        self.assertIn('data-path="~/dev/scratch/plan.md"', html)
+        self.assertIn('>Open plan.md</a>', html)
+        self.assertIn('data-ssb-act="reply"', html)
+
+    def test_plain_ask_gets_no_action_row(self):
+        html = render_session_state(
+            "NEXT_STEP_USER: Use the same login for the form and screencast.",
+            PROJECT_ROOT / "static" / "app.js",
+        )
+
+        self.assertNotIn("ssb-actions", html)
+
+    def test_run_in_terminal_passes_command_as_argv(self):
+        from ccc_server import run_in_terminal as rit
+
+        line = rit.build_shell_line('echo "a \\ b"', str(PROJECT_ROOT))
+        self.assertTrue(line.startswith("cd "))
+        argv = rit.osascript_argv(line)
+        self.assertEqual(argv[-1], line)
+        self.assertNotIn(line, " ".join(argv[:-1]))
+        with self.assertRaises(ValueError):
+            rit.build_shell_line("echo a\nrm x")
+        with self.assertRaises(ValueError):
+            rit.build_shell_line("   ")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,7 @@ from ccc_server import test_isolation_active, register as _ccc_core_register
 # adopted, so its short function names don't land on server globals.
 from ccc_server import report_routes as _report_routes
 from ccc_server import model_discovery as _model_discovery
+from ccc_server import run_in_terminal as _run_in_terminal
 from ccc_server.events import DashboardEventHub
 
 # Pure helpers and path constants moved to leaf modules (slice 3)
@@ -30134,6 +30135,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(res)
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
+            return
+        if path == "/api/run-in-terminal":
+            # "Run" on a Needs-you card (CCC-1218): types a user-confirmed
+            # command into a visible terminal. Local-only, like config
+            # consent: a phone/tunnel peer can't start host shell commands.
+            if phone_access.is_remote_request(self.client_address[0], self.headers):
+                self.send_json({"ok": False, "error": "run in terminal is local-only"}, 403)
+                return
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                payload = json.loads(body) if body else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                res = _run_in_terminal.run_in_terminal(
+                    payload.get("command"), payload.get("cwd"), _preferred_terminal_app(),
+                )
+                self.send_json(res, 200 if res.get("ok") else 400)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
             return
         if path.startswith("/api/config-consent/"):
             # Writing to the user's agent config is local-only: a peer let in

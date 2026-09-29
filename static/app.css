@@ -1858,6 +1858,22 @@
     margin-top: 6px;
     font-size: 13px;
   }
+  .session-state-block .ssb-actions {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-top: 8px; padding-left: 86px;
+  }
+  .session-state-block .ssb-action {
+    display: inline-flex; align-items: center;
+    padding: 3px 10px; border-radius: 5px;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--text); font: inherit; font-size: 12px;
+    text-decoration: none; cursor: pointer;
+    max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .session-state-block .ssb-action:hover { background: rgba(245, 158, 11, 0.18); }
+  .session-state-block .ssb-action:disabled { opacity: 0.5; cursor: default; }
+  .session-state-block .ssb-act-copy { border-color: var(--border); background: transparent; }
   .md-table {
     border-collapse: collapse; margin: 8px 0; font-size: 13px;
     border: 1px solid var(--border); border-radius: 4px; overflow: hidden;

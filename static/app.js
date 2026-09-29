@@ -13809,6 +13809,107 @@
     });
   }
 
+  // CCC-1218: turn a "Needs you" ask into buttons. Built from what agents
+  // actually write there: decide/confirm/tell/answer (-> Reply), reload or
+  // hard-refresh CCC (-> Reload), a CCC launchctl kickstart (-> Restart CCC),
+  // other `backticked` shell commands (-> Run in a visible terminal + Copy),
+  // and URLs / file paths (-> Open).
+  const NEEDS_YOU_CMD_RE = /^(?:sudo\s+)?(?:\.\/|~\/|launchctl|brew|git|gh|npm|npx|pnpm|yarn|bun|node|python3?|pip3?|uv|wt|ccc|curl|make|open|bash|sh|zsh|docker|kubectl|vercel|supabase|wrangler|cargo|go|ssh|trash|claude|codex|redditctl|ffmpeg|pytest)\s/;
+  const NEEDS_YOU_REPLY_RE = /^(?:\(?\d+\)?\s*)?(?:decide|confirm|tell|say|answer|pick|choose|approve|reply|give|let me know|accept|send (?:me|your)|either)\b/i;
+  function needsYouActions(text) {
+    const actions = [];
+    const seen = new Set();
+    const add = (a) => {
+      const key = a.act + '\u0000' + a.value;
+      if (seen.has(key) || actions.length >= 6) return;
+      seen.add(key);
+      actions.push(a);
+    };
+    const src = String(text || '');
+    const codeSpans = [];
+    src.replace(/`([^`\n]+)`/g, (m, inner) => { codeSpans.push(inner.trim()); return m; });
+    for (const code of codeSpans) {
+      if (/launchctl\s+kickstart\b[^`]*com\.github\.claude-command-center/.test(code)) {
+        add({ act: 'restart', label: 'Restart CCC', value: 'all', title: 'Restart the dashboard and the worker, then reload' });
+      } else if (NEEDS_YOU_CMD_RE.test(code + ' ')) {
+        add({ act: 'run', label: 'Run', value: code, title: 'Run in a terminal: ' + code });
+        add({ act: 'copy', label: 'Copy', value: code, title: 'Copy: ' + code });
+      }
+    }
+    const urls = src.match(/https?:\/\/[^\s<>"'`)\]]+/g) || [];
+    for (let u of urls) {
+      u = u.replace(/[.,;:!?]+$/, '');
+      let host = u;
+      try { host = new URL(u).host; } catch (_) {}
+      add({ act: 'url', label: 'Open ' + host, value: u, title: u });
+    }
+    const paths = src.match(/(?:^|[\s(`])((?:~\/|\/(?:Users|Volumes|Applications|private|tmp|opt|etc)\/)[^\s`'"<>)]+)/g) || [];
+    for (let p of paths) {
+      p = p.replace(/^[\s(`]/, '').replace(/[.,;:!?]+$/, '');
+      const base = p.replace(/\/+$/, '').split('/').pop() || p;
+      add({ act: 'path', label: 'Open ' + base, value: p, title: p });
+    }
+    if (!actions.some(a => a.act === 'restart')
+        && /\b(?:hard[- ]?)?(?:reload|refresh)\b/i.test(src)
+        && /\b(?:CCC|dashboard|page|browser|tab|UI)\b|^\s*(?:hard[- ]?)?(?:reload|refresh)\b/i.test(src)) {
+      add({ act: 'reload', label: 'Reload', value: '1', title: 'Reload CCC' });
+    }
+    if (NEEDS_YOU_REPLY_RE.test(src.trim()) || /\?\s*$/.test(src.trim())) {
+      add({ act: 'reply', label: 'Reply', value: '1', title: 'Answer in the composer' });
+    }
+    return actions;
+  }
+  function needsYouActionsHtml(text) {
+    return needsYouActions(text).map(a => {
+      if (a.act === 'url') {
+        return '<a class="ssb-action" href="' + escapeAttr(a.value) + '" target="_blank" rel="noopener" title="' + escapeAttr(a.title) + '">' + escapeHtml(a.label) + '</a>';
+      }
+      if (a.act === 'path') {
+        return '<a role="button" tabindex="0" class="ssb-action path-link" data-path="' + escapeAttr(a.value) + '" title="' + escapeAttr(a.title) + '">' + escapeHtml(a.label) + '</a>';
+      }
+      return '<button type="button" class="ssb-action ssb-act-' + a.act + '" data-ssb-act="' + a.act + '" data-ssb-value="' + escapeAttr(a.value) + '" title="' + escapeAttr(a.title) + '">' + escapeHtml(a.label) + '</button>';
+    }).join('');
+  }
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest && ev.target.closest('button.ssb-action[data-ssb-act]');
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const act = btn.dataset.ssbAct;
+    const value = btn.dataset.ssbValue || '';
+    const paneEl = btn.closest('.conv-pane[data-pane-id]');
+    const paneId = paneEl ? paneEl.getAttribute('data-pane-id') : activePaneId();
+    if (act === 'copy') {
+      const ok = await copyTextValue(value);
+      showConvToast(ok ? 'Copied' : 'Copy failed');
+    } else if (act === 'reload') {
+      location.reload();
+    } else if (act === 'restart') {
+      if (!confirm('Restart CCC (dashboard + worker) and reload?')) return;
+      restartServerRun('/api/restart/all');
+    } else if (act === 'reply') {
+      const input = composerInputForPane(paneId) || $convInput;
+      if (input) input.focus();
+    } else if (act === 'run') {
+      if (!confirm('Run this in a new terminal window?\n\n' + value)) return;
+      const ctx = _pathLinkSessionContext(btn);
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/run-in-terminal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: value, cwd: (ctx && ctx.cwd) || '' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        showConvToast(data.ok ? 'Running in ' + (data.terminal_app || 'Terminal') : 'Run failed: ' + (data.error || res.status));
+      } catch (e) {
+        showConvToast('Run failed: ' + String(e));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  });
+
   // Minimal markdown renderer for assistant text — tables, inline code, bold, headers
   function renderSessionStateBlock(body) {
     // Keep the machine-readable three-field footer, but render it as a
@@ -13833,7 +13934,9 @@
     const nextStep = fields.NEXT_STEP_USER || '';
     const hasUserAction = !!nextStep && !/^(?:none|nothing|no action(?: is)? needed|n\/a|not applicable)[.!]?$/i.test(nextStep);
     if (hasUserAction) {
-      rows.push('<div class="ssb-row ssb-primary ssb-next"><span class="ssb-key">Needs you</span>' + escapeHtml(nextStep) + '</div>');
+      rows.push('<div class="ssb-row ssb-primary ssb-next"><span class="ssb-key">Needs you</span>' + renderInline(nextStep) + '</div>');
+      const actions = needsYouActionsHtml(nextStep);
+      if (actions) rows.push('<div class="ssb-row ssb-actions">' + actions + '</div>');
     } else if (fields.DID) {
       rows.push('<div class="ssb-row ssb-primary ssb-done"><span class="ssb-key">Done</span>' + escapeHtml(fields.DID) + '</div>');
     }
