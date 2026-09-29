@@ -10208,7 +10208,7 @@
         const canCompact = hasSession && !isNewSession && !isBacklogIssue && !isPkood
           && isCompactionCapableSource(currentSession.source);
         const pendingCompactEcho = hasPendingSendEchoBeforeCompact();
-        const compactAlreadyRunning = !!(currentSession && _compactRunFor(currentSession.id));
+        const compactAlreadyRunning = !!(currentSession && _compactRunBlocksResend(currentSession.id));
         activeCompactBtn.classList.toggle('visible', canCompact);
         if (!_compactInFlight) activeCompactBtn.disabled = !canCompact || pendingCompactEcho || compactAlreadyRunning;
         activeCompactBtn.title = compactAlreadyRunning
@@ -11436,7 +11436,7 @@
       showOpToast('Wait for the pending message to land in the transcript before compacting.', 'error');
       return;
     }
-    if (compactCommand && _compactRunFor(sid)) {
+    if (compactCommand && _compactRunBlocksResend(sid)) {
       // A compact already in flight for this session — sending another
       // /compact here doesn't start a fresh one, it gets queued server-side
       // and fires the moment the first compact finishes (CCC-982: read as
@@ -11752,7 +11752,7 @@
             setTimeout(refreshConversationList, 1500);
             setTimeout(refreshConversationList, 3500);
           } else {
-            markCompactRunWorking(sid);
+            markCompactRunWorking(sid, data);
             scheduleCompactUsageRefresh(sid);
           }
         } else if (data.via === 'live-spawn-clear') {
@@ -13910,6 +13910,17 @@
   function _compactRunFor(sid) {
     return _compactRun && sid && _compactRun.sid === sid ? _compactRun : null;
   }
+  // Whether a fresh /compact for `sid` should be refused as a duplicate. Only
+  // a live, on-schedule run blocks. A finished/failed card, a /compact the
+  // server merely QUEUED behind a running turn (a re-send just dedupes there),
+  // and a stalled run whose card says "re-running /compact is safe" must not:
+  // blocking those left a user stuck on a 36-minute spinner with no way to
+  // retype /compact after the queued one was dropped.
+  function _compactRunBlocksResend(sid) {
+    const run = _compactRunFor(sid);
+    return !!(run && (run.stage === 'requested' || run.stage === 'working')
+      && !run.slow && !run.queued);
+  }
   function _compactEngineLabel(source) {
     if (typeof SESSION_ENGINE_LABELS !== 'undefined' && SESSION_ENGINE_LABELS[source]) {
       return SESSION_ENGINE_LABELS[source];
@@ -14021,6 +14032,12 @@
       title = 'Context compacted';
       note = engine + ' replaced the earlier turns with a summary. Everything below this'
         + ' point is the conversation it kept.';
+    } else if (run.queued) {
+      glyph = '<span class="compact-run-spinner"></span>';
+      title = 'Compact queued';
+      note = engine + ' is still in the middle of a turn. <code>/compact</code> runs as soon as'
+        + ' that turn finishes. You can keep sending messages; running <code>/compact</code>'
+        + ' again will not queue a second one.';
     } else if (run.stage === 'requested') {
       glyph = '<span class="compact-run-spinner"></span>';
       title = 'Starting compaction…';
@@ -14036,7 +14053,7 @@
     // Progress bar: honest about being an estimate. It eases toward — but
     // never reaches — 100% while working, and only fills on the real result.
     let bar = '';
-    if (run.stage === 'requested' || run.stage === 'working') {
+    if ((run.stage === 'requested' || run.stage === 'working') && !run.queued) {
       const frac = 1 - Math.exp(-((Date.now() - run.startedAt) / _COMPACT_TYPICAL_MS));
       const pct = Math.min(92, Math.max(4, Math.round(frac * 92)));
       bar = '<div class="compact-run-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"'
@@ -14072,7 +14089,7 @@
       +   '<span class="compact-run-title">' + title + '</span>'
       +   '<span class="compact-run-clock">' + escapeHtml(elapsed) + '</span>'
       + '</div>'
-      + (run.stage === 'failed' || run.stage === 'unconfirmed' ? '' : _compactRunStepsHtml(run))
+      + (run.stage === 'failed' || run.stage === 'unconfirmed' || (run.queued && run.stage !== 'done') ? '' : _compactRunStepsHtml(run))
       + bar
       + result
       + '<div class="compact-run-note">' + note + '</div>'
@@ -14211,6 +14228,7 @@
       endedAt: 0,
       acked: false,
       slow: false,
+      queued: false,
       anchored: false,
       before: _compactContextNow(sid),
       after: null,
@@ -14239,10 +14257,13 @@
   }
 
   // The engine acknowledged the request (it is now actually summarizing).
-  function markCompactRunWorking(sid) {
+  // `data.queued`: the session was mid-turn, so the server parked /compact to
+  // run after the turn. Say so instead of claiming it is compacting now.
+  function markCompactRunWorking(sid, data) {
     const run = _compactRunFor(sid) || beginCompactRun(sid);
     if (!run) return;
     run.acked = true;
+    if (data) run.queued = !!data.queued;
     if (run.stage === 'requested') run.stage = 'working';
     _compactRunMount();
     _compactRunPaint();
@@ -15937,6 +15958,13 @@
     if (document.body.classList.contains('kanban-split')) mobileShowConv(true);
     else mobileShowMain(true);
   }
+  // The federated sidebar (federated-sidebar.js) shows peer conversations in
+  // its own embed and needs the same phone slide-in/back as local rows.
+  window.cccMobileNav = {
+    isMobile: () => isMobile(),
+    show: mobileShowForCurrentMode,
+    back: () => { mobileShowConv(false); mobileShowMain(false); },
+  };
   const $mobileBackBtn = document.getElementById('mobileBackBtn');
   // One back button for every mode: Simple mode returns to wherever the open
   // conversation was launched from (a screen like History, or Home if it
@@ -32843,7 +32871,7 @@
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
         } else {
-          markCompactRunWorking(sid);
+          markCompactRunWorking(sid, data);
           scheduleCompactUsageRefresh(sid);
         }
       } else if (data && data.code === 'compact_needs_manual') {
@@ -39886,7 +39914,7 @@
               setTimeout(refreshConversationList, 1500);
               setTimeout(refreshConversationList, 3500);
             } else {
-              markCompactRunWorking(sid);
+              markCompactRunWorking(sid, data);
               scheduleCompactUsageRefresh(sid);
             }
           } else if (data && data.code === 'compact_needs_manual') {
