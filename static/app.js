@@ -44338,6 +44338,12 @@
     };
     streamPane._eventSourceWatchdog = () => clearTimeout(watchdog);
     source.addEventListener('keepalive', bumpWatchdog);
+    source.addEventListener('source_reset', () => {
+      const pane = paneByPaneId(streamPaneId);
+      if (!pane || pane.conversationId !== streamConvId || pane.eventSource !== source) return;
+      stopConvStream(streamPaneId);
+      selectConversation(streamConvId, streamPaneId);
+    });
     source.onmessage = (ev) => {
       bumpWatchdog();
       try {

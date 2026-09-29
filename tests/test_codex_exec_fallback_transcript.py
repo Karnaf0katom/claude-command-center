@@ -109,3 +109,46 @@ def test_resolve_conversation_reader_falls_back_to_spawn_log(tmp_path, monkeypat
     filepath, parser = server._resolve_conversation_reader(thread_id, repo_path=str(repo))
     assert filepath == spawn_log
     assert parser is codex_parse._parse_codex_exec_log_event
+
+
+def _stub_reader_fixture(tmp_path, monkeypatch):
+    sid = 'test-recovery-thread'
+    rollout = tmp_path / 'rollout.jsonl'
+    _write_jsonl(rollout, [
+        {'type': 'session_meta', 'payload': {'id': sid}},
+        {'type': 'event_msg', 'payload': {'type': 'task_started'}},
+    ])
+    log_dir = tmp_path / '.claude' / 'logs'
+    log_dir.mkdir(parents=True)
+    capture = log_dir / 'spawn-codex-demo.log'
+    _write_jsonl(capture, [
+        {'type': 'thread.started', 'thread_id': sid},
+        {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': 'Captured answer'}},
+    ])
+    monkeypatch.setattr(server, '_resolve_conversation_path', lambda *a, **kw: tmp_path / 'missing.jsonl')
+    monkeypatch.setattr(server, '_resolve_codex_rollout_path', lambda _: rollout)
+    monkeypatch.setattr(server, '_detect_session_engine', lambda _: 'codex')
+    monkeypatch.setattr(server, '_codex_thread_row', lambda _: {'cwd': str(tmp_path), 'first_user_message': 'Test request'})
+    monkeypatch.setattr(server, '_git_toplevel_for_existing_dir', lambda _: None)
+    monkeypatch.setattr(server, '_codex_logs_for_session', lambda _: [(1, str(capture))])
+    monkeypatch.setattr(server, '_get_queued_events_for_session', lambda _: [])
+    server._CONV_PARSE_CACHE.clear()
+    server._CONV_PATH_CACHE.clear()
+    return sid, rollout
+
+
+def _answer_texts(result):
+    return [block['text'] for event in result['events'] for block in event.get('blocks', []) if block.get('kind') == 'text']
+
+
+def test_normal_viewer_without_repo_argument_recovers(tmp_path, monkeypatch):
+    sid, _ = _stub_reader_fixture(tmp_path, monkeypatch)
+    assert _answer_texts(server.parse_conversation(sid)) == ['Captured answer']
+
+
+def test_native_history_replaces_cached_capture(tmp_path, monkeypatch):
+    sid, rollout = _stub_reader_fixture(tmp_path, monkeypatch)
+    assert _answer_texts(server.parse_conversation(sid)) == ['Captured answer']
+    with rollout.open('a') as handle:
+        handle.write(json.dumps({'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'Native answer'}}) + '\n')
+    assert _answer_texts(server.parse_conversation(sid)) == ['Native answer']
