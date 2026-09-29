@@ -1313,3 +1313,16 @@ def test_spawn_registry_lock_serializes_separate_processes(
             first.terminate()
         if second.is_alive():
             second.terminate()
+
+
+def test_background_subagent_events_do_not_reopen_finished_turn(server_mod, tmp_path):
+    """A subagent keeps streaming after the main turn's result; those lines
+    carry parent_tool_use_id and must not hold queued input."""
+    _sid, entry, _transcript, log = _stage(server_mod, tmp_path, [_event("a")], 1)
+    with log.open("a") as fh:
+        for kind in ("assistant", "user", "stream_event"):
+            fh.write(json.dumps({"type": kind, "parent_tool_use_id": "toolu_x"}) + "\n")
+    assert server_mod._headless_turn_in_progress(entry) is False
+    with log.open("a") as fh:
+        fh.write(json.dumps({"type": "assistant"}) + "\n")
+    assert server_mod._headless_turn_in_progress(entry) is True
