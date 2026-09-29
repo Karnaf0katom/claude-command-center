@@ -117,6 +117,32 @@ func python3Works() -> Bool {
     return proc.terminationStatus == 0
 }
 
+/// True when Apple's Command Line Tools are installed and a real python3 runs.
+/// On a blank Mac /usr/bin/python3 and /usr/bin/git are stubs that only pop
+/// the install prompt, so both must pass before install.sh or run.sh can work.
+func developerToolsReady() -> Bool {
+    let proc = Process()
+    proc.launchPath = "/usr/bin/xcode-select"
+    proc.arguments = ["-p"]
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do { try proc.run() } catch { return false }
+    proc.waitUntilExit()
+    return proc.terminationStatus == 0 && python3Works()
+}
+
+/// Opens Apple's "Install Command Line Developer Tools" dialog. The exit code
+/// is non-zero when a request is already pending, so it is ignored.
+func requestDeveloperToolsInstall() {
+    let proc = Process()
+    proc.launchPath = "/usr/bin/xcode-select"
+    proc.arguments = ["--install"]
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do { try proc.run() } catch { return }
+    proc.waitUntilExit()
+}
+
 func attachProcessLog(_ process: Process) throws -> FileHandle {
     try FileManager.default.createDirectory(
         atPath: CCC_LOG_DIR,
@@ -333,6 +359,9 @@ final class CCCWebWindow: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindow
             label.font = NSFont.systemFont(ofSize: 14, weight: .medium)
             label.textColor = .secondaryLabelColor
             label.alignment = .center
+            label.maximumNumberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            label.preferredMaxLayoutWidth = 480
             label.translatesAutoresizingMaskIntoConstraints = false
             loadingLabel = label
             win.contentView!.addSubview(view)
@@ -513,6 +542,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var serverProcess: Process?
     var serverLogHandle: FileHandle?
     var pollTimer: Timer?
+    // True while a single background poller waits for Command Line Tools.
+    var waitingForDeveloperTools = false
     // Watchdog state — see startWatchdog(). Recovers a dashboard that wedges
     // with the loading overlay up forever (stalled server thread, or a hung
     // app.js request so the page's own 30s safety nets never register).
@@ -1210,6 +1241,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // A repeated bootstrap (Retry, reconnect) while the poller is already
+        // waiting must not start a second one.
+        if waitingForDeveloperTools { return }
+
+        // Check off the main thread: on a blank Mac the python3 stub is slow.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ready = developerToolsReady()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if ready {
+                    self.continueBootstrap()
+                } else {
+                    self.waitForDeveloperTools()
+                }
+            }
+        }
+    }
+
+    /// Ask Apple to install the Command Line Tools, show the instructions in
+    /// the loading UI, and poll until they work, then resume bootstrap().
+    func waitForDeveloperTools() {
+        if waitingForDeveloperTools { return }
+        waitingForDeveloperTools = true
+        loadingLabel.isHidden = false
+        loadingLabel.stringValue =
+            "CCC needs Apple's free Command Line Tools (they include Python and Git). "
+            + "In the Apple window that just opened, click Install, then Agree. "
+            + "CCC continues automatically when it finishes (usually 5 to 15 minutes). "
+            + "If you closed the Apple window, quit and reopen CCC to see it again."
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            requestDeveloperToolsInstall()
+            while !developerToolsReady() {
+                Thread.sleep(forTimeInterval: 5)
+                if self == nil { return }
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.waitingForDeveloperTools = false
+                self.loadingLabel.stringValue = "Starting CCC server…"
+                self.continueBootstrap()
+            }
+        }
+    }
+
+    func continueBootstrap() {
         if !FileManager.default.fileExists(atPath: CCC_INSTALL_DIR) {
             // First-time install. Run the bundled installer as our child so
             // progress, failures, and the resulting server stay observable.
@@ -1275,15 +1351,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Preflight: on a fresh Mac /usr/bin/python3 is a Command Line Tools
-        // stub that exits without serving anything — the #1 cause of "port
-        // never bound" on machines that never installed dev tools. Fail with
-        // the actual remedy instead of a 60s timeout.
+        // Preflight fallback: without Command Line Tools /usr/bin/python3 is
+        // a stub that never serves anything. Route to the friendly waiting
+        // flow instead of a 60s timeout.
         if !python3Works() {
-            showFatal("Python 3 is not installed",
-                      "CCC needs python3, which ships with Apple's Command Line Tools.\n\n"
-                      + "Open Terminal, run:\n\n    xcode-select --install\n\n"
-                      + "finish that install, then reopen CCC.")
+            waitForDeveloperTools()
             return
         }
 
