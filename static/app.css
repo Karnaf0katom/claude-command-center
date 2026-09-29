@@ -16265,6 +16265,13 @@
       content-visibility: auto;
       contain-intrinsic-size: auto 44px;
     }
+    /* Every poll rebuilds the list via innerHTML, so each row is a fresh
+       element back at its 44px placeholder. As those rows get laid out at
+       their real height, Chrome's scroll anchoring moved scrollTop by
+       hundreds of px after the render had already restored it, and the rAF
+       restore snapped it back a frame later: the list visibly jumped for
+       ~130ms (CCC-1217). The render paths own scroll restoration here. */
+    #convList { overflow-anchor: none; }
 
     /* With #convList scrolling, the tab bar and the list toolbar are both
        `position: sticky; top: 0` and land on top of each other. Keep the tabs
