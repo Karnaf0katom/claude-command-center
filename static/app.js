@@ -76255,7 +76255,11 @@
   const $phoneAccessBtn = document.getElementById('phoneAccessBtn');
   if ($phoneAccessBtn) $phoneAccessBtn.addEventListener('click', () => {
     closeSettingsModal();
-    if (window.cccPhoneAccess) window.cccPhoneAccess.open();
+    if (window.cccPhoneAccess) {
+      // Setup is one click from here: turn the preview flag on for the user.
+      Promise.resolve(window.cccPhoneAccess.enableFlag && window.cccPhoneAccess.enableFlag())
+        .catch(() => {}).then(() => window.cccPhoneAccess.open());
+    }
   });
   if ($networkBackdrop) $networkBackdrop.addEventListener('click', networkClose);
   if ($networkCancelBtn) $networkCancelBtn.addEventListener('click', networkClose);
@@ -79844,7 +79848,7 @@
     opencode: { mono: 'Oc', cmd: 'opencode', label: 'OpenCode', vendor: 'Any provider', hue: 45, docs: 'https://opencode.ai/docs',
       install: 'curl -fsSL https://opencode.ai/install | bash', login: 'opencode auth login' },
     kilo: { mono: 'Kl', cmd: 'kilo', label: 'Kilo Code', vendor: 'Any provider', hue: 50, docs: 'https://kilo.ai/docs/cli', install: 'npm install -g @kilocode/cli' },
-    hermes: { mono: 'He', cmd: 'hermes', label: 'Hermes', vendor: 'Nous Research', hue: 300, docs: 'https://github.com/NousResearch/hermes-agent' },
+    hermes: { mono: 'He', cmd: 'hermes', label: 'Hermes', vendor: 'Nous Research', hue: 300, install: 'curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash', docs: 'https://github.com/NousResearch/hermes-agent' },
     devin: { mono: 'Dv', cmd: 'devin', label: 'Devin', vendor: 'Cognition', hue: 185, docs: 'https://docs.devin.ai/cli',
       install: 'curl -fsSL https://cli.devin.ai/install.sh | bash', login: 'devin auth login' },
     grok: { mono: 'Gk', cmd: 'grok', label: 'Grok', vendor: 'xAI', hue: 0, docs: 'https://x.ai/cli',
@@ -79853,7 +79857,7 @@
       install: 'curl -fsSL https://app.factory.ai/cli | sh' },
     aider: { mono: 'Ai', cmd: 'aider', label: 'Aider', vendor: 'Any provider', hue: 120, docs: 'https://aider.chat/docs/install.html',
       install: 'python -m pip install aider-install && aider-install' },
-    pi: { mono: 'Pi', cmd: 'pi', label: 'Pi', vendor: 'Any provider', hue: 330, docs: 'https://github.com/badlogic/pi-mono' },
+    pi: { mono: 'Pi', cmd: 'pi', label: 'Pi', vendor: 'Any provider', hue: 330, install: 'npm install -g @mariozechner/pi-coding-agent', docs: 'https://github.com/badlogic/pi-mono' },
   };
   const ENGINE_HUB_WORKER_ENGINES = WORKER_DEFAULT_ENGINES;
   const ENGINE_HUB_POLL_MS = 8000;
@@ -79958,6 +79962,7 @@
         install: cli.install_instruction || meta.install || '',
         login: cli.login_instruction || meta.login || '',
         canTerminal: !!clis[engine],
+        canInstall: !!clis[engine] || !!meta.install,
         byokReady: !!doc.byok_ready, byokKey: !!doc.byok_profile_present,
         isDefault: spawnDefaultsState.engine === engine,
         isWorkerDefault: spawnDefaultsState.worker_engine === engine,
@@ -80023,7 +80028,7 @@
         + escapeHtml(_engHubResetLabel(row.usage.resets) || '') + '</div></div>';
     }
     const actions = [];
-    if (!row.installed && row.install && row.canTerminal) actions.push('<button type="button" class="settings-action-btn eng-primary" data-eng-act="install" data-eng="' + e + '">Install in terminal</button>');
+    if (!row.installed && row.install && row.canInstall) actions.push('<button type="button" class="settings-action-btn eng-primary" data-eng-act="install" data-eng="' + e + '">Install in terminal</button>');
     if (row.installed && row.auth === false && row.login) actions.push('<button type="button" class="settings-action-btn eng-primary" data-eng-act="login" data-eng="' + e + '">Sign in</button>');
     actions.push('<button type="button" class="settings-action-btn" data-eng-act="verify" data-eng="' + e + '">Verify setup</button>');
     if (row.installed && row.auth !== false && row.login && row.canTerminal) actions.push('<button type="button" class="settings-action-btn" data-eng-act="login" data-eng="' + e + '">Switch account</button>');
@@ -80056,7 +80061,7 @@
   // install and sign-in do not hide behind the drawer (same handlers).
   function _engHubQuickAction(row) {
     if (row.disabled) return '';
-    if (!row.installed && row.install && row.canTerminal) {
+    if (!row.installed && row.install && row.canInstall) {
       return '<button type="button" class="settings-action-btn eng-primary eng-quick" data-eng-act="install" data-eng="' + row.engine + '">Install</button>';
     }
     if (row.installed && row.auth === false && row.login) {
@@ -80806,7 +80811,7 @@
     refreshEngineUpdateStatus();
     refreshByokSettings();
     const $phoneRow = document.getElementById('phoneAccessRow');
-    if ($phoneRow) $phoneRow.hidden = !ff('phone_access');
+    if ($phoneRow) $phoneRow.hidden = false;
     setActiveSettingsRailSection(_settingsCurrentSection || 'appearance', { scroll: false });
     setTimeout(() => { if ($settingsSearchInput) $settingsSearchInput.focus(); }, 0);
   }
@@ -80852,8 +80857,62 @@
     openSettingsModal();
     refreshEnginesFirstRunFoot();
   }
+  // One compact "Default for new sessions" row under the engine list. It only
+  // proxies the real Settings > Spawn defaults controls (same state, same
+  // persistSpawnDefaults API); nothing new is stored.
+  function renderEnginesFirstRunDefaults() {
+    const wrap = document.getElementById('engFirstRunDefaults');
+    if (!wrap) return;
+    const $e = document.getElementById('efdEngine');
+    const $m = document.getElementById('efdModel');
+    const $f = document.getElementById('efdEffort');
+    if (!window.__cccEnginesFirstRun || !_engHubData) { wrap.hidden = true; return; }
+    const off = _engHubDisabledSet();
+    const installed = _engHubRows()
+      .filter(r => r.installed && !off.has(r.engine) && SPAWN_DEFAULT_ENGINES.includes(r.engine));
+    if (!installed.length) { wrap.hidden = true; return; }
+    const realEngine = document.getElementById('spawnDefaultsEngine');
+    const current = normalizeSpawnDefaultEngine(spawnDefaultsState.engine);
+    if (!installed.some(r => r.engine === current) && realEngine) {
+      // Blank Mac with one engine: preselect it (persists via the real control).
+      realEngine.value = installed[0].engine;
+      realEngine.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if ([$e, $m, $f].some(el => el && document.activeElement === el)) { wrap.hidden = false; return; }
+    const engineNow = normalizeSpawnDefaultEngine(spawnDefaultsState.engine);
+    $e.innerHTML = installed.map(r => '<option value="' + escapeHtml(r.engine) + '">' + escapeHtml(r.meta.label) + '</option>').join('');
+    $e.value = engineNow;
+    const mirror = (src, dst, field) => {
+      const shown = src && field !== false && src.options.length && src.style.display !== 'none' && !(field && field.style.display === 'none');
+      dst.hidden = !shown;
+      if (!shown) return;
+      dst.innerHTML = Array.from(src.options)
+        .filter(o => o.value !== SPAWN_DEFAULT_OTHER)
+        .map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.textContent) + '</option>').join('');
+      dst.value = src.value;
+    };
+    mirror(document.getElementById('spawnDefaultsModel'), $m);
+    mirror(document.getElementById('spawnDefaultsEffort'), $f, document.getElementById('spawnDefaultsEffortField'));
+    wrap.hidden = false;
+  }
+  function _efdBind(id, realId) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.addEventListener('change', () => {
+      const real = document.getElementById(realId);
+      if (!real) return;
+      real.value = el.value;
+      real.dispatchEvent(new Event('change', { bubbles: true }));
+      setTimeout(renderEnginesFirstRunDefaults, 60);
+    });
+  }
   function refreshEnginesFirstRunFoot() {
     if (!window.__cccEnginesFirstRun) return;
+    _efdBind('efdEngine', 'spawnDefaultsEngine');
+    _efdBind('efdModel', 'spawnDefaultsModel');
+    _efdBind('efdEffort', 'spawnDefaultsEffort');
+    renderEnginesFirstRunDefaults();
     const btn = document.getElementById('engFirstRunContinue');
     const note = document.getElementById('engFirstRunNote');
     const ready = _engHubData ? _engHubRows().filter(r => r.installed).length : 0;
@@ -80868,6 +80927,7 @@
     try { localStorage.setItem(ENGINES_FIRST_RUN_KEY, String(Date.now())); } catch (_) {}
     const box = $settingsModal && $settingsModal.querySelector('.settings-modal');
     if (box) box.classList.remove('is-first-run');
+    endTailscaleStep();
     const intro = document.getElementById('engFirstRunIntro');
     const foot = document.getElementById('engFirstRunFoot');
     if (intro) intro.hidden = true;
@@ -80875,8 +80935,144 @@
     // The guide (and the agent-config dialog, which polls) go next.
     setTimeout(() => { if (typeof maybeStartFirstFlight === 'function') maybeStartFirstFlight(0); }, 400);
   }
+  // ── First-run step 2: optional Tailscale (phone / other machines) ──────
+  // Never required. Reuses the phone-access backend (ccc_server/phone_access.py)
+  // and its wizard (static/phone-access.js). Detection is one cached probe,
+  // polled only while this step is on screen.
+  const TAILSCALE_STEP_KEY = 'ccc-tailscale-step-done';
+  let _etsTimer = null;
+  let _etsState = null;
+  let _etsOpenedInstall = false;
+  let _etsOpenedSignin = false;
+  function tailscaleStepPending() {
+    try { return !localStorage.getItem(TAILSCALE_STEP_KEY); } catch (_) { return false; }
+  }
+  function _etsStop() { clearTimeout(_etsTimer); _etsTimer = null; }
+  function _etsPhase(d) {
+    const ts = (d && d.tailscale) || {};
+    if (!ts.installed) return 'missing';
+    if (!(ts.running && ts.hostname)) return 'signin';
+    return d.enabled ? 'on' : 'ready';
+  }
+  function renderTailscaleStep() {
+    const d = _etsState;
+    const $status = document.getElementById('etsStatus');
+    const $install = document.getElementById('etsInstall');
+    const $signin = document.getElementById('etsSignin');
+    const $setup = document.getElementById('etsSetup');
+    if (!$status || !$setup) return;
+    if (!d || d.ok === false) {
+      $status.className = 'ets-status';
+      $status.textContent = 'Checking Tailscale…';
+      $install.hidden = true; $signin.hidden = true;
+      return;
+    }
+    const ts = d.tailscale || {};
+    const phase = _etsPhase(d);
+    if (phase === 'missing') {
+      $status.className = 'ets-status is-warn';
+      $status.textContent = _etsOpenedInstall
+        ? 'Waiting for Tailscale. Install it, open it and sign in. This updates on its own.'
+        : "Tailscale isn't installed on this Mac.";
+      $setup.textContent = 'Set up';
+    } else if (phase === 'signin') {
+      $status.className = 'ets-status is-warn';
+      $status.textContent = ts.needs_machine_auth
+        ? 'Tailscale is waiting for approval in your admin console.'
+        : (_etsOpenedSignin
+          ? 'Waiting for sign-in. Finish in the Tailscale app. This updates on its own.'
+          : 'Tailscale is installed but not signed in.');
+      $setup.textContent = 'Set up';
+    } else if (phase === 'ready') {
+      $status.className = 'ets-status is-ok';
+      $status.textContent = 'Tailscale is ready' + (ts.login_name ? ' (signed in as ' + ts.login_name + ').' : '.');
+      $setup.textContent = 'Set up';
+    } else {
+      $status.className = 'ets-status is-ok';
+      $status.textContent = 'Phone access is on: ' + (d.url || '');
+      $setup.textContent = 'Show phone link';
+    }
+    $install.hidden = !(phase === 'missing' && _etsOpenedInstall);
+    const showSignin = phase === 'signin' && _etsOpenedSignin;
+    $signin.hidden = !showSignin;
+    if (showSignin) {
+      $signin.textContent = '';
+      const t = document.createElement('span');
+      t.textContent = 'Open the Tailscale app from your menu bar and sign in.';
+      $signin.appendChild(t);
+      if (ts.auth_url && /^https:\/\//.test(ts.auth_url)) {
+        const a = document.createElement('a');
+        a.className = 'settings-action-btn'; a.href = ts.auth_url; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = 'Or sign in from the browser';
+        $signin.appendChild(a);
+      }
+    }
+    const later = document.getElementById('etsLater');
+    if (later) later.textContent = phase === 'on' ? 'Continue' : 'Later';
+  }
+  async function refreshTailscaleStep() {
+    try {
+      const r = await fetch('/api/phone-access/tailscale', { cache: 'no-store' });
+      _etsState = await r.json();
+    } catch (_) { _etsState = { ok: false }; }
+    renderTailscaleStep();
+  }
+  function _etsSchedule() {
+    _etsStop();
+    _etsTimer = setTimeout(async () => {
+      if (!document.getElementById('engTailscaleStep') || document.getElementById('engTailscaleStep').hidden) return;
+      if (!document.hidden) await refreshTailscaleStep();
+      _etsSchedule();
+    }, 6000);
+  }
+  function showTailscaleStep() {
+    const box = $settingsModal && $settingsModal.querySelector('.settings-modal');
+    const step = document.getElementById('engTailscaleStep');
+    if (!box || !step) return false;
+    box.classList.add('is-step-tailscale');
+    step.hidden = false;
+    _etsState = null;
+    renderTailscaleStep();
+    refreshTailscaleStep().then(_etsSchedule);
+    return true;
+  }
+  function endTailscaleStep() {
+    _etsStop();
+    try { localStorage.setItem(TAILSCALE_STEP_KEY, String(Date.now())); } catch (_) {}
+    const box = $settingsModal && $settingsModal.querySelector('.settings-modal');
+    const step = document.getElementById('engTailscaleStep');
+    if (box) box.classList.remove('is-step-tailscale');
+    if (step) step.hidden = true;
+  }
+  async function tailscaleSetupClick() {
+    const phase = _etsPhase(_etsState);
+    if (phase === 'missing') { _etsOpenedInstall = true; renderTailscaleStep(); refreshTailscaleStep(); return; }
+    if (phase === 'signin') { _etsOpenedSignin = true; renderTailscaleStep(); refreshTailscaleStep(); return; }
+    // Ready or already on: the existing phone-access wizard does the rest
+    // (serve, QR, phone URL, PIN, round-trip test). The user asked for this,
+    // so the preview flag that gates it is switched on for them.
+    try {
+      if (window.cccPhoneAccess && window.cccPhoneAccess.enableFlag) await window.cccPhoneAccess.enableFlag();
+      if (window.cccPhoneAccess) window.cccPhoneAccess.open();
+    } catch (_) {}
+    refreshTailscaleStep();
+  }
+  const $etsSetup = document.getElementById('etsSetup');
+  if ($etsSetup) $etsSetup.addEventListener('click', tailscaleSetupClick);
+  const $etsLater = document.getElementById('etsLater');
+  if ($etsLater) $etsLater.addEventListener('click', () => closeSettingsModal());
+  const $etsCopy = document.getElementById('etsCopyBrew');
+  if ($etsCopy) $etsCopy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText('brew install --cask tailscale'); $etsCopy.textContent = 'Copied'; } catch (_) {}
+  });
+  window.__cccTailscaleStep = { pending: tailscaleStepPending };
+
   const $engFirstRunContinue = document.getElementById('engFirstRunContinue');
-  if ($engFirstRunContinue) $engFirstRunContinue.addEventListener('click', () => closeSettingsModal());
+  if ($engFirstRunContinue) $engFirstRunContinue.addEventListener('click', () => {
+    // Engines are acknowledged; the optional Tailscale step comes next (once).
+    if (window.__cccEnginesFirstRun && tailscaleStepPending() && showTailscaleStep()) return;
+    closeSettingsModal();
+  });
   if (window.__cccEnginesFirstRun) setTimeout(openEnginesFirstRun, 300);
 
   function closeSettingsModal() {

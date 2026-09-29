@@ -238,3 +238,23 @@ def test_enable_refuses_funnel_exposed_entry(state, monkeypatch):
         "path": "/", "proxy": "http://127.0.0.1:8090", "target": "http://127.0.0.1:8090"}]})
     r = pa.enable(8090)
     assert r["ok"] is False and r["error"] == "funnel_on"
+
+
+def test_tailscale_probe_reports_installed_state(monkeypatch, tmp_path):
+    """First-run step probe: cheap, cached Tailscale status, no serve/QR work."""
+    import stat
+    import server  # noqa: F401  (ccc_server resolves state/flags through it)
+    from ccc_server import phone_access as pa
+    monkeypatch.setattr(pa, "state_file", lambda: tmp_path / "phone-access.json")
+    monkeypatch.setenv("CCC_TAILSCALE_BIN", str(tmp_path / "missing"))
+    pa._ts_status_cache.update({"ts": 0, "data": None})
+    body, code = pa.phone_access_handle("tailscale", {})
+    assert code == 200 and body["ok"] and body["tailscale"]["installed"] is False
+    fake = tmp_path / "tailscale"
+    fake.write_text('#!/bin/sh\necho \'{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/x"}\'\n')
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("CCC_TAILSCALE_BIN", str(fake))
+    pa._ts_status_cache.update({"ts": 0, "data": None})
+    body, _ = pa.phone_access_handle("tailscale", {})
+    assert body["tailscale"]["installed"] and body["tailscale"]["needs_login"]
+    assert "qr_svg" not in body and "serve" not in body

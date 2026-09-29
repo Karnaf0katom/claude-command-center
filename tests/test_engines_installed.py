@@ -206,3 +206,26 @@ def test_composer_notice_is_wired_to_error_code():
     js = (ROOT / "static" / "app.js").read_text()
     assert "engine_not_installed" in js and "engineMissingNotice" in js
     assert "/api/engines/installed" in js
+
+
+def test_first_run_has_optional_tailscale_step_and_defaults_row():
+    js = (ROOT / "static" / "app.js").read_text()
+    html = (ROOT / "static" / "index.html").read_text()
+    assert "/api/phone-access/tailscale" in js and "ccc-tailscale-step-done" in js
+    assert 'id="engTailscaleStep"' in html and 'id="engFirstRunDefaults"' in html
+    assert "Use CCC from your phone or other machines" in html
+    # Reuses the real spawn-defaults controls instead of new storage.
+    assert "spawnDefaultsEngine" in js and "efdEngine" in js
+    assert "—" not in html[html.index('id="engTailscaleStep"'):html.index('id="engTailscaleStep"') + 1800]
+
+
+def test_install_terminal_falls_back_for_engines_without_onboarding_entry(monkeypatch):
+    monkeypatch.setattr(server.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(server, "_get_onboarding_status", lambda: {"clis": {}})
+    monkeypatch.setattr(server, "_preferred_terminal_app", lambda: "Terminal")
+    import subprocess
+    seen = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, *a, **k: seen.append(argv))
+    res = server._launch_install_terminal("opencode")
+    assert res["ok"] and res["command"] == server._FALLBACK_INSTALL_COMMANDS["opencode"] and seen
+    assert not server._launch_install_terminal("not-an-engine")["ok"]

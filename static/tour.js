@@ -183,7 +183,7 @@
       anchor: ['.fq-status-plan', '.fq-health-config', '#filesQueueCreate', '#queuePanel', '[data-rail-tab="queue"]'],
       reveal: 'queue',
       title: "Pick the workers' model",
-      body: 'Each queue can set the engine, model, and effort its workers use. Open the gear on a queue (or press +) and look under Worker. Left blank, workers use the defaults in Settings, Engines.'
+      body: 'Each queue can set the engine, model, and effort its workers use. Open the gear on a queue (or press +) and look under Worker. Left blank, workers use the Workers defaults in Settings, Engines.'
     },
     {
       id: 'orchestration',

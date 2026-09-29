@@ -2769,6 +2769,30 @@
             <div class="eng-list" id="engList" data-keywords="engine claude codex cursor antigravity gemini kilo opencode kimi hermes devin grok aider droid pi command install login sign in authenticate verify usage quota enable disable">
               <div class="eng-list-empty">Checking installed engines…</div>
             </div>
+            <div class="eng-first-run-defaults" id="engFirstRunDefaults" hidden>
+              <span class="efd-label">Default for new sessions</span>
+              <select id="efdEngine" class="bug-input" aria-label="Default engine for new sessions"></select>
+              <select id="efdModel" class="bug-input" aria-label="Default model" hidden></select>
+              <select id="efdEffort" class="bug-input" aria-label="Default effort" hidden></select>
+            </div>
+            <!-- First-run step 2 (optional, never required): Tailscale for phone / other machines. -->
+            <div class="eng-tailscale-step" id="engTailscaleStep" hidden>
+              <h2 class="eng-first-run-title">Use CCC from your phone or other machines</h2>
+              <p class="eng-first-run-body">Connect through Tailscale (free, private to your own devices) to open CCC on your phone or link other machines, like a VM or cloud server.</p>
+              <div class="ets-status" id="etsStatus" role="status" aria-live="polite"></div>
+              <div class="ets-install" id="etsInstall" hidden>
+                <a class="settings-action-btn" id="etsAppStore" href="https://apps.apple.com/app/tailscale/id1475387142" target="_blank" rel="noopener">Open in the Mac App Store</a>
+                <span class="ets-or">or run</span>
+                <code class="ets-cmd">brew install --cask tailscale</code>
+                <button type="button" class="settings-action-btn" id="etsCopyBrew">Copy</button>
+              </div>
+              <div class="ets-signin" id="etsSignin" hidden></div>
+              <div class="ets-actions">
+                <button type="button" class="settings-action-btn" id="etsLater">Later</button>
+                <button type="button" class="settings-action-btn eng-primary" id="etsSetup">Set up</button>
+              </div>
+              <p class="eng-first-run-body ets-peers">To link another machine as a peer, use Settings, Nodes &amp; peers.</p>
+            </div>
 
             <div class="settings-subsection-label">Updates</div>
             <div class="settings-row" data-keywords="engine cli automatic updates versions install latest claude codex cursor antigravity">

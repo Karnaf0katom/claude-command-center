@@ -385,10 +385,29 @@
   function initSettingsRow() {
     const row = document.getElementById('phoneAccessRow');
     if (!row) return;
-    ensureFlags().then((on) => { row.hidden = !on; });
+    // Always reachable from Settings; enableFlag() runs when the user opens it.
+    row.hidden = false;
   }
 
-  window.cccPhoneAccess = { open, renderFleet, ensureFlags };
+  // The wizard's server side (enable) is gated on the `phone_access` preview
+  // flag. Opening the wizard is the user's explicit ask, so switch it on.
+  async function enableFlag() {
+    if (await ensureFlags()) return true;
+    try {
+      const r = await fetch('/api/features/flag', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: FLAG, on: true }),
+      });
+      const d = await r.json();
+      if (d && d.ok) {
+        window.__CCC_FLAGS__ = Object.assign({}, window.__CCC_FLAGS__ || {}, d.flags || {}, { [FLAG]: true });
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  window.cccPhoneAccess = { open, renderFleet, ensureFlags, enableFlag };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSettingsRow);
   else initSettingsRow();
 })();

@@ -28489,6 +28489,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             payload, status = phone_access.phone_access_handle("status", {
                 "node_id": (qs_pa.get("node_id") or [""])[0].strip()})
             self.send_json(payload, status)
+        elif path == "/api/phone-access/tailscale":
+            if not self._phone_access_local_only():
+                return
+            payload, status = phone_access.phone_access_handle("tailscale", {})
+            self.send_json(payload, status)
         elif path == "/api/phone-access/nodes":
             # Every node's phone URL + status for the Fleet page.
             if not self._phone_access_local_only():
@@ -39321,6 +39326,18 @@ def _launch_login_terminal(engine):
         return {"ok": False, "error": str(e)}
 
 
+# Engines with no onboarding CLI entry but a known one-line install. Keep in
+# sync with ENGINE_HUB_META.install in static/app.js (the row shows this text).
+_FALLBACK_INSTALL_COMMANDS = {
+    "opencode": "curl -fsSL https://opencode.ai/install | bash",
+    "kilo": "npm install -g @kilocode/cli",
+    "hermes": "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+    "droid": "curl -fsSL https://app.factory.ai/cli | sh",
+    "aider": "python -m pip install aider-install && aider-install",
+    "pi": "npm install -g @mariozechner/pi-coding-agent",
+}
+
+
 def _launch_install_terminal(engine):
     """Launch a terminal window and run the install command for the specified engine."""
     import subprocess
@@ -39330,10 +39347,10 @@ def _launch_install_terminal(engine):
 
     status = _get_onboarding_status()
     cli = status.get("clis", {}).get(engine)
-    if not cli or not cli.get("install_instruction"):
+    command = (cli or {}).get("install_instruction") or _FALLBACK_INSTALL_COMMANDS.get(engine)
+    if not command:
         return {"ok": False, "error": f"no install instruction available for engine: {engine}"}
 
-    command = cli["install_instruction"]
     cmd_lit = command.replace("\\", "\\\\").replace('"', '\\"')
     target = _preferred_terminal_app()
 

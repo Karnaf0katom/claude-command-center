@@ -65,3 +65,6 @@ composer. While the guide is active, list re-render is paused via
 - Engine detect is not re-probed on every dashboard poll; the CLI step
   fetches `/api/onboarding/status` when shown, and again on Re-detect.
 - No timers/listeners registered when the guide is not active.
+
+## First-run step 2: optional Tailscale
+After Continue on the engines screen, the same Settings modal shows one optional card (localStorage `ccc-tailscale-step-done`, set by Later or by closing). Detection is `GET /api/phone-access/tailscale` (cached status, polled every 6s only while the card is visible). Set up walks install (Mac App Store link or `brew install --cask tailscale`, copied not run), then sign-in, then opens the existing Phone access wizard, switching the `phone_access` preview flag on for the user. Linking other machines is left to Settings, Nodes and peers.

@@ -864,6 +864,17 @@ def phone_access_handle(sub: str, data: dict) -> tuple[dict, int]:
             node, PHONE_ACCESS_ROUTE_ACTIONS[sub], args, timeout=60.0), 200
     if sub == "status":
         return overview(include_qr=data.get("qr", True) is not False), 200
+    if sub == "tailscale":
+        # Light probe for the first-run step: cached Tailscale status only,
+        # no `serve status` / QR work. Polled while that step is on screen.
+        state = load_state()
+        return {
+            "ok": True,
+            "tailscale": tailscale_status(max_age_s=8.0),
+            "flag": bool(_core._feature_flag(PHONE_ACCESS_FLAG)),
+            "enabled": bool(state.get("serve")),
+            "url": _url_for(state),
+        }, 200
     if sub == "enable":
         if not data.get("via_route") and not _core._feature_flag(PHONE_ACCESS_FLAG):
             return {"ok": False, "error": "feature_disabled",

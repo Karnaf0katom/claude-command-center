@@ -29777,7 +29777,7 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 .settings-modal.is-first-run .settings-section-eyebrow,
 .settings-modal.is-first-run .eng-defaults,
 .settings-modal.is-first-run #spawnDefaultsError,
-.settings-modal.is-first-run #engList ~ * { display: none !important; }
+.settings-modal.is-first-run #engList ~ *:not(#engFirstRunDefaults):not(#engTailscaleStep) { display: none !important; }
 .settings-modal.is-first-run .settings-modal-header { justify-content: flex-end; border-bottom: none; padding-bottom: 0; }
 .settings-modal.is-first-run { width: min(860px, calc(100vw - 40px)); }
 .eng-first-run-intro { margin: 0 0 14px; }
@@ -29815,3 +29815,22 @@ body.mobile-ask-open .mobile-bottom-nav { z-index: 950; }
 }
 .engine-missing-notice button.emn-primary { background: var(--accent, #4c8dff); border-color: transparent; color: #fff; }
 .engine-missing-notice button:disabled { opacity: .6; cursor: default; }
+
+.eng-first-run-defaults { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.eng-first-run-defaults[hidden] { display: none !important; }
+.eng-first-run-defaults .efd-label { font-size: 12.5px; font-weight: 600; margin-right: 4px; }
+.eng-first-run-defaults select { width: auto; max-width: 100%; }
+.eng-first-run-defaults select[hidden] { display: none; }
+
+/* First-run step 2: optional Tailscale card replaces the engine list. */
+.settings-modal.is-step-tailscale #settingsSection-engines > *:not(#engTailscaleStep) { display: none !important; }
+.settings-modal.is-step-tailscale #engFirstRunFoot { display: none; }
+.eng-tailscale-step { padding: 8px 0 4px; }
+.eng-tailscale-step[hidden], .ets-install[hidden], .ets-signin[hidden] { display: none !important; }
+.ets-status { margin: 16px 0 10px; padding: 10px 12px; font-size: 13px; border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 6px; }
+.ets-status.is-ok { border-left-color: var(--green, #3fb27f); }
+.ets-status.is-warn { border-left-color: var(--amber, #d9a441); }
+.ets-install, .ets-signin { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12.5px; }
+.ets-cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; }
+.ets-actions { display: flex; justify-content: flex-end; gap: 10px; margin: 14px 0 8px; }
+.ets-peers { margin-top: 10px; }
