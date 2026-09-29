@@ -103,6 +103,15 @@ def _federation_lease_owners():
     return out
 
 
+def _federation_row_activity(row):
+    """Last-activity epoch for an archive row: mtime, else start timestamp."""
+    try:
+        m = float(row.get("mtime") or 0)
+    except (TypeError, ValueError):
+        m = 0.0
+    return m or _federation_row_epoch(row)
+
+
 def _federation_sessions_inventory(limit=200):
     """Compact cross-repo session inventory for a peer aggregator. Served from
     the same response cache as /api/sessions?all=1 — no extra O(all) work."""
@@ -129,6 +138,10 @@ def _federation_sessions_inventory(limit=200):
             cwd = os.path.dirname(cwd)
         return None
 
+    # The archive cache is not guaranteed newest-first (delta refreshes can
+    # append changed rows at the end), and the peer ships only `limit` rows,
+    # so order by last activity here or recent sessions get cut (CCC-1216).
+    rows = sorted(rows, key=_federation_row_activity, reverse=True)
     out = []
     for r in rows[: max(1, min(int(limit or 200), 1000))]:
         sid = r.get("session_id") or r.get("id")
@@ -149,7 +162,9 @@ def _federation_sessions_inventory(limit=200):
             "cwd": r.get("session_cwd") or r.get("cwd") or "",
             "branch": r.get("effective_branch") or r.get("branch") or "",
             "is_live": bool(r.get("is_live")),
-            "timestamp": r.get("timestamp") or r.get("mtime"),
+            # Last activity, not start time: the aggregator sorts on this
+            # and the sidebar shows its age.
+            "timestamp": r.get("mtime") or r.get("timestamp"),
             "model": r.get("model"),
             "parent_session_id": r.get("parent_session_id"),
             "claude_auth_failed": bool(r.get("claude_auth_failed")),

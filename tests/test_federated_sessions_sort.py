@@ -46,6 +46,27 @@ class TestFederatedSessionsSort(unittest.TestCase):
         self.assertEqual([r["session_id"] for r in out["sessions"]],
                          ["new-float", "mid-iso", "old-iso", "none"])
 
+    def test_peer_inventory_keeps_most_recent_rows_when_capped(self):
+        # CCC-1216: a peer's archive cache had its recent rows appended at the
+        # END, so rows[:limit] shipped only days-old sessions. Rows carry the
+        # start time in `timestamp` and last activity in `mtime`.
+        rows = [{"session_id": f"old-{i}", "mtime": 1000.0 + i,
+                 "timestamp": "2020-01-01T00:00:00Z"} for i in range(5)]
+        rows += [
+            {"session_id": "recent", "mtime": 9000.0,
+             "timestamp": "2020-01-01T00:00:00Z"},
+            {"session_id": "newest", "mtime": 9500.0},
+        ]
+        with mock.patch.object(fleet._core, "_archive_all_rows_cached",
+                               return_value=(rows, True)), \
+             mock.patch.object(fleet, "_federation_lease_owners", return_value={}), \
+             mock.patch.object(fleet.federation, "load_repo_map", return_value={}):
+            out = fleet._federation_sessions_inventory(limit=3)
+        self.assertEqual([r["session_id"] for r in out["sessions"]],
+                         ["newest", "recent", "old-4"])
+        # The row reports last activity, not the start time.
+        self.assertEqual(out["sessions"][1]["timestamp"], 9000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
