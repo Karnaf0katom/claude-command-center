@@ -111,6 +111,7 @@ from ccc_server import test_isolation_active, register as _ccc_core_register
 # Rebindable report_to routes (CCC-1202). Imported as a namespace, not
 # adopted, so its short function names don't land on server globals.
 from ccc_server import report_routes as _report_routes
+from ccc_server import model_discovery as _model_discovery
 from ccc_server.events import DashboardEventHub
 
 # Pure helpers and path constants moved to leaf modules (slice 3)
@@ -7621,8 +7622,10 @@ def _model_catalog_allows_model(engine, model):
     _model_catalog_add) so a deliberate, confirmed pick is possible. Use
     _model_policy_blocks separately to gate an actual spawn/save."""
     engine = _normalize_orchestration_spawn_engine(engine)
-    if engine == "codex" and _model_catalog_key(model) not in _CODEX_PICKER_MODEL_IDS:
-        return False
+    if engine == "codex":
+        key = _model_catalog_key(model)
+        if key not in _CODEX_PICKER_MODEL_IDS and key not in _codex_cli_visible_model_ids():
+            return False
     known_engines = _model_catalog_known_engines(model)
     # Observed metadata can be stale or have been recorded before CCC learned
     # the session's real engine. Keep custom IDs, but never surface a curated
@@ -7767,6 +7770,14 @@ def _model_records_from_json(value, *, source, skip_hidden=False):
                 ]
             if row.get("default_reasoning_level"):
                 extra["default_reasoning_effort"] = str(row.get("default_reasoning_level"))
+            upgrade = row.get("upgrade")
+            if isinstance(upgrade, dict):
+                # Codex CLI metadata: the vendor-declared successor and the
+                # date this model stops working in Codex.
+                if upgrade.get("model"):
+                    extra["upgrade_to"] = str(upgrade["model"])
+                if upgrade.get("retirement_at"):
+                    extra["retires_at"] = str(upgrade["retirement_at"])
         else:
             continue
         model = _clean_spawn_default_model(model)
@@ -7780,13 +7791,33 @@ def _model_records_from_json(value, *, source, skip_hidden=False):
     return out
 
 
+_CODEX_MODELS_CACHE_MEMO = {"sig": None, "rows": []}
+
+
 def _codex_models_cache_records():
     path = _codex_home() / "models_cache.json"
+    # Called once per catalog row via _model_catalog_allows_model, so memoize
+    # on (path, mtime, size) instead of re-parsing the file every time.
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        st = path.stat()
+        sig = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
         return []
-    return _model_records_from_json(data, source="codex-cache", skip_hidden=True)
+    memo = _CODEX_MODELS_CACHE_MEMO
+    if memo["sig"] != sig:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        memo["rows"] = _model_records_from_json(data, source="codex-cache", skip_hidden=True)
+        memo["sig"] = sig
+    return [dict(row) for row in memo["rows"]]
+
+
+def _codex_cli_visible_model_ids():
+    """Catalog keys of every model the installed Codex CLI lists (visibility
+    != hide). A new Codex model appears here the day the CLI ships it."""
+    return {_model_catalog_key(row.get("id")) for row in _codex_models_cache_records() if row.get("id")}
 
 
 # Published OpenAI Codex pricing/limits (platform.openai.com pricing and
@@ -7847,59 +7878,9 @@ def _codex_model_catalog_records():
 
 
 def _parse_anthropic_model_overview(markdown):
-    """Parse exact model aliases from Anthropic's latest-model table."""
-    text = str(markdown or "")
-    section = re.search(
-        r"(?ims)^#{2,3}\s+(?:Latest models comparison|Compare models)\s*$([\s\S]*?)(?=^#{2,3}\s+|\Z)",
-        text,
-    )
-    if not section:
-        return []
-    rows = []
-    for line in section.group(1).splitlines():
-        stripped = line.strip()
-        if not (stripped.startswith("|") and stripped.endswith("|")):
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if len(cells) >= 2:
-            rows.append(cells)
-    if len(rows) < 3:
-        return []
-
-    def clean(value):
-        # Row labels may be markdown links: [Context window](https://...)
-        value = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", str(value or ""))
-        return re.sub(r"[*_`]", "", value).strip()
-
-    header = rows[0]
-    aliases = next(
-        (row for row in rows[1:] if clean(row[0]).lower() == "claude api alias"),
-        None,
-    )
-    contexts = next(
-        (row for row in rows[1:] if clean(row[0]).lower() == "context window"),
-        None,
-    )
-    if not aliases:
-        return []
-    records = []
-    for index in range(1, min(len(header), len(aliases))):
-        alias = clean(aliases[index])
-        if not re.fullmatch(r"claude-[a-z0-9][a-z0-9.-]*", alias):
-            continue
-        context = clean(contexts[index]) if contexts and index < len(contexts) else ""
-        context_key = context.lower().replace(",", "").replace(" ", "")
-        records.append({
-            "id": alias.removeprefix("claude-"),
-            "label": alias.removeprefix("claude-"),
-            "display_name": clean(header[index]),
-            "oneM": (
-                "1mtoken" in context_key
-                or "1000000token" in context_key
-            ),
-            "source": "anthropic-models-overview",
-        })
-    return records
+    """Parse exact model aliases (plus limits, pricing, default effort and
+    retirement date) from Anthropic's latest-model table."""
+    return _model_discovery.parse_claude_overview(markdown)
 
 
 def _load_claude_model_catalog_records():
@@ -7948,35 +7929,199 @@ def _claude_model_catalog_records():
     return records
 
 
-def _refresh_claude_model_catalog():
-    """Refresh the public Anthropic catalog, preserving stale cache on error."""
+_CLAUDE_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
+_CLAUDE_EFFORT_URL = "https://platform.claude.com/docs/en/build-with-claude/effort.md"
+_OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing.md"
+_OPENAI_PRICING_CATALOG_FILE = COMMAND_CENTER_STATE_DIR / "openai-pricing.json"
+# Discovered $/MTok rows for the usage DB (ccc_server/usage_db/pricing.py
+# merges them into price_rates so cost reports price a model the day it ships).
+_DISCOVERED_RATES_FILE = COMMAND_CENTER_STATE_DIR / "discovered-rates.json"
+
+
+def _fetch_doc_text(url):
     request = urllib.request.Request(
-        _CLAUDE_MODELS_OVERVIEW_URL,
+        url,
         headers={
             "Accept": "text/markdown,text/plain;q=0.9,*/*;q=0.5",
             "User-Agent": f"claude-command-center/{__version__}",
         },
     )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def _write_json_atomic(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _write_discovered_rates(provider, rows, note):
+    """Merge this provider's discovered rate rows into discovered-rates.json,
+    keeping the other providers' rows."""
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            body = response.read().decode("utf-8", "replace")
-        records = _parse_anthropic_model_overview(body)
+        existing = json.loads(_DISCOVERED_RATES_FILE.read_text(encoding="utf-8"))
+        kept = [r for r in existing.get("rates", []) if r.get("provider") != provider]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        kept = []
+    _write_json_atomic(_DISCOVERED_RATES_FILE, {
+        "schema": 1,
+        "unit": "USD per 1,000,000 tokens",
+        "discovered_at": datetime.now(tz=timezone.utc).isoformat(),
+        "rates": kept + [
+            _model_discovery.rate_row(provider, key, rates, note) for key, rates in rows
+        ],
+    })
+
+
+def _refresh_claude_model_catalog():
+    """Refresh the public Anthropic catalog, preserving stale cache on error.
+
+    The pricing and effort pages enrich the overview and are best-effort; only
+    the overview is required. (Overview is fetched last on purpose: it is the
+    authoritative request and the one callers/tests look at.)"""
+    try:
+        try:
+            pricing = _model_discovery.parse_claude_pricing(_fetch_doc_text(_CLAUDE_PRICING_URL))
+        except Exception:
+            pricing = {}
+        try:
+            effort_support = _model_discovery.parse_claude_effort_support(
+                _fetch_doc_text(_CLAUDE_EFFORT_URL)
+            )
+        except Exception:
+            effort_support = {}
+        records = _parse_anthropic_model_overview(_fetch_doc_text(_CLAUDE_MODELS_OVERVIEW_URL))
         if not records:
             return {"ok": False, "error": "Anthropic model table was not recognized"}
         payload = {
             "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
             "source_url": _CLAUDE_MODELS_OVERVIEW_URL,
             "records": records,
+            "pricing": pricing,
+            "effort_support": effort_support,
         }
-        _CLAUDE_MODEL_CATALOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _CLAUDE_MODEL_CATALOG_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, _CLAUDE_MODEL_CATALOG_FILE)
+        _write_json_atomic(_CLAUDE_MODEL_CATALOG_FILE, payload)
+        if pricing:
+            try:
+                _write_discovered_rates(
+                    "anthropic",
+                    [("claude-" + alias, rates) for alias, rates in sorted(pricing.items())],
+                    "discovered from platform.claude.com pricing page",
+                )
+            except Exception:
+                pass
         _MODEL_CATALOG_CACHE["ts"] = 0.0
         _MODEL_CATALOG_CACHE["data"] = None
         return {"ok": True, **payload}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def _refresh_openai_pricing_catalog():
+    """Refresh OpenAI per-slug pricing (drives Codex model cost), keeping the
+    stale cache on error."""
+    try:
+        pricing = _model_discovery.parse_openai_pricing(_fetch_doc_text(_OPENAI_PRICING_URL))
+        if not pricing:
+            return {"ok": False, "error": "OpenAI pricing table was not recognized"}
+        payload = {
+            "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+            "source_url": _OPENAI_PRICING_URL,
+            "pricing": pricing,
+        }
+        _write_json_atomic(_OPENAI_PRICING_CATALOG_FILE, payload)
+        from ccc_server.usage_db.models import pricing_key as _usage_pricing_key
+        try:
+            _write_discovered_rates(
+                "openai",
+                [(_usage_pricing_key(slug), rates) for slug, rates in sorted(pricing.items())],
+                "discovered from developers.openai.com pricing page (short-context Standard)",
+            )
+        except Exception:
+            pass
+        _MODEL_CATALOG_CACHE["ts"] = 0.0
+        _MODEL_CATALOG_CACHE["data"] = None
+        return {"ok": True, **payload}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _load_json_payload(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _price_summary(rates):
+    inp, out = rates.get("input"), rates.get("output")
+    if inp is None or out is None:
+        return None
+    return {
+        "cost_summary": f"${inp:.2f} in / 1M, ${out:.2f} out / 1M",
+        "cost_tier": round(float(inp) + float(out), 2),
+    }
+
+
+def _apply_claude_discovery(models):
+    """Overwrite hand-maintained Claude fields with what Anthropic's docs
+    publish now (price, limits, default effort, launch/retirement dates).
+    Hardcoded tuple values only survive for ids the docs don't cover."""
+    payload = _load_json_payload(_CLAUDE_MODEL_CATALOG_FILE)
+    records = {
+        _model_catalog_key(r.get("id")): r
+        for r in payload.get("records") or [] if isinstance(r, dict)
+    }
+    pricing = payload.get("pricing") if isinstance(payload.get("pricing"), dict) else {}
+    effort_support = payload.get("effort_support") if isinstance(payload.get("effort_support"), dict) else {}
+    for entry in models:
+        key = _model_catalog_key(entry.get("id"))
+        rec = records.get(key) or {}
+        rates = dict(pricing.get(key) or {})
+        if not rates and rec.get("input_per_mtok") is not None:
+            rates = {"input": rec["input_per_mtok"], "output": rec.get("output_per_mtok")}
+        summary = _price_summary(rates) if rates else None
+        if summary:
+            entry.update(summary)
+            entry["rates_per_mtok"] = rates
+        for field in ("max_context_tokens", "max_output_tokens", "default_reasoning_effort",
+                      "released_at", "released_at_source", "retires_not_before", "description"):
+            if rec.get(field) not in (None, ""):
+                entry[field] = rec[field]
+        if key in effort_support:
+            entry["reasoning_efforts"] = list(effort_support[key])
+
+
+def _apply_codex_discovery(models):
+    """Price Codex models from OpenAI's published table; effort/limits/
+    priority already come from the installed CLI's own model list."""
+    pricing = _load_json_payload(_OPENAI_PRICING_CATALOG_FILE).get("pricing")
+    if not isinstance(pricing, dict):
+        return
+    for entry in models:
+        rates = pricing.get(str(entry.get("id") or "").lower())
+        summary = _price_summary(rates) if isinstance(rates, dict) else None
+        if summary:
+            entry.update(summary)
+            entry["rates_per_mtok"] = rates
+
+
+# Sources that mean "the user explicitly chose this", which keep a superseded
+# model in the picker (stale observed/transcript sources do not).
+_PINNED_MODEL_SOURCES = frozenset({"spawn-default", "harness-config", "env"})
+
+
+def _prune_superseded_models(engine, models):
+    """Flag and drop entries a newer model of the same family replaces.
+    Mirrors _prune_claude_models_to_latest_tiers for engines without it."""
+    _model_discovery.mark_superseded(engine, models)
+    return [
+        m for m in models
+        if not m.get("deprioritized") or _PINNED_MODEL_SOURCES.intersection(m.get("sources") or ())
+    ]
 
 
 def _resolve_harness_bin(engine):
@@ -8522,6 +8667,16 @@ def _build_engine_model_catalog(force_refresh=False):
     if "claude" in catalog:
         catalog["claude"]["models"] = _prune_claude_models_to_latest_tiers(
             catalog["claude"].get("models") or []
+        )
+        _apply_claude_discovery(catalog["claude"]["models"])
+
+    if "codex" in catalog:
+        catalog["codex"]["models"] = _prune_superseded_models(
+            "codex", catalog["codex"].get("models") or []
+        )
+        _apply_codex_discovery(catalog["codex"]["models"])
+        catalog["codex"]["models"].sort(
+            key=lambda m: (m.get("priority") is None, m.get("priority") or 0)
         )
 
     if "antigravity" in catalog:

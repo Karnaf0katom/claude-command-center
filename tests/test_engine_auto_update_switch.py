@@ -8,6 +8,7 @@ def _isolate(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(server, "_run_engine_updates_once", lambda: calls.append(1) or {"ok": True})
     monkeypatch.setattr(server, "_refresh_claude_model_catalog", lambda: {"ok": True})
+    monkeypatch.setattr(server, "_refresh_openai_pricing_catalog", lambda: {"ok": True})
     monkeypatch.setattr(server, "_worker_compat_maintenance_check", lambda: {"ok": True})
     return calls
 

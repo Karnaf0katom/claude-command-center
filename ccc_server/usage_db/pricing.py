@@ -41,7 +41,76 @@ def load_rates(conn, path: Optional[str] = None) -> int:
     return n
 
 
+def default_discovered_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".claude", "command-center", "discovered-rates.json")
+
+
+_RATE_FIELDS = (
+    ("input", "input_rate"), ("cache_read", "cache_read_rate"),
+    ("cache_write_5m", "cache_write_5m_rate"), ("cache_write_1h", "cache_write_1h_rate"),
+    ("output", "output_rate"),
+)
+
+
+def load_discovered_rates(conn, path: Optional[str] = None, today: Optional[str] = None) -> int:
+    """Merge vendor-published rates discovered by the dashboard's model refresh.
+
+    ``discovered-rates.json`` holds ``rates.json``-shaped rows scraped from the
+    vendors' pricing pages. A model with no rate row gets one effective from
+    the epoch (a model has no usage before it shipped, so this prices all of
+    its history). A model whose published price differs from its latest row
+    gets a NEW row effective ``today``: past events keep the price they were
+    billed at. Unchanged prices are left alone. Returns rows written.
+    """
+    path = path or default_discovered_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    if today is None:
+        from datetime import date
+        today = date.today().isoformat()
+    n = 0
+    for r in doc.get("rates", []) if isinstance(doc, dict) else []:
+        key = r.get("pricing_key")
+        if not key or r.get("input") is None or r.get("output") is None:
+            continue
+        latest = conn.execute(
+            "SELECT input_rate, cache_read_rate, cache_write_5m_rate, cache_write_1h_rate, output_rate "
+            "FROM price_rates WHERE pricing_key=? AND currency='USD' ORDER BY effective_from DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        if latest is None:
+            effective_from = "1970-01-01"
+        else:
+            # Only compare fields the discovery actually published; a NULL on
+            # our side (e.g. no 1h cache tier at OpenAI) must not force a row.
+            changed = any(
+                r.get(src) is not None and (latest[i] is None or abs(float(latest[i]) - float(r[src])) > 1e-9)
+                for i, (src, _col) in enumerate(_RATE_FIELDS)
+            )
+            if not changed:
+                continue
+            effective_from = today
+        conn.execute(
+            "INSERT OR IGNORE INTO price_rates (provider, pricing_key, effective_from, currency, unit, "
+            "input_rate, cache_read_rate, cache_write_5m_rate, cache_write_1h_rate, output_rate, "
+            "source_note, verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                r.get("provider"), key, effective_from, "USD", "per_1m_tokens",
+                r.get("input"), r.get("cache_read"), r.get("cache_write_5m"),
+                r.get("cache_write_1h"), r.get("output"), r.get("source_note"), None,
+            ),
+        )
+        n += conn.execute("SELECT changes()").fetchone()[0]
+    conn.commit()
+    return n
+
+
 def ensure_rates(conn) -> None:
-    """Seed the packaged rates the first time (empty table only)."""
+    """Seed the packaged rates the first time (empty table only), then merge
+    any vendor-published rates the dashboard has discovered since."""
     if conn.execute("SELECT COUNT(*) FROM price_rates").fetchone()[0] == 0 and os.path.exists(PACKAGED_RATES):
         load_rates(conn)
+    load_discovered_rates(conn)

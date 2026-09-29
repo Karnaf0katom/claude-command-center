@@ -3921,6 +3921,8 @@ class TestServerImports(unittest.TestCase):
             "_refresh_claude_model_catalog",
             side_effect=lambda: order.append("catalog") or {"ok": True},
         ), mock.patch.object(
+            server, "_refresh_openai_pricing_catalog", return_value={"ok": True},
+        ), mock.patch.object(
             server,
             "_run_engine_updates_once",
             side_effect=lambda: order.append("updates") or {"ok": True},

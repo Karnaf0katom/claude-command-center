@@ -799,6 +799,7 @@ def _run_engine_updates_once():
 
 def _engine_maintenance_once(force_updates=False):
     catalog_status = _core._refresh_claude_model_catalog()
+    _core._refresh_openai_pricing_catalog()
     # Automatic updates off only skips the CLI updaters on the hourly pass;
     # "Update now" forces them, and the catalog/worker checks always run.
     if force_updates or _engine_auto_update_enabled():
