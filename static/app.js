@@ -45994,6 +45994,108 @@
     const v = _uxqBlockerVerdict(it, _uxqRefIndex(items || (_uxqItemsCache && _uxqItemsCache.items) || []));
     return v[0] === 'waiting' ? v[1] : '';
   }
+  // WT-5/WT-6 acceptance data for the ticket detail: the one-line `accept`
+  // criterion, then each check in gate order with its state and evidence
+  // (cmd output tail, verifier findings + engine/model, reviewer verdict),
+  // plus the reason the last failed check sent the ticket back. Read-only
+  // from the item JSON; `effective_gates` (queue default included) arrives
+  // with the /api/ux-fixes/item hydrate, the list row falls back to its own.
+  function _uxqWorkerSid(workerId) {
+    const key = _uxFixesIdentityKey(workerId || '');
+    if (!key) return '';
+    const cache = _uxqHealthCache || {};
+    const live = (Array.isArray(cache.wt_workers) ? cache.wt_workers : [])
+      .concat(Array.isArray(cache.past_workers) ? cache.past_workers : [])
+      .find(w => w && _uxFixesIdentityKey(w.worker_id || '') === key && String(w.session_id || '').trim());
+    if (live) return String(live.session_id).trim();
+    const map = cache.worker_session_map || {};
+    for (const wid in map) {
+      if (_uxFixesIdentityKey(wid) === key && map[wid]) return String(map[wid]);
+    }
+    return '';
+  }
+  function _uxqGateName(g) {
+    if (g.indexOf('cmd:') === 0) return 'Command: ' + g.slice(4);
+    if (g === 'verify') return 'Independent verifier';
+    if (g.indexOf('review:') === 0) return 'Review by ' + (g.slice(7).trim() || 'submitter');
+    return 'Review by submitter';
+  }
+  function _uxqChecksHtml(item) {
+    if (!item) return '';
+    const results = Array.isArray(item.gate_results) ? item.gate_results.filter(r => r && r.gate) : [];
+    let gates = Array.isArray(item.effective_gates) ? item.effective_gates.slice()
+      : Array.isArray(item.gates) ? item.gates.slice() : [];
+    // Anything that ran or is owed but isn't in the list (a stale row, a
+    // queue whose default changed) still shows, after the declared order.
+    results.map(r => String(r.gate)).concat(Array.isArray(item.gate_stages) ? item.gate_stages : [])
+      .concat(item.gate_pending ? [String(item.gate_pending)] : [])
+      .forEach(g => { if (g && gates.indexOf(g) === -1) gates.push(g); });
+    const accept = String(item.accept || '').trim();
+    const status = String(item.status || '');
+    const feedback = String(item.gate_feedback || '').trim();
+    if (!accept && !gates.length && !feedback) return '';
+    const inReview = status === 'in_review';
+    const chip = (state, label) => '<span class="uxq-check-state is-' + state + '">' + escapeHtml(label) + '</span>';
+    const rows = gates.map(g => {
+      g = String(g);
+      const r = results.filter(x => String(x.gate) === g).pop();
+      const pending = inReview && String(item.gate_pending || '') === g;
+      let state = 'none', label = 'not run yet', meta = [], evidence = '';
+      if (g.indexOf('review') === 0) {
+        if (pending) { state = 'pending'; label = 'waiting'; }
+        else if (status === 'closed' && item.gate_accepted_by) {
+          state = 'passed'; label = 'accepted';
+          meta.push('by ' + item.gate_accepted_by);
+        } else if (/^rejected by /.test(feedback)) {
+          state = 'failed'; label = 'rejected';
+          evidence = feedback;
+        }
+      } else if (pending) {
+        state = 'pending'; label = 'running';
+      } else if (r) {
+        state = r.passed ? 'passed' : 'failed';
+        label = r.passed ? 'passed' : 'failed';
+        evidence = String(r.output_tail || '');
+      }
+      if (r && r.exit_code != null && g.indexOf('cmd:') === 0) meta.push('exit ' + r.exit_code);
+      if (r && r.seconds != null) meta.push(r.seconds + 's');
+      if (r && r.at) meta.push(_uxqRelTime(r.at));
+      let who = '';
+      if (g === 'verify') {
+        const v = item.verifier || {};
+        const engine = (r && r.engine) || v.engine || '';
+        const model = (r && r.model) || v.model || '';
+        if (engine) meta.push(engine + (model ? ' / ' + model : ''));
+        const wid = String(v.worker_id || (r && r.by) || '');
+        if (wid) {
+          const sid = _uxqWorkerSid(wid);
+          who = sid
+            ? ' <button type="button" class="uxq-check-session" data-open-sid="' + escapeAttr(sid) + '" title="Open the verifier session">'
+              + escapeHtml(wid) + '</button>'
+            : ' <span class="uxq-check-meta">' + escapeHtml(wid) + '</span>';
+        }
+      }
+      return '<li class="uxq-check">'
+        + chip(state, label)
+        + '<span class="uxq-check-name">' + escapeHtml(_uxqGateName(g)) + '</span>'
+        + (meta.length ? '<span class="uxq-check-meta">' + escapeHtml(meta.join(' · ')) + '</span>' : '')
+        + who
+        + (evidence.trim()
+          ? '<details class="uxq-check-evidence"><summary>' + (g === 'verify' ? 'findings' : g.indexOf('cmd:') === 0 ? 'output' : 'reason') + '</summary>'
+            + '<pre>' + escapeHtml(evidence.trim()) + '</pre></details>'
+          : '')
+        + '</li>';
+    }).join('');
+    const sentBack = feedback && status !== 'closed' && status !== 'in_review'
+      ? '<div class="uxq-check-sentback">Sent back: ' + escapeHtml(feedback) + '</div>'
+      : '';
+    return '<div class="uxq-td-sec uxq-td-checks-sec">'
+      + '<div class="uxq-td-sec-label">Acceptance</div>'
+      + (accept ? '<div class="uxq-check-accept">' + escapeHtml(accept) + '</div>' : '')
+      + sentBack
+      + (rows ? '<ul class="uxq-checks">' + rows + '</ul>' : '')
+      + '</div>';
+  }
   function _uxqFilterItems(items, statusFilter, typeFilter) {
     const source = Array.isArray(items) ? items : [];
     const recentClosedCutoff = Date.now() - 12 * 60 * 60 * 1000;
@@ -47500,6 +47602,8 @@
       if (type === 'in_review') return _tlEvt('uxq-tl-progress', _tlHead('Awaiting review', ev), '');
       if (type === 'accept') return _tlEvt('uxq-tl-closed', _tlHead('Accepted', ev), '');
       if (type === 'reject') return _tlEvt('uxq-tl-reopen', _tlHead('Rejected', ev), _tlText(ev.reason || ev.text));
+      if (type === 'verify') return _tlEvt(ev.passed === false ? 'uxq-tl-reopen' : 'uxq-tl-closed',
+        _tlHead(ev.passed === false ? 'Verifier failed' : 'Verifier passed', ev), _tlText(ev.findings));
       // Prefer the ticket's live `resolution` over the close event's
       // snapshot: `wt ack` mutates the live field (see queue.ack_resolution)
       // and never rewrites the historical close record, so the snapshot
@@ -47751,6 +47855,7 @@
       + '<div class="uxq-td-cols">'
       +   '<div class="uxq-td-main">'
       +     promptHtml
+      +     _uxqChecksHtml(item)
       +     convSecHtml
       +     imagesHtml
       +     '<div class="uxq-td-sec"><div class="uxq-td-sec-label">Activity' + editToggleHtml + '</div>'
@@ -47990,6 +48095,16 @@
         });
       }
     }
+
+    // Verifier session link in the Acceptance checks.
+    modal.querySelectorAll('.uxq-check-session[data-open-sid]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const sid = btn.getAttribute('data-open-sid');
+        if (!sid) return;
+        close();
+        selectConversation(sid);
+      });
+    });
 
     // Accept / Reject an in_review ticket (WT-5 review gate).
     const reviewInput = modal.querySelector('.uxq-td-review-input');

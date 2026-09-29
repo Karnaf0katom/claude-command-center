@@ -22788,6 +22788,20 @@ body.has-gc-reader .pwa-install-banner {
 .fq-chip.fq-waiting-on { background: rgba(139,148,158,0.18); color: var(--text-muted, #8b949e); cursor: pointer; }
 .fq-chip.fq-waiting-on:hover, .fq-chip.fq-waiting-on:focus-visible { color: var(--text, #e6edf3); text-decoration: underline; }
 .fq-status-blocked { color: var(--text-muted, #8b949e); white-space: nowrap; }
+/* Ticket detail: acceptance line + checks (WT-5/WT-6). */
+.uxq-check-accept { margin: 2px 0 6px; }
+.uxq-check-sentback { margin: 4px 0 6px; color: #ff7b72; white-space: pre-wrap; }
+.uxq-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.uxq-check { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.uxq-check-state { font-size: 11px; padding: 0 6px; border-radius: 8px; background: rgba(139,148,158,0.18); color: var(--text-muted, #8b949e); }
+.uxq-check-state.is-passed { background: rgba(63,185,80,0.18); color: #56d364; }
+.uxq-check-state.is-failed { background: rgba(248,81,73,0.18); color: #ff7b72; }
+.uxq-check-state.is-pending { background: rgba(163,113,247,0.20); color: #d2a8ff; }
+.uxq-check-meta { color: var(--text-muted, #8b949e); font-size: 12px; }
+.uxq-check-session { background: none; border: 0; padding: 0; color: var(--accent, #58a6ff); cursor: pointer; font: inherit; font-size: 12px; }
+.uxq-check-session:hover { text-decoration: underline; }
+.uxq-check-evidence { flex-basis: 100%; }
+.uxq-check-evidence pre { max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 12px; margin: 4px 0 0; }
 .fq-row.is-in_review .fq-status { background: #a371f7; box-shadow: 0 0 0 3px rgba(163,113,247,0.18); }
 /* Blocked panel inside the ticket detail modal. */
 /* ── Ticket Detail Modal (world-class redesign CCC-387/388) ── */

@@ -3468,6 +3468,15 @@ def _uxq_item_payload(item):
         return item
     out = dict(item)
     out["timeline"] = _uxq_item_timeline(item)
+    # WT-5 checks in gate order: the ticket's own `gates` override, else the
+    # queue default from `wt config --gate` (not stored on the ticket). One
+    # config read per detail payload; the list rows never pay it.
+    eff = getattr(_q, "effective_gates", None)
+    if callable(eff):
+        try:
+            out["effective_gates"] = list(eff(item) or [])
+        except Exception:
+            pass
     return out
 
 
