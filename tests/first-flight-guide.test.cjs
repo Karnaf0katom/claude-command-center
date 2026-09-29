@@ -22,7 +22,6 @@ const SCRATCH = process.env.FTUE_SCRATCH
   || '/var/folders/sl/4np1qd1j7tdd956l4kf8t_ph0000gn/T/grok-goal-10a44204be19/implementer';
 
 const TOPICS = [
-  'clis are installed',
   'reviewing existing conversations',
   'creating first conversation',
   'lhs',
@@ -31,63 +30,6 @@ const TOPICS = [
   'workers',
   'delegation',
 ];
-
-const CLI_FIXTURE = {
-  completed: false,
-  clis: {
-    claude: {
-      name: 'Claude Code',
-      command: 'claude',
-      available: false,
-      logged_in: false,
-      install_instruction: 'curl -fsSL https://example.test/install-claude | bash',
-      signup_url: 'https://example.test/claude',
-    },
-    codex: {
-      name: 'Codex',
-      command: 'codex',
-      available: true,
-      logged_in: false,
-      login_instruction: 'codex login',
-      signup_url: 'https://example.test/codex',
-    },
-    cursor: {
-      name: 'Cursor',
-      command: 'cursor',
-      available: true,
-      logged_in: true,
-      email: 'dev@example.test',
-    },
-  },
-};
-
-const CLI_AFTER_DETECT = {
-  completed: false,
-  clis: {
-    claude: {
-      name: 'Claude Code',
-      command: 'claude',
-      available: true,
-      logged_in: true,
-      email: 'ready@example.test',
-    },
-    codex: {
-      name: 'Codex',
-      command: 'codex',
-      available: true,
-      logged_in: false,
-      login_instruction: 'codex login',
-      signup_url: 'https://example.test/codex',
-    },
-    cursor: {
-      name: 'Cursor',
-      command: 'cursor',
-      available: true,
-      logged_in: true,
-      email: 'dev@example.test',
-    },
-  },
-};
 
 const FIXTURE_HTML = `<!DOCTYPE html>
 <html>
@@ -213,7 +155,7 @@ async function openFixture(startOpts) {
       throw new Error('shipped guide did not define window.cccTour.start');
     }
     window.cccTour.start(opts);
-  }, startOpts || { force: true, cliStatus: CLI_FIXTURE });
+  }, startOpts || { force: true });
   page.__ftueErrors = errors;
   return page;
 }
@@ -325,7 +267,7 @@ test('Settings replay and auto-start guards stay on the shipped start path', () 
 });
 
 test('first-run walk records >=20 steps covering every named topic', async () => {
-  const page = await openFixture({ force: true, cliStatus: CLI_FIXTURE });
+  const page = await openFixture({ force: true });
   try {
     const first = await readCard(page);
     assert.ok(first.overlay, 'overlay missing on start');
@@ -356,7 +298,7 @@ test('first-run walk records >=20 steps covering every named topic', async () =>
 });
 
 test('skip persists done flag so a second non-forced start does nothing', async () => {
-  const page = await openFixture({ force: true, cliStatus: CLI_FIXTURE });
+  const page = await openFixture({ force: true });
   try {
     await page.evaluate(() => {
       const skip = document.querySelector('.fft-skip, .fft-btn-ghost');
@@ -374,10 +316,10 @@ test('skip persists done flag so a second non-forced start does nothing', async 
 });
 
 test('forced Settings-style replay starts again after done', async () => {
-  const page = await openFixture({ force: true, cliStatus: CLI_FIXTURE });
+  const page = await openFixture({ force: true });
   try {
     await page.evaluate(() => window.cccTour.skip());
-    await page.evaluate((cliStatus) => window.cccTour.start({ force: true, cliStatus }), CLI_FIXTURE);
+    await page.evaluate(() => window.cccTour.start({ force: true }));
     const card = await readCard(page);
     assert.ok(card.overlay, 'forced replay must show overlay');
     assert.ok(card.title, 'forced replay first step empty');
@@ -386,113 +328,14 @@ test('forced Settings-style replay starts again after done', async () => {
   }
 });
 
-test('CLI step shows install/login/re-detect for missing and logged-out, not for ready', async () => {
-  const page = await openFixture({
-    force: true,
-    cliStatus: CLI_FIXTURE,
-  });
+test('engines setup is not a guide step (it is the separate first-run screen)', async () => {
+  const page = await openFixture({ force: true });
   try {
-    // Welcome -> CLI
-    await clickPrimary(page);
-    const onCli = await page.evaluate((updated) => {
-      window.__fftUpdatedCli = updated;
-      if (window.cccTour && window.cccTour.getState) {
-        const st = window.cccTour.getState();
-        return {
-          id: st && st.step && st.step.id,
-          title: document.querySelector('.fft-title') && document.querySelector('.fft-title').textContent,
-        };
-      }
-      return {
-        title: document.querySelector('.fft-title') && document.querySelector('.fft-title').textContent,
-      };
-    }, CLI_AFTER_DETECT);
-    assert.match(String(onCli.title || ''), /cli/i);
-
-    const rows = await page.evaluate(() => {
-      return [...document.querySelectorAll('.fft-cli-row')].map((row) => ({
-        engine: row.getAttribute('data-fft-cli'),
-        state: row.getAttribute('data-fft-cli-state'),
-        hasInstall: !!row.querySelector('.fft-cli-install'),
-        hasLogin: !!row.querySelector('.fft-cli-login'),
-        text: row.textContent,
-      }));
-    });
-    assert.ok(rows.length >= 3, 'CLI step should render engine rows');
-    const missing = rows.find((r) => r.engine === 'claude');
-    const loggedOut = rows.find((r) => r.engine === 'codex');
-    const ready = rows.find((r) => r.engine === 'cursor');
-    assert.ok(missing, 'missing engine row');
-    assert.ok(loggedOut, 'logged-out engine row');
-    assert.ok(ready, 'ready engine row');
-    assert.equal(missing.state, 'missing');
-    assert.equal(missing.hasInstall, true, 'missing row must expose install');
-    assert.equal(missing.hasLogin, false);
-    assert.equal(loggedOut.state, 'logged-out');
-    assert.equal(loggedOut.hasLogin, true, 'logged-out row must expose login');
-    assert.equal(loggedOut.hasInstall, false);
-    assert.equal(ready.state, 'ready');
-    assert.equal(ready.hasInstall, false, 'ready row must not expose install');
-    assert.equal(ready.hasLogin, false, 'ready row must not expose login');
-    const redetect = await page.evaluate(() => !!document.querySelector('.fft-cli-redetect'));
-    assert.equal(redetect, true, 're-detect control missing');
-
-    await page.evaluate((updated) => {
-      // Rebind fetch used by the shipped re-detect without mocking the renderer.
-      window.cccTour.start; // keep shipped function
-      const btn = document.querySelector('.fft-cli-redetect');
-      if (!btn) throw new Error('no re-detect');
-      // The guide should honor a fetchCliStatus injected at start. Re-call
-      // with the same overlay by using the live instance's redetect if present,
-      // else click after swapping the injected fetcher via a custom event.
-      if (typeof window.cccTour.setCliStatus === 'function') {
-        window.cccTour.setCliStatus(updated);
-      }
-      btn.click();
-    }, CLI_AFTER_DETECT);
-
-    // If start() consumed fetchCliStatus, clicking re-detect with a fetcher
-    // provided at start is the real path. Restart this page with the fetcher
-    // defined inside the page when the first click did not flip Claude.
-    const claudeState = await page.evaluate(() => {
-      const row = document.querySelector('.fft-cli-row[data-fft-cli="claude"]');
-      return row ? row.getAttribute('data-fft-cli-state') : null;
-    });
-    if (claudeState !== 'ready') {
-      // Drive the real start() injection path on a clean run of this same page.
-      await page.evaluate((initial, updated) => {
-        try { localStorage.removeItem('ccc-tour-done'); } catch (_) {}
-        if (window.cccTour.end) window.cccTour.end('skip');
-        try { localStorage.removeItem('ccc-tour-done'); } catch (_) {}
-        window.cccTour.start({
-          force: true,
-          cliStatus: initial,
-          fetchCliStatus: async () => updated,
-        });
-      }, CLI_FIXTURE, CLI_AFTER_DETECT);
-      await clickPrimary(page);
-      await page.click('.fft-cli-redetect');
-      await page.waitForFunction(() => {
-        const row = document.querySelector('.fft-cli-row[data-fft-cli="claude"]');
-        return row && row.getAttribute('data-fft-cli-state') === 'ready';
-      });
-    }
-
-    const after = await page.evaluate(() => {
-      const row = document.querySelector('.fft-cli-row[data-fft-cli="claude"]');
-      const title = document.querySelector('.fft-title');
-      const readyRows = [...document.querySelectorAll('.fft-cli-row[data-fft-cli-state="ready"]')];
-      return {
-        claude: row ? row.getAttribute('data-fft-cli-state') : null,
-        stillOnCli: /cli/i.test((title && title.textContent) || ''),
-        readyCount: readyRows.length,
-        overlay: !!document.querySelector('.fft-center-card, .fft-card'),
-      };
-    });
-    assert.equal(after.claude, 'ready');
-    assert.equal(after.stillOnCli, true, 're-detect must not leave the guide');
-    assert.ok(after.readyCount >= 1, 'at least one engine marked ready');
-    assert.equal(after.overlay, true);
+    const recorded = await walkAll(page);
+    assert.equal(recorded.some((s) => /engines?\b.*installed|agent CLIs/i.test(s.title)), false,
+      'guide must not contain the engines step: ' + recorded.map((s) => s.title).join(' | '));
+    assert.equal(await page.evaluate(() => !!document.querySelector('.fft-cli-row, .fft-cli-redetect')), false);
+    assert.equal(fs.readFileSync(TOUR_JS, 'utf8').includes('cli-setup'), false);
   } finally {
     await page.close();
   }
@@ -501,7 +344,6 @@ test('CLI step shows install/login/re-detect for missing and logged-out, not for
 test('Queue, Workers, Delegation, and composer reveals make the live target visible before spotlight', async () => {
   const page = await openFixture({
     force: true,
-    cliStatus: CLI_FIXTURE,
     fetchCliStatus: undefined,
   });
   try {
@@ -614,7 +456,7 @@ async function resolveDashboardUrl() {
   return null;
 }
 
-test('live dashboard walk keeps composer, CLI, Queue, Workers, and Delegation on real controls', async () => {
+test('live dashboard walk keeps composer, Queue, Workers, and Delegation on real controls', async () => {
   const logLive = path.join(SCRATCH, 'ftue-live-walk.log');
   const unavailable = path.join(SCRATCH, 'ftue-launch-unavailable.log');
   const url = await resolveDashboardUrl();
@@ -686,31 +528,9 @@ test('live dashboard walk keeps composer, CLI, Queue, Workers, and Delegation on
           queueTab: box('[data-rail-tab="queue"]'),
           queuePane: box('#statusRailQueuePane'),
           delegate: box('[data-orch-playbook="delegate"]'),
-          redetect: !!document.querySelector('.fft-cli-redetect'),
-          cliRows: [...document.querySelectorAll('.fft-cli-row')].map((row) => ({
-            engine: row.getAttribute('data-fft-cli'),
-            state: row.getAttribute('data-fft-cli-state'),
-            hasInstall: !!row.querySelector('.fft-cli-install'),
-            hasLogin: !!row.querySelector('.fft-cli-login'),
-          })),
         };
       });
       if (!snap.overlay && !snap.active) break;
-      if ((snap.stepId === 'cli-setup' || /cli/i.test(snap.title)) && snap.cliRows.length === 0) {
-        try {
-          await page.waitForFunction(
-            () => document.querySelectorAll('.fft-cli-row').length > 0,
-            { timeout: 8000 }
-          );
-          snap.cliRows = await page.evaluate(() => [...document.querySelectorAll('.fft-cli-row')].map((row) => ({
-            engine: row.getAttribute('data-fft-cli'),
-            state: row.getAttribute('data-fft-cli-state'),
-            hasInstall: !!row.querySelector('.fft-cli-install'),
-            hasLogin: !!row.querySelector('.fft-cli-login'),
-          })));
-          snap.redetect = await page.evaluate(() => !!document.querySelector('.fft-cli-redetect'));
-        } catch (_) {}
-      }
       recorded.push(snap);
       if (snap.stepId === 'composer') {
         await page.screenshot({ path: path.join(SCRATCH, 'ftue-live-composer.png') });
@@ -747,10 +567,7 @@ test('live dashboard walk keeps composer, CLI, Queue, Workers, and Delegation on
     assert.ok(recorded.length >= 20, 'live walk expected >=20 steps, got ' + recorded.length);
     const byId = {};
     recorded.forEach((s) => { byId[s.stepId] = s; });
-    const cli = recorded.find((s) => s.stepId === 'cli-setup' || /cli/i.test(s.title));
-    assert.ok(cli, 'live walk never reached the CLI step');
-    assert.equal(cli.redetect, true, 'live CLI step missing re-detect');
-    assert.ok(cli.cliRows.length >= 1, 'live CLI step rendered no engine rows');
+    assert.equal(recorded.some((s) => s.stepId === 'cli-setup'), false, 'engines step must not be in the guide');
 
     const composer = byId.composer;
     assert.ok(composer, 'live walk never reached the composer step');

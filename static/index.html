@@ -2615,6 +2615,12 @@
           <section class="settings-section" id="settingsSection-engines" data-section-id="engines" role="tabpanel" aria-labelledby="settingsRailTab-engines">
             <div class="settings-section-eyebrow">Engines</div>
 
+            <!-- First-run only (app.js openEnginesFirstRun): the same Engines page, shown once before anything else. -->
+            <div class="eng-first-run-intro" id="engFirstRunIntro" hidden>
+              <h2 class="eng-first-run-title">Review the engines that are installed</h2>
+              <p class="eng-first-run-body">Command Center runs your sessions on the agent CLIs installed on this Mac. Install the ones you want and sign in. You can come back to this any time in Settings, Engines.</p>
+            </div>
+
             <div class="eng-hero" data-keywords="engines status installed signed in usage ready setup overview">
               <div class="eng-hero-main">
                 <div class="eng-hero-title" id="engHeroTitle">Checking your engines…</div>
@@ -2759,7 +2765,7 @@
             <div class="eng-list-head">
               <div class="settings-subsection-label" id="engListLabel">All engines</div>
             </div>
-            <div class="eng-list" id="engList" data-keywords="engine claude codex cursor antigravity gemini kilo opencode kimi hermes devin grok aider droid pi install login sign in authenticate verify usage quota enable disable">
+            <div class="eng-list" id="engList" data-keywords="engine claude codex cursor antigravity gemini kilo opencode kimi hermes devin grok aider droid pi command install login sign in authenticate verify usage quota enable disable">
               <div class="eng-list-empty">Checking installed engines…</div>
             </div>
 
@@ -3028,6 +3034,10 @@
             <div class="settings-empty-state-hint">Press esc to clear the search</div>
           </div>
         </div>
+      </div>
+      <div class="eng-first-run-foot" id="engFirstRunFoot" hidden>
+        <span class="eng-first-run-foot-note" id="engFirstRunNote"></span>
+        <button type="button" class="settings-action-btn eng-primary" id="engFirstRunContinue">Continue</button>
       </div>
     </div>
   </div>

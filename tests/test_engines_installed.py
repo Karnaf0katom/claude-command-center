@@ -93,8 +93,82 @@ def test_spawnable_present_binary_reports_installed(monkeypatch, tmp_path):
     assert rows["kilo"]["detail"] == str(fake_bin)
 
 
-def test_tour_js_references_onboarding_cli_status_endpoint():
+def test_engines_setup_is_not_part_of_the_tour():
+    """Install/sign-in/re-detect lives in Settings > Engines (one implementation)
+    and shows as a separate first-run screen, not as a guide step."""
     source = TOUR_JS.read_text(encoding="utf-8")
-    assert "/api/onboarding/status" in source
-    assert "/api/onboarding/install-terminal" in source
-    assert "/api/onboarding/login-terminal" in source
+    for endpoint in ("status", "install-terminal", "login-terminal"):
+        assert "/api/onboarding/" + endpoint not in source
+    assert "cli-setup" not in source
+    assert "Ensure agent CLIs" not in source
+    app = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert "ccc-engines-first-run-done" in app
+    assert "Review the engines that are installed" in (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+
+def _isolated_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / ".grok"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    for var in ("DEVIN_API_KEY", "XAI_API_KEY", "CCC_DEVIN_BIN", "CCC_GROK_BIN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+
+
+def test_onboarding_status_lists_devin_and_grok_missing(monkeypatch, tmp_path):
+    _isolated_home(monkeypatch, tmp_path)
+    clis = server._get_onboarding_status()["clis"]
+    for engine, command, url in (
+        ("devin", "devin", "https://cli.devin.ai/install.sh"),
+        ("grok", "grok", "https://x.ai/cli/install.sh"),
+    ):
+        row = clis[engine]
+        assert row["command"] == command
+        assert row["available"] is False
+        assert row["logged_in"] is False
+        assert url in row["install_instruction"]
+    assert clis["devin"]["login_instruction"] == "devin auth login"
+    assert clis["grok"]["login_instruction"] == "grok login"
+    # Every listed install command must be a runnable shell command, since the
+    # Install button pastes it into a terminal verbatim.
+    for row in clis.values():
+        assert row["install_instruction"].split()[0] in ("curl", "npm")
+
+
+def test_onboarding_status_devin_grok_present_and_signed_in(monkeypatch, tmp_path):
+    _isolated_home(monkeypatch, tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("devin", "grok"):
+        exe = bindir / name
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    (tmp_path / "xdg" / "devin").mkdir(parents=True)
+    (tmp_path / "xdg" / "devin" / "credentials.toml").write_text("token = 'test'\n")
+    (tmp_path / ".grok").mkdir()
+    (tmp_path / ".grok" / "auth.json").write_text('{"k": {"t": 1}}')
+    clis = server._get_onboarding_status()["clis"]
+    assert clis["devin"]["available"] and clis["devin"]["logged_in"]
+    assert clis["grok"]["available"] and clis["grok"]["logged_in"]
+    # Detection is which() + file stats only: no subprocess on this path.
+    import subprocess
+    def boom(*a, **k):
+        raise AssertionError("onboarding detection must not spawn a subprocess")
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    server._get_onboarding_status()
+
+
+def test_login_command_covers_devin_and_grok(monkeypatch, tmp_path):
+    _isolated_home(monkeypatch, tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("devin", "grok"):
+        exe = bindir / name
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    assert server._onboarding_login_command("devin")["argv"][1:] == ["auth", "login"]
+    assert server._onboarding_login_command("grok")["argv"][1:] == ["login"]

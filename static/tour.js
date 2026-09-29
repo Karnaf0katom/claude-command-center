@@ -42,16 +42,9 @@
       kind: 'center',
       eyebrow: 'FIRST FLIGHT',
       title: 'Welcome to Command Center',
-      body: 'This guide walks the controls you need on day one: agent CLIs, reviewing existing conversations, creating first conversation, the LHS, the RHS, your first queue, workers, and Delegation. Skip anytime. Replay it from Settings.',
+      body: 'This guide walks the controls you need on day one: reviewing existing conversations, creating first conversation, the LHS, the RHS, your first queue, workers, and Delegation. Skip anytime. Replay it from Settings.',
       primary: 'Start the guide',
       ghost: 'Skip for now'
-    },
-    {
-      id: 'cli-setup',
-      kind: 'cli',
-      title: 'Ensure agent CLIs are installed',
-      body: 'Command Center drives the agent CLIs on this machine. A missing CLI can be installed from this step. A logged-out CLI can sign in here. Re-detect when you are done. Skip if you want to do this later.',
-      primary: 'Continue'
     },
     {
       id: 'lhs',
@@ -111,7 +104,7 @@
       anchor: ['#convInputEngineSelect', '[data-tour="spawn-bar"]', '[data-tour="new-session"]'],
       reveal: 'composer',
       title: 'Pick the engine for this conversation',
-      body: 'The engine picker on the composer chooses which installed CLI runs the session. Match it to a CLI you just made ready.'
+      body: 'The engine picker on the composer chooses which installed CLI runs the session. Only engines you have installed and signed in to will run. Settings, Engines shows which those are.'
     },
     {
       id: 'send',
@@ -195,9 +188,9 @@
       id: 'finale',
       kind: 'center',
       title: 'You are cleared to fly',
-      body: 'That is the cockpit: agent CLIs, reviewing existing conversations, creating first conversation, the LHS, the RHS, your first queue, workers, and Delegation.',
+      body: 'That is the cockpit: reviewing existing conversations, creating first conversation, the LHS, the RHS, your first queue, workers, and Delegation.',
       list: [
-        'Install any missing agent CLI, then press New session with one small real task.',
+        'Press New session with one small real task. Engines are managed under Settings, Engines.',
         'Open a conversation and read its transcript. Waiting chips need you.',
         'Put a ticket on your first queue, or tap Delegate on a live session to hand work to a lane.'
       ],
@@ -211,7 +204,6 @@
     '.fft-shield{position:fixed;inset:0;z-index:' + (Z_BASE + 1) + ';background:transparent;}',
     '.fft-spot{position:fixed;z-index:' + (Z_BASE + 2) + ';pointer-events:none;border-radius:10px;border:2px solid var(--cyan);box-shadow:0 0 0 200vmax rgba(0,0,0,0.55);transition:top .25s ease,left .25s ease,width .25s ease,height .25s ease;}',
     '.fft-center-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:' + (Z_BASE + 3) + ';width:min(440px,92vw);background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:0 30px 70px rgba(0,0,0,.8);padding:24px;color:var(--text);font-family:var(--font-ui);animation:fftPop .25s ease-out;}',
-    '.fft-center-card.fft-cli-card{width:min(560px,94vw);max-height:min(88vh,720px);overflow:auto;}',
     '.fft-card{position:fixed;z-index:' + (Z_BASE + 3) + ';width:min(340px,calc(100vw - 24px));background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 30px 70px rgba(0,0,0,.8);padding:20px;color:var(--text);font-family:var(--font-ui);animation:fftPop .25s ease-out;}',
     '@keyframes fftPop{from{opacity:0;transform:scale(.94) translate(-50%,-50%);}to{opacity:1;transform:scale(1) translate(-50%,-50%);}}',
     '.fft-card.fft-anim{animation:fftFade .2s ease-out;}',
@@ -234,18 +226,6 @@
     '.fft-skip{position:absolute;top:14px;right:16px;font-size:12px;color:var(--text-muted);cursor:pointer;background:transparent;border:none;font-family:var(--font-ui);}',
     '.fft-skip:hover{color:var(--text);text-decoration:underline;}',
     '.fft-center-card,.fft-card{position:fixed;}',
-    '.fft-cli-list{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;}',
-    '.fft-cli-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg,#0d1117);}',
-    '.fft-cli-name{font-size:14px;font-weight:600;color:var(--text);}',
-    '.fft-cli-cmd{font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text-muted);}',
-    '.fft-cli-badge{font-size:11px;font-weight:600;padding:3px 8px;border-radius:999px;border:1px solid var(--border);}',
-    '.fft-cli-row[data-fft-cli-state="ready"] .fft-cli-badge{color:var(--green);border-color:var(--green);}',
-    '.fft-cli-row[data-fft-cli-state="logged-out"] .fft-cli-badge{color:var(--orange);border-color:var(--orange);}',
-    '.fft-cli-row[data-fft-cli-state="missing"] .fft-cli-badge{color:var(--text-muted);}',
-    '.fft-cli-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}',
-    '.fft-cli-install,.fft-cli-login,.fft-cli-redetect{font-family:var(--font-ui);font-size:12px;font-weight:600;border-radius:8px;padding:6px 10px;cursor:pointer;border:1px solid var(--border);background:var(--surface-2);color:var(--text);}',
-    '.fft-cli-redetect{display:block;margin:4px auto 0;}',
-    '.fft-cli-note{font-size:12px;color:var(--text-muted);margin:0 0 8px;}',
     '.fft-sample{position:relative;}',
     '.fft-sample .fft-sample-tag{position:absolute;top:6px;right:8px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);}',
     '.fft-sample .fft-sample-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px;}',
@@ -275,8 +255,6 @@
     currentAnchor: null,
     lastReveal: null,
     visited: [],
-    cliStatus: null,
-    fetchCliStatus: null,
     io: null
   };
 
@@ -607,153 +585,6 @@
     return null;
   }
 
-  function cliRowState(cli) {
-    if (cli && cli.available && cli.logged_in) return 'ready';
-    if (cli && cli.available) return 'logged-out';
-    return 'missing';
-  }
-
-  function renderCliRows(host, clis) {
-    host.innerHTML = '';
-    const keys = clis ? Object.keys(clis) : [];
-    for (let i = 0; i < keys.length; i++) {
-      const engine = keys[i];
-      const cli = clis[engine] || {};
-      const row = makeEl('div', 'fft-cli-row');
-      const st = cliRowState(cli);
-      row.setAttribute('data-fft-cli', engine);
-      row.setAttribute('data-fft-cli-state', st);
-      const info = makeEl('div', null);
-      const name = makeEl('div', 'fft-cli-name');
-      name.textContent = cli.name || engine;
-      info.appendChild(name);
-      const cmd = makeEl('div', 'fft-cli-cmd');
-      cmd.textContent = cli.command ? 'command: ' + cli.command : engine;
-      info.appendChild(cmd);
-      row.appendChild(info);
-      const actions = makeEl('div', 'fft-cli-actions');
-      const badge = makeEl('span', 'fft-cli-badge');
-      badge.textContent = st === 'ready' ? 'Ready' : (st === 'logged-out' ? 'Needs login' : 'Not installed');
-      actions.appendChild(badge);
-      if (st === 'missing') {
-        const install = makeEl('button', 'fft-cli-install');
-        install.type = 'button';
-        install.textContent = 'Install';
-        install.addEventListener('click', function () { runInstall(engine, cli, install); });
-        actions.appendChild(install);
-      } else if (st === 'logged-out') {
-        const login = makeEl('button', 'fft-cli-login');
-        login.type = 'button';
-        login.textContent = 'Log in';
-        login.addEventListener('click', function () { runLogin(engine, cli, login); });
-        actions.appendChild(login);
-      }
-      row.appendChild(actions);
-      host.appendChild(row);
-    }
-  }
-
-  function copyText(text) {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text);
-      }
-    } catch (_) {}
-  }
-
-  function runInstall(engine, cli, btn) {
-    const io = state.io || {};
-    const done = function (ok) {
-      if (btn) btn.textContent = ok ? 'Install started' : 'Install';
-    };
-    if (typeof io.installEngine === 'function') {
-      Promise.resolve(io.installEngine(engine)).then(function (res) { done(res && res.ok !== false); }).catch(function () { done(false); });
-      return;
-    }
-    fetch('/api/onboarding/install-terminal', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ engine: engine })
-    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (data) {
-      if (!(data && data.ok) && cli && cli.install_instruction) copyText(cli.install_instruction);
-      done(!!(data && data.ok));
-    }).catch(function () {
-      if (cli && cli.install_instruction) copyText(cli.install_instruction);
-      done(false);
-    });
-  }
-
-  function runLogin(engine, cli, btn) {
-    const io = state.io || {};
-    const done = function (ok) {
-      if (btn) btn.textContent = ok ? 'Login started' : 'Log in';
-    };
-    if (typeof io.loginEngine === 'function') {
-      Promise.resolve(io.loginEngine(engine)).then(function (res) { done(res && res.ok !== false); }).catch(function () { done(false); });
-      return;
-    }
-    fetch('/api/onboarding/login-terminal', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ engine: engine })
-    }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (data) {
-      if (data && data.ok) { done(true); return; }
-      if (data && data.inline_login) {
-        return fetch('/api/onboarding/login/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ engine: engine })
-        }).then(function (r2) { return r2.json().catch(function () { return {}; }); }).then(function (started) {
-          done(!!(started && started.ok));
-        });
-      }
-      if (cli && cli.login_instruction) copyText(cli.login_instruction);
-      done(false);
-    }).catch(function () {
-      if (cli && cli.login_instruction) copyText(cli.login_instruction);
-      done(false);
-    });
-  }
-
-  function loadCliStatus() {
-    if (state.cliStatus && state.cliStatus.clis) {
-      return Promise.resolve(state.cliStatus);
-    }
-    if (typeof state.fetchCliStatus === 'function') {
-      return Promise.resolve(state.fetchCliStatus()).then(function (data) {
-        state.cliStatus = data;
-        return data;
-      });
-    }
-    const io = state.io || {};
-    if (typeof io.getOnboardingStatus === 'function') {
-      return Promise.resolve(io.getOnboardingStatus()).then(function (data) {
-        state.cliStatus = data;
-        return data;
-      });
-    }
-    return fetch('/api/onboarding/status')
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        state.cliStatus = data;
-        return data;
-      })
-      .catch(function () { return { clis: {} }; });
-  }
-
-  function redetectCli(listHost) {
-    const fetchFn = typeof state.fetchCliStatus === 'function'
-      ? state.fetchCliStatus
-      : function () {
-        return fetch('/api/onboarding/status').then(function (r) { return r.json(); });
-      };
-    return Promise.resolve(fetchFn()).then(function (data) {
-      if (data) state.cliStatus = data;
-      if (listHost) renderCliRows(listHost, (data && data.clis) || {});
-      return data;
-    }).catch(function () { return state.cliStatus; });
-  }
-
   function decorateCard(card, step) {
     card.setAttribute('data-fft-step', step.id);
     card.setAttribute('data-fft-kind', step.kind);
@@ -776,7 +607,7 @@
     state.lastReveal = { id: step.id, visible: true, beforeSpotlight: true, selector: null };
     const backdrop = track(makeEl('div', 'fft-backdrop'));
     document.body.appendChild(backdrop);
-    const card = track(makeEl('div', 'fft-center-card' + (step.kind === 'cli' ? ' fft-cli-card' : '')));
+    const card = track(makeEl('div', 'fft-center-card'));
     decorateCard(card, step);
     if (state.stepIndex > 0) card.appendChild(makeSkipLink());
     if (step.eyebrow) {
@@ -790,23 +621,6 @@
     const body = makeEl('p', 'fft-body');
     body.textContent = step.body;
     card.appendChild(body);
-    if (step.kind === 'cli') {
-      const list = makeEl('div', 'fft-cli-list');
-      list.textContent = 'Scanning local environment...';
-      card.appendChild(list);
-      const redetect = makeEl('button', 'fft-cli-redetect');
-      redetect.type = 'button';
-      redetect.textContent = 'Re-detect status';
-      redetect.addEventListener('click', function () {
-        redetect.textContent = 'Scanning...';
-        redetectCli(list).then(function () { redetect.textContent = 'Re-detect status'; });
-      });
-      card.appendChild(redetect);
-      loadCliStatus().then(function (data) {
-        if (!list.isConnected) return;
-        renderCliRows(list, (data && data.clis) || {});
-      });
-    }
     if (step.list && step.list.length) {
       const ol = makeEl('ol', 'fft-list');
       for (let i = 0; i < step.list.length; i++) {
@@ -902,7 +716,7 @@
       end('done');
       return;
     }
-    if (step.kind === 'center' || step.kind === 'cli') {
+    if (step.kind === 'center') {
       showCenter(step);
       return;
     }
@@ -1003,8 +817,6 @@
     state.currentAnchor = null;
     state.lastReveal = null;
     state.visited = [];
-    state.cliStatus = options.cliStatus || null;
-    state.fetchCliStatus = typeof options.fetchCliStatus === 'function' ? options.fetchCliStatus : null;
     state.io = options.io || null;
     window.__cccTourActive = true;
     state.keyHandler = onKeyDown;
@@ -1045,19 +857,12 @@
     };
   }
 
-  function setCliStatus(payload) {
-    state.cliStatus = payload;
-    const list = document.querySelector('.fft-cli-list');
-    if (list && payload) renderCliRows(list, payload.clis || {});
-  }
-
   window.cccTour = {
     start: start,
     end: end,
     next: next,
     back: back,
     skip: skip,
-    getState: getState,
-    setCliStatus: setCliStatus
+    getState: getState
   };
 })();

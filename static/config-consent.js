@@ -113,10 +113,10 @@
     }
   }
 
-  // Onboarding, another dialog, or the First Flight tour (which itself waits
+  // The first-run engines screen, another dialog, or the First Flight tour (which itself waits
   // for .upd-overlay.open, i.e. this dialog) is on screen.
   function otherOverlayOpen() {
-    return !!window.__cccTourActive || Array.from(document.querySelectorAll('.upd-overlay.open'))
+    return !!window.__cccTourActive || !!window.__cccEnginesFirstRun || Array.from(document.querySelectorAll('.upd-overlay.open'))
       .some((el) => el.id !== 'cfgConsentModal');
   }
 

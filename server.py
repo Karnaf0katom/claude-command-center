@@ -38419,6 +38419,28 @@ def _get_onboarding_status():
         if kimi_config_file.is_file() or os.environ.get("KIMI_API_KEY"):
             kimi_logged_in = True
 
+    # 7. Devin (Cognition) and Grok (xAI) Status. Both are ACP engines CCC
+    # can run sessions with; detection is shutil.which (via the resolvers) plus
+    # a stat/small-read of each CLI's own credential file, never a subprocess.
+    devin_info = _resolve_devin_bin()
+    devin_available = devin_info.get("available", False)
+    devin_bin = devin_info.get("bin")
+    devin_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    devin_logged_in = bool(os.environ.get("DEVIN_API_KEY", "").strip()) or (
+        devin_data_home / "devin" / "credentials.toml"
+    ).is_file()
+
+    grok_info = _resolve_grok_bin()
+    grok_available = grok_info.get("available", False)
+    grok_bin = grok_info.get("bin")
+    grok_logged_in = bool(os.environ.get("XAI_API_KEY", "").strip())
+    if not grok_logged_in:
+        try:
+            grok_home = Path(os.path.expanduser(os.environ.get("GROK_HOME", "").strip() or "~/.grok"))
+            grok_logged_in = (grok_home / "auth.json").stat().st_size > 2
+        except OSError:
+            pass
+
     return {
         "completed": completed,
         "completed_at": completed_at,
@@ -38475,8 +38497,30 @@ def _get_onboarding_status():
                 "logged_in": cursor_logged_in,
                 "email": cursor_email,
                 "signup_url": "https://cursor.com",
-                "install_instruction": "Install via Cursor App or npm install -g @cursor/agent",
+                "install_instruction": "curl https://cursor.com/install -fsS | bash",
                 "login_instruction": "cursor-agent login"
+            },
+            "devin": {
+                "name": "Devin",
+                "command": "devin",
+                "available": devin_available,
+                "bin_path": devin_bin,
+                "logged_in": devin_logged_in,
+                "email": None,
+                "signup_url": "https://docs.devin.ai/cli",
+                "install_instruction": "curl -fsSL https://cli.devin.ai/install.sh | bash",
+                "login_instruction": "devin auth login"
+            },
+            "grok": {
+                "name": "Grok",
+                "command": "grok",
+                "available": grok_available,
+                "bin_path": grok_bin,
+                "logged_in": grok_logged_in,
+                "email": None,
+                "signup_url": "https://x.ai/cli",
+                "install_instruction": "curl -fsSL https://x.ai/cli/install.sh | bash",
+                "login_instruction": "grok login"
             }
         }
     }
@@ -38861,6 +38905,8 @@ def _onboarding_login_command(engine):
         "cursor": (_resolve_cursor_bin, ["login"]),
         "antigravity": (_resolve_antigravity_bin, ["login"]),
         "kimi": (_resolve_kimi_bin, ["login"]),
+        "devin": (_resolve_devin_bin, ["auth", "login"]),
+        "grok": (_resolve_grok_bin, ["login"]),
     }
     spec = specs.get(key)
     if not spec:

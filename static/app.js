@@ -79730,23 +79730,25 @@
   // usage, update-status), all cheap and cached server-side. Status keeps
   // itself fresh while the pane is showing; there is no refresh control.
   const ENGINE_HUB_META = {
-    claude: { mono: 'Cl', label: 'Claude Code', vendor: 'Anthropic', hue: 24, docs: 'https://docs.claude.com/en/docs/claude-code' },
-    codex: { mono: 'Cx', label: 'Codex', vendor: 'OpenAI', hue: 160, docs: 'https://developers.openai.com/codex/cli' },
-    cursor: { mono: 'Cu', label: 'Cursor Agent', vendor: 'Cursor', hue: 220, docs: 'https://cursor.com/cli' },
-    antigravity: { mono: 'Ag', label: 'Antigravity', vendor: 'Google', hue: 265, docs: 'https://antigravity.google' },
-    kimi: { mono: 'Km', label: 'Kimi Code', vendor: 'Moonshot', hue: 200, docs: 'https://www.kimi.com/code/docs/en/third-party-tools/other-coding-agents.html',
+    claude: { mono: 'Cl', cmd: 'claude', label: 'Claude Code', vendor: 'Anthropic', hue: 24, docs: 'https://docs.claude.com/en/docs/claude-code' },
+    codex: { mono: 'Cx', cmd: 'codex', label: 'Codex', vendor: 'OpenAI', hue: 160, docs: 'https://developers.openai.com/codex/cli' },
+    cursor: { mono: 'Cu', cmd: 'cursor-agent', label: 'Cursor Agent', vendor: 'Cursor', hue: 220, docs: 'https://cursor.com/cli' },
+    antigravity: { mono: 'Ag', cmd: 'agy', label: 'Antigravity', vendor: 'Google', hue: 265, docs: 'https://antigravity.google' },
+    kimi: { mono: 'Km', cmd: 'kimi', label: 'Kimi Code', vendor: 'Moonshot', hue: 200, docs: 'https://www.kimi.com/code/docs/en/third-party-tools/other-coding-agents.html',
       links: [['Membership', 'https://www.kimi.com/code/docs/en/kimi-code/membership.html']] },
-    opencode: { mono: 'Oc', label: 'OpenCode', vendor: 'Any provider', hue: 45, docs: 'https://opencode.ai/docs',
+    opencode: { mono: 'Oc', cmd: 'opencode', label: 'OpenCode', vendor: 'Any provider', hue: 45, docs: 'https://opencode.ai/docs',
       install: 'curl -fsSL https://opencode.ai/install | bash', login: 'opencode auth login' },
-    kilo: { mono: 'Kl', label: 'Kilo Code', vendor: 'Any provider', hue: 50, docs: 'https://kilo.ai/docs/cli', install: 'npm install -g @kilocode/cli' },
-    hermes: { mono: 'He', label: 'Hermes', vendor: 'Nous Research', hue: 300, docs: 'https://github.com/NousResearch/hermes-agent' },
-    devin: { mono: 'Dv', label: 'Devin', vendor: 'Cognition', hue: 185, docs: 'https://docs.devin.ai' },
-    grok: { mono: 'Gk', label: 'Grok', vendor: 'xAI', hue: 0, docs: 'https://docs.x.ai' },
-    droid: { mono: 'Dr', label: 'Droid', vendor: 'Factory', hue: 15, docs: 'https://docs.factory.ai/cli/getting-started/quickstart',
+    kilo: { mono: 'Kl', cmd: 'kilo', label: 'Kilo Code', vendor: 'Any provider', hue: 50, docs: 'https://kilo.ai/docs/cli', install: 'npm install -g @kilocode/cli' },
+    hermes: { mono: 'He', cmd: 'hermes', label: 'Hermes', vendor: 'Nous Research', hue: 300, docs: 'https://github.com/NousResearch/hermes-agent' },
+    devin: { mono: 'Dv', cmd: 'devin', label: 'Devin', vendor: 'Cognition', hue: 185, docs: 'https://docs.devin.ai/cli',
+      install: 'curl -fsSL https://cli.devin.ai/install.sh | bash', login: 'devin auth login' },
+    grok: { mono: 'Gk', cmd: 'grok', label: 'Grok', vendor: 'xAI', hue: 0, docs: 'https://x.ai/cli',
+      install: 'curl -fsSL https://x.ai/cli/install.sh | bash', login: 'grok login' },
+    droid: { mono: 'Dr', cmd: 'droid', label: 'Droid', vendor: 'Factory', hue: 15, docs: 'https://docs.factory.ai/cli/getting-started/quickstart',
       install: 'curl -fsSL https://app.factory.ai/cli | sh' },
-    aider: { mono: 'Ai', label: 'Aider', vendor: 'Any provider', hue: 120, docs: 'https://aider.chat/docs/install.html',
+    aider: { mono: 'Ai', cmd: 'aider', label: 'Aider', vendor: 'Any provider', hue: 120, docs: 'https://aider.chat/docs/install.html',
       install: 'python -m pip install aider-install && aider-install' },
-    pi: { mono: 'Pi', label: 'Pi', vendor: 'Any provider', hue: 330, docs: 'https://github.com/badlogic/pi-mono' },
+    pi: { mono: 'Pi', cmd: 'pi', label: 'Pi', vendor: 'Any provider', hue: 330, docs: 'https://github.com/badlogic/pi-mono' },
   };
   const ENGINE_HUB_WORKER_ENGINES = WORKER_DEFAULT_ENGINES;
   const ENGINE_HUB_POLL_MS = 8000;
@@ -79945,11 +79947,25 @@
       + '" title="' + escapeHtml(title) + '">' + text + '</button>';
   }
 
+  // One-click next step right on the row for an engine that needs setup, so
+  // install and sign-in do not hide behind the drawer (same handlers).
+  function _engHubQuickAction(row) {
+    if (row.disabled) return '';
+    if (!row.installed && row.install && row.canTerminal) {
+      return '<button type="button" class="settings-action-btn eng-primary eng-quick" data-eng-act="install" data-eng="' + row.engine + '">Install</button>';
+    }
+    if (row.installed && row.auth === false && row.login) {
+      return '<button type="button" class="settings-action-btn eng-primary eng-quick" data-eng-act="login" data-eng="' + row.engine + '">Sign in</button>';
+    }
+    return '';
+  }
+
   function _engHubRowHtml(row) {
     const e = row.engine;
     const open = _engHubOpen === e;
     const mono = row.meta.mono || row.meta.label.replace(/[^A-Za-z]/g, '').slice(0, 2);
-    const sub = [row.meta.vendor, row.version ? 'v' + row.version.replace(/^v/, '') : '', row.email].filter(Boolean).join(' · ');
+    const sub = [row.meta.vendor, row.version ? 'v' + row.version.replace(/^v/, '') : '', row.email].filter(Boolean).map(escapeHtml).join(' · ')
+      + (row.meta.cmd ? ' · <code class="eng-sub-cmd">' + escapeHtml(row.meta.cmd) + '</code>' : '');
     const locked = row.isDefault || row.isWorkerDefault;
     const authPill = !row.installed ? ''
       : row.auth === true ? _engHubPill('ok', 'Signed in', row.email || '')
@@ -79960,7 +79976,7 @@
       + '<button type="button" class="eng-row-main" data-eng-toggle-open="' + e + '" aria-expanded="' + open + '">'
       + '<span class="eng-mono" style="--eng-hue:' + row.meta.hue + '" aria-hidden="true">' + escapeHtml(mono) + '</span>'
       + '<span class="eng-id"><span class="eng-name">' + escapeHtml(row.meta.label) + '</span>'
-      + '<span class="eng-sub">' + escapeHtml(sub) + '</span></span>'
+      + '<span class="eng-sub">' + sub + '</span></span>'
       + '<span class="eng-status">'
       + (row.installed ? _engHubPill('ok', 'Installed', row.bin) : _engHubPill('bad', 'Not installed'))
       + authPill + _engHubUsageHtml(row) + '</span>'
@@ -79968,6 +79984,7 @@
       + '</button>'
       + '<span class="eng-row-default"' + (row.state === 'ready' ? ' role="group" aria-label="Default for"' : '') + '>'
       + (row.state === 'ready' ? '<span class="eng-default-for" aria-hidden="true">Default</span>' : '')
+      + _engHubQuickAction(row)
       + _engHubDefaultChip(row, 'default', 'Sessions', row.isDefault, SPAWN_DEFAULT_ENGINES.includes(e),
         'New sessions start on ' + row.meta.label, 'Make ' + row.meta.label + ' the default for new sessions')
       + _engHubDefaultChip(row, 'worker', 'Workers', row.isWorkerDefault, ENGINE_HUB_WORKER_ENGINES.includes(e),
@@ -80036,6 +80053,7 @@
     }
     _engHubData = { doctor, onboarding, usage, updates };
     renderEnginesHub();
+    refreshEnginesFirstRunFoot();
     return _engHubData;
   }
 
@@ -80701,8 +80719,64 @@
     }, 0);
   })();
 
+  // ── First-run engines screen ────────────────────────────────────────
+  // The first thing a brand-new user sees: the Settings Engines page itself
+  // (one implementation: list, install, sign-in, on/off), opened in a
+  // trimmed "first run" layout with a Continue button. It is not part of the
+  // optional guide, so "Skip guide" never touches it. Acknowledged once
+  // (Continue, close, Esc or backdrop) and never shown again. Users who
+  // already finished or skipped the guide are existing users: not shown.
+  // The agent-config consent dialog and the guide both wait for it.
+  const ENGINES_FIRST_RUN_KEY = 'ccc-engines-first-run-done';
+  function enginesFirstRunPending() {
+    try {
+      return !localStorage.getItem(ENGINES_FIRST_RUN_KEY) && !localStorage.getItem('ccc-tour-done');
+    } catch (_) { return false; }
+  }
+  if (typeof CONV_POPOUT_MODE === 'undefined' || !CONV_POPOUT_MODE) {
+    window.__cccEnginesFirstRun = enginesFirstRunPending();
+  }
+  function openEnginesFirstRun() {
+    if (!$settingsModal || !window.__cccEnginesFirstRun) return;
+    $settingsModal.querySelector('.settings-modal').classList.add('is-first-run');
+    const intro = document.getElementById('engFirstRunIntro');
+    const foot = document.getElementById('engFirstRunFoot');
+    if (intro) intro.hidden = false;
+    if (foot) foot.hidden = false;
+    _settingsCurrentSection = 'engines';
+    openSettingsModal();
+    refreshEnginesFirstRunFoot();
+  }
+  function refreshEnginesFirstRunFoot() {
+    if (!window.__cccEnginesFirstRun) return;
+    const btn = document.getElementById('engFirstRunContinue');
+    const note = document.getElementById('engFirstRunNote');
+    const ready = _engHubData ? _engHubRows().filter(r => r.installed).length : 0;
+    if (btn) btn.textContent = ready ? 'Continue' : 'Later';
+    if (note) note.textContent = !_engHubData ? '' : ready
+      ? ready + (ready === 1 ? ' engine is installed.' : ' engines are installed.')
+      : 'No engine is installed yet. You can do this later from Settings.';
+  }
+  function finishEnginesFirstRun() {
+    if (!window.__cccEnginesFirstRun) return;
+    window.__cccEnginesFirstRun = false;
+    try { localStorage.setItem(ENGINES_FIRST_RUN_KEY, String(Date.now())); } catch (_) {}
+    const box = $settingsModal && $settingsModal.querySelector('.settings-modal');
+    if (box) box.classList.remove('is-first-run');
+    const intro = document.getElementById('engFirstRunIntro');
+    const foot = document.getElementById('engFirstRunFoot');
+    if (intro) intro.hidden = true;
+    if (foot) foot.hidden = true;
+    // The guide (and the agent-config dialog, which polls) go next.
+    setTimeout(() => { if (typeof maybeStartFirstFlight === 'function') maybeStartFirstFlight(0); }, 400);
+  }
+  const $engFirstRunContinue = document.getElementById('engFirstRunContinue');
+  if ($engFirstRunContinue) $engFirstRunContinue.addEventListener('click', () => closeSettingsModal());
+  if (window.__cccEnginesFirstRun) setTimeout(openEnginesFirstRun, 300);
+
   function closeSettingsModal() {
     if (!$settingsModal) return;
+    finishEnginesFirstRun();
     $settingsModal.classList.remove('open');
     $settingsModal.hidden = true;
     if ($settingsBtn) $settingsBtn.setAttribute('aria-expanded', 'false');
@@ -82068,6 +82142,8 @@
     // be panned out of the visible frame and block invisibly). The Settings
     // "Take the tour" button (force=true) still works everywhere.
     if (window.matchMedia && window.matchMedia('(max-width: 1200px)').matches) return;
+    // The engines screen comes first; finishing it re-invokes this.
+    if (window.__cccEnginesFirstRun) return;
     // Defer while any modal is open so the guide is not covered.
     if (document.querySelector('.upd-overlay.open')) {
       if ((attempt || 0) < 50) setTimeout(() => maybeStartFirstFlight((attempt || 0) + 1), 4000);

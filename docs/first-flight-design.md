@@ -20,16 +20,17 @@ friendly, zero dependencies, lazy until triggered.
 
 ## One linear story
 
-Welcome → CLI setup (install / log in / re-detect) → LHS → reviewing
-existing conversations → status → transcript → search → creating first
-conversation → composer → engine picker → send → Settings → Workers →
-RHS → Queue → first queue → Orchestration → Delegation → health →
-finale.
+Welcome → LHS → reviewing existing conversations → status → transcript
+→ search → creating first conversation → composer → engine picker →
+send → Settings → Workers → RHS → Queue → first queue → Orchestration →
+Delegation → health → finale.
 
-CLI setup is an action step against `/api/onboarding/status`,
-`/api/onboarding/install-terminal`, and `/api/onboarding/login-terminal`.
-It is not a decorative chip row. A fixture payload can be injected so
-tests do not need a real CLI binary.
+Engines setup is deliberately NOT a guide step. On a fresh install the
+first thing shown is the Settings Engines page itself (same component,
+opened in a trimmed first-run layout with a Continue button; gate key
+`ccc-engines-first-run-done`, skipped for users who already have
+`ccc-tour-done`). "Skip guide" does not affect it. The agent-config
+consent dialog and the guide both wait until it is dismissed.
 
 ## Spotlight engine
 
