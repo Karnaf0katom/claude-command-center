@@ -1,0 +1,1 @@
+- On a phone, tapping a session under **Other machines** now opens it full screen (Close returns to the list); before, it opened off screen.

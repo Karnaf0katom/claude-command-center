@@ -327,12 +327,32 @@
     return !!(host && !host.hidden);
   }
 
-  function closeEmbed() {
+  function mobileNav() {
+    var nav = window.cccMobileNav;
+    return nav && nav.isMobile() ? nav : null;
+  }
+
+  // Desktop: over the main pane. Phone: local conversations open in the
+  // slide-up .conv-panel (split mode), so peer ones must too or they land in
+  // the off-screen main area.
+  function embedContainer() {
+    if (mobileNav() && document.body.classList.contains('kanban-split')) {
+      var panel = document.querySelector('.conv-panel');
+      if (panel) return panel;
+    }
+    return document.querySelector('.main');
+  }
+
+  // userClose: the embed's own Close button. On a phone it also slides back to
+  // the list; a local row opening (which closes the embed) must not.
+  function closeEmbed(userClose) {
     var host = $('fedEmbed');
+    var wasShowing = embedShowing();
     if (host) host.hidden = true;
-    var main = document.querySelector('.main');
-    if (main) main.classList.remove('fed-embed-host');
+    if (host && host.parentElement) host.parentElement.classList.remove('fed-embed-host');
     openRef = '';
+    var nav = mobileNav();
+    if (nav && wasShowing && userClose === true) nav.back();
     render();
   }
 
@@ -344,7 +364,10 @@
 
   function ensureHost(main) {
     var host = $('fedEmbed');
-    if (host) return host;
+    if (host) {
+      if (host.parentElement !== main) main.appendChild(host); // viewport crossed the phone breakpoint
+      return host;
+    }
     host = el('div', 'fed-embed');
     host.id = 'fedEmbed';
     var bar = el('div', 'fed-embed-bar');
@@ -353,7 +376,7 @@
     var close = el('button', 'fed-embed-close', 'Close');
     close.type = 'button';
     close.setAttribute('data-role', 'fed-embed-close');
-    close.addEventListener('click', closeEmbed);
+    close.addEventListener('click', function () { closeEmbed(true); });
     bar.appendChild(close);
     host.appendChild(bar);
     main.appendChild(host);
@@ -392,7 +415,7 @@
     if (!row) return;
     var node = nodeById(row.node_id);
     if (blockedReason(node)) return;
-    var main = document.querySelector('.main');
+    var main = embedContainer();
     if (!main) return;
     var host = ensureHost(main);
     host.hidden = false;
@@ -412,6 +435,8 @@
       f.setAttribute('src', url);
     }
     openRef = row.ref;
+    var nav = mobileNav();
+    if (nav) nav.show();
     render();
   }
 
