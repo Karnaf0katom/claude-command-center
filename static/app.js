@@ -62951,7 +62951,23 @@
       }
       (node.children || []).forEach(c => walk(c, depth + 1, sid));
     }
-    (tree.children || []).forEach(c => walk(c, 0, rootSid));
+    // /api/sessions/family answers with the whole family from its topmost
+    // ancestor. When the map is rooted lower (the real top is hidden: other
+    // repo), walking from the top drew the orchestrator's siblings as its
+    // lanes, and with no row here they read "working" forever (CCC-1212).
+    // Walk only the map root's own subtree.
+    function findRoot(node, n) {
+      if (!node || n > 12) return null;
+      if (node.session_id === rootSid) return node;
+      for (const c of (node.children || [])) {
+        const hit = findRoot(c, n + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    const top = findRoot(tree, 0);
+    if (!top) return [];
+    (top.children || []).forEach(c => walk(c, 0, rootSid));
     // Newest first within each depth level.
     out.sort((a, b) => (a.depth - b.depth) || (b.mtime - a.mtime));
     return out;
