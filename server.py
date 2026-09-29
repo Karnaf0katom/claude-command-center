@@ -22526,6 +22526,10 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
         return claude_path, _parse_conversation_event
     codex_path = _resolve_codex_rollout_path(conversation_id)
     if codex_path and codex_path.is_file():
+        if repo_path and _codex_rollout_is_stub(codex_path):
+            exec_log = _find_ccc_spawn_log_for_thread(conversation_id, repo_path)
+            if exec_log:
+                return exec_log, _parse_codex_exec_log_event
         return codex_path, _parse_codex_event
     cursor_path = _cursor_transcript_path(conversation_id)
     if cursor_path and cursor_path.is_file():

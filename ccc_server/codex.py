@@ -13,6 +13,7 @@ import base64
 import copy
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import platform
@@ -8299,6 +8300,92 @@ def _codex_rollout_path_from_row(row):
 def _resolve_codex_rollout_path(thread_id):
     row = _core._codex_thread_row(thread_id)
     return _core._codex_rollout_path_from_row(row)
+
+
+_CODEX_ROLLOUT_STUB_SCAN_LIMIT = 20
+
+
+def _codex_rollout_is_stub(path):
+    """True when a codex rollout never got past session_meta/task_started.
+
+    A `codex exec` fallback whose own rollout writer stalls leaves exactly
+    this shape (OPS-1275): the run streamed a real, complete answer to CCC's
+    own spawn log, but the native rollout it should also have produced has
+    nothing else in it. `session_meta`'s own payload (the full system prompt)
+    is tens of KB by itself, so file size can't gate this check -- read line
+    by line and bail the moment a line proves real content exists, which
+    naturally bounds the cost for large, genuinely-populated rollouts to a
+    couple of lines while still fully confirming an actual stub.
+    """
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    try:
+        saw_any = False
+        for line in itertools.islice(fh, _CODEX_ROLLOUT_STUB_SCAN_LIMIT):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            saw_any = True
+            if ev.get("type") == "session_meta":
+                continue
+            payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            if ev.get("type") == "event_msg" and payload.get("type") == "task_started":
+                continue
+            return False
+        else:
+            # Hit the scan cap without finding real content on an otherwise
+            # large file -- treat as not-a-stub rather than guessing past the
+            # bound; a genuine stub is only ever 2 lines long.
+            if saw_any and fh.readline():
+                return False
+        return saw_any
+    finally:
+        fh.close()
+
+
+_CODEX_STUB_LOG_SCAN_LIMIT = 40
+
+
+def _find_ccc_spawn_log_for_thread(thread_id, repo_path):
+    """Find the CCC spawn log whose exec run produced `thread_id`.
+
+    Only called once a stub rollout (see `_codex_rollout_is_stub`) is
+    already confirmed for a single session a human just opened -- never on
+    a session-list or scan path -- so scanning a handful of this repo's own
+    recent spawn logs stays cheap and bounded.
+    """
+    thread_id = str(thread_id or "").strip()
+    if not thread_id or not repo_path:
+        return None
+    try:
+        log_dir = _core.repo_log_dir(repo_path)
+        candidates = sorted(
+            log_dir.glob("spawn-codex-*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:_CODEX_STUB_LOG_SCAN_LIMIT]
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            with candidate.open("r", encoding="utf-8", errors="replace") as fh:
+                head_lines = list(itertools.islice(fh, 5))
+        except OSError:
+            continue
+        for line in head_lines:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "thread.started" and str(ev.get("thread_id") or "") == thread_id:
+                return candidate
+    return None
 
 
 def _is_codex_session(session_id):

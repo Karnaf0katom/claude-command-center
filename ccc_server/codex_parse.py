@@ -904,6 +904,60 @@ def _parse_codex_event(ev, line_num, token_usage=None, codex_turn_meta=None):
     return None
 
 
+def _parse_codex_exec_log_event(ev, line_num):
+    """Parse one line of a CCC `codex exec` fallback spawn log.
+
+    This is the exec CLI's own --json stdout stream (`item.started/completed`,
+    `turn.started/completed`, dotted type names, no rollout-style `payload`
+    envelope) -- a different producer than the native rollout schema
+    `_parse_codex_event` handles above. It's only ever used as a stub-rollout
+    fallback (`_core._find_ccc_spawn_log_for_thread`, OPS-1275): when the
+    fallback's own native rollout write silently stalled even though the run
+    itself completed and CCC's spawn log captured the whole thing.
+    """
+    ev_type = ev.get("type", "")
+    if ev_type == "item.completed":
+        item = ev.get("item") if isinstance(ev.get("item"), dict) else {}
+        itype = item.get("type")
+        if itype == "agent_message":
+            text = (item.get("text") or "").strip()
+            if not text:
+                return None
+            return {
+                "line": line_num,
+                "ts": None,
+                "type": "assistant",
+                "message_id": f"codex-exec-{line_num}",
+                "blocks": [{"kind": "text", "text": text}],
+            }
+        if itype == "command_execution":
+            # A caller-appended `events.append(parsed)` contract (server.py's
+            # parse_conversation and its windowed variant) means one line in
+            # -> one event dict out here, unlike the live app-server mapper
+            # (_map_tool_item in codex_live_events.py) which can emit a
+            # separate tool_result event because it iterates items, not
+            # fixed JSONL lines. Fold the command into a single tool_use
+            # block rather than adding a second event; the important content
+            # for this fallback view is the final agent_message anyway.
+            command = item.get("command") or ""
+            item_id = item.get("id") or f"codex-exec-{line_num}"
+            return {
+                "line": line_num,
+                "ts": None,
+                "type": "assistant",
+                "message_id": f"codex-exec-tool-{item_id}",
+                "blocks": [{"kind": "tool_use", "name": "Bash", "detail": command, "id": item_id, "command": command}],
+            }
+        return None
+    if ev_type == "turn.completed":
+        usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else None
+        result = {"line": line_num, "ts": None, "type": "result", "duration_ms": "?"}
+        if usage:
+            result["token_usage"] = usage
+        return result
+    return None
+
+
 _pending_resume_queue: dict = {}   # session_id → [text, ...]
 # (session_id, text) -> {"queued_at": epoch, "reason": str}. Why a message is
 # waiting and since when, so the UI can say "queued behind the running turn"
