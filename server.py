@@ -22834,6 +22834,9 @@ def _parse_conversation_windowed(conversation_id, filepath, tail, before, parser
       tail=N            -> the last N lines (initial open of a long file)
       before=L (+ tail) -> the N lines immediately before line L ("load earlier")
 
+    A Codex initial tail may extend backward by up to 1024 lines to retain
+    the user prompt for a turn that began before the requested window.
+
     The full file is still *read* (cheap — a 22MB read is ~14ms), but json.loads
     + the per-event parser run only on the windowed lines, which is where the
     cost is. Returns the normal {events,last_line} plus `first_line` and
@@ -22859,6 +22862,38 @@ def _parse_conversation_windowed(conversation_id, filepath, tail, before, parser
             return {"events": [], "last_line": 0, "first_line": 0, "truncated_before": False}
         total, tail_lines = loaded
         buf.extend(tail_lines)
+        starts_with_user = False
+        if is_codex:
+            for number, raw in tail_lines:
+                try:
+                    first_event = parser(json.loads(raw), number)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if first_event and first_event.get("type") in ("user_text", "assistant", "tool_result"):
+                    starts_with_user = first_event["type"] == "user_text"
+                    break
+        if is_codex and not starts_with_user and tail_lines and tail_lines[0][0] > 1:
+            # A long turn can push its user prompt outside the line window.
+            # Extend to that prompt, retaining intervening rows so paging
+            # remains contiguous and loading older history cannot reorder it.
+            # Decode only candidate user rows during the bounded lookback.
+            extended = _read_tail_lines(filepath, window + 1024)
+            if extended is not None:
+                for idx in range(len(extended[1]) - 1, -1, -1):
+                    number, raw = extended[1][idx]
+                    if number >= tail_lines[0][0]:
+                        continue
+                    if '"user_message"' not in raw and '"UserMessage"' not in raw:
+                        continue
+                    try:
+                        candidate = json.loads(raw)
+                        parsed = parser(candidate, number)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    if parsed and parsed.get("type") == "user_text":
+                        buf = collections.deque(extended[1][idx:])
+                        total = extended[0]
+                        break
     else:
         try:
             with open(filepath, "r") as f:
