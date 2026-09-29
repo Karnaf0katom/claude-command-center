@@ -202,6 +202,57 @@ def tool_live_activity(live: dict, session_id: str | None = None) -> dict:
     return {"live_count": len(out), "sessions": out}
 
 
+# Activity-log verbs that explain why an inject didn't land (CCC-1214).
+_INJECT_TROUBLE_RE = re.compile(r"REJECT|BLOCK|HELD|SKIP|FAIL|ERR|RECOVER|FORCE|WEDGE|DROP|TIMEOUT|MISS", re.I)
+
+
+def tool_inject_diagnostics(sid: str, census_row: dict | None, live: dict | None,
+                            receipt: dict | None, events: list | None) -> dict:
+    """Why a session isn't accepting injected messages: the facts fleet_diagnostics
+    doesn't carry (undelivered receipt, inject rejections/holds in activity.log)."""
+    events = [e for e in (events or []) if isinstance(e, dict)]
+    trouble = [e for e in events if _INJECT_TROUBLE_RE.search(str(e.get("verb") or ""))]
+    live = live if isinstance(live, dict) else {}
+    findings = []
+    outstanding = (receipt or {}).get("outstanding")
+    if outstanding:
+        findings.append(f"undelivered inject {int(outstanding.get('age_s') or 0)}s old "
+                        f"({outstanding.get('source') or '?'}): "
+                        f"\"{str(outstanding.get('text_preview') or '')[:80]}\"; "
+                        f"POST /api/session/{sid}/force-restart re-delivers it (only when the session is idle)")
+    if census_row is None and not live:
+        findings.append("CCC does not know this session id (wrong id, or not a CCC-visible session)")
+    elif not live.get("is_live"):
+        findings.append("no live process: an inject has to resume the session first")
+    for key, why in (("pending_tool", "a tool call is still pending"),
+                     ("needs_approval", "waiting on a permission approval"),
+                     ("question_waiting", "waiting on an answer to its question"),
+                     ("is_compacting", "compacting; input is held until it finishes")):
+        if live.get(key):
+            findings.append(why)
+    seen = set()
+    for e in reversed(trouble):
+        verb = str(e.get("verb") or "")
+        if verb in seen:
+            continue
+        seen.add(verb)
+        m = re.search(r"(?:code|reason)=(\S+)", str(e.get("detail") or ""))
+        findings.append(f"activity.log {verb}" + (f" ({m.group(1)})" if m else "") + f" at {e.get('ts')}")
+    if not findings:
+        findings.append("no delivery problem recorded: the last injects show no rejection, hold or "
+                        "undelivered receipt")
+    return {
+        "session_id": sid,
+        "findings": findings,
+        "live": {k: live.get(k) for k in ("is_live", "state", "sidecar_status", "pending_tool",
+                                          "needs_approval", "question_waiting", "is_compacting")
+                 if k in live},
+        "outstanding_inject": outstanding,
+        "recent_inject_events": [{k: e.get(k) for k in ("ts", "category", "verb", "detail")}
+                                 for e in events[-12:]],
+    }
+
+
 def tool_throughput(window: dict, limit: int = 20) -> dict:
     rows = []
     for s in (window.get("sessions") or [])[: max(1, int(limit))]:
@@ -401,6 +452,14 @@ TOOLS = [
                     "(>3× fleet median over the last 30 min). Call this first for 'is anything "
                     "stuck / burning / waiting on me?'.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "inject_diagnostics",
+     "description": "Why a session is not accepting injected/sent messages: an undelivered inject "
+                    "receipt, inject rejections/holds/blocks from CCC's activity.log (e.g. "
+                    "INJECT_REJECT repo_not_allowed, BLOCKED repeat, Q_HELD headless_turn), and "
+                    "live blockers. Call this when the user says a session won't take a message; "
+                    "fleet_diagnostics does not show these.",
+     "inputSchema": {"type": "object", "properties": {
+         "session_id": {"type": "string"}}, "required": ["session_id"]}},
     {"name": "daily_checkin",
      "description": "The user's standing daily check-in agenda (a markdown file): open items "
                     "grouped by section with ids, status and notes, plus the recent discussion "
@@ -492,6 +551,16 @@ class CccState:
             if row is None and live is None and tp is None:
                 return {"session_id": sid, "known": False}
             return {"session_id": sid, "known": True, "census": row, "live": live, "throughput_24h": tp}
+        if name == "inject_diagnostics":
+            sid = str(args.get("session_id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+                return {"session_id": sid, "error": "session_id must be a full session id"}
+            census = self.get("/api/sessions/census")
+            row = next((x for x in census.get("sessions") or [] if x.get("session_id") == sid), None)
+            live = (self.get("/api/sessions/live-activity").get("sessions") or {}).get(sid)
+            receipt = self.get(f"/api/session/{sid}/inject-receipt")
+            events = self.get(f"/api/activity-log?session_id={sid}&limit=40").get("events")
+            return tool_inject_diagnostics(sid, row, live, receipt, events)
         if name == "daily_checkin":
             if not checkin_enabled():
                 raise KeyError(name)
@@ -588,7 +657,7 @@ You answer questions about the user's past work (across Claude Code, Codex, Kimi
 
 Tools:
 - claude-index: search_sessions (find which sessions are about X), search (specific facts/strings), session_info (confirm a session, see how it ended), show_message, recent_sessions.
-- ccc-state: fleet_diagnostics (stuck / waiting / burning), list_sessions, live_activity, throughput_window, queue_status, session_detail.
+- ccc-state: fleet_diagnostics (stuck / waiting / burning), list_sessions, live_activity, throughput_window, queue_status, session_detail, inject_diagnostics (why a session won't accept a message).
 - ccc-state (brief): daily_brief (the proactive morning brief: changes, stuck items, numbered proposed tickets).
 - ccc-state (actions, propose only): propose_spawn_session, propose_inject, propose_wt_add, propose_wt_comment. These never act; the user confirms in CCC.
 
@@ -597,9 +666,10 @@ Method:
 2. Otherwise call search_sessions once (rephrase with 2-4 topic words), then at most one or two follow-ups. Never loop.
 3. Trust the candidate order: it already ranks by relevance with only a small recency tie-break, and demotes planning-only/self-referential sessions. Don't override it just because a lower-ranked candidate is more recent.
 4. For fleet questions (stuck, burning, waiting, what is running, cost) call fleet_diagnostics or the specific tool once.
-5. Be honest: if nothing matches, say what you searched and that you found nothing.
-6. For a daily brief / "what happened overnight", call daily_brief once and lead with its headline, then stuck items, then the numbered proposals.
-7. Acting: you cannot start, send, file, or post anything yourself. When the user asks you to (start a session, steer or message a session, file or comment on a ticket, "file proposal 2"), call the matching propose_* tool once with complete parameters, put [[action:confirm:ACTION_ID]] on its own line, and say it is waiting for their Confirm. Never say it was done. Don't propose actions the user did not ask for.
+5. "This session", "the session on (the) screen", "this one": the ON SCREEN session named in the prompt. Use its id; never guess another. If the user says it won't take a message, call inject_diagnostics on it and report its findings.
+6. Be honest: if nothing matches, say what you searched and that you found nothing.
+7. For a daily brief / "what happened overnight", call daily_brief once and lead with its headline, then stuck items, then the numbered proposals.
+8. Acting: you cannot start, send, file, or post anything yourself. When the user asks you to (start a session, steer or message a session, file or comment on a ticket, "file proposal 2"), call the matching propose_* tool once with complete parameters, put [[action:confirm:ACTION_ID]] on its own line, and say it is waiting for their Confirm. Never say it was done. Don't propose actions the user did not ask for.
 
 Answer format (plain text, no markdown headers):
 - Lead with the answer in one or two sentences, then 1-4 short supporting lines.
@@ -733,8 +803,20 @@ def _fmt_candidate(i: int, s: dict) -> str:
     return out
 
 
+def focused_line(focused) -> str:
+    """The session the user has open in CCC right now (CCC-1214), or ''."""
+    if not isinstance(focused, dict):
+        return ""
+    sid = str(focused.get("session_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", sid):
+        return ""
+    title = " ".join(str(focused.get("title") or "").split())[:120]
+    return (f"ON SCREEN: the user is viewing session {sid}" + (f' ("{title}")' if title else "")
+            + " in CCC. \"This session\" / \"the session on the screen\" means this one.")
+
+
 def build_prompt(question: str, history: list, candidates: list[dict], snapshot: str,
-                 range_key: str | None, index_available: bool = True) -> str:
+                 range_key: str | None, index_available: bool = True, focused=None) -> str:
     lines = []
     if history:
         lines.append("Earlier in this conversation:")
@@ -749,6 +831,9 @@ def build_prompt(question: str, history: list, candidates: list[dict], snapshot:
         lines.append("")
     lines.append(f"Today: {time.strftime('%Y-%m-%d')}. Time range filter: {range_key or 'any'}.")
     lines.append(snapshot)
+    on_screen = focused_line(focused)
+    if on_screen:
+        lines.append(on_screen)
     lines.append("")
     if candidates:
         src = "claude-index search_sessions" if index_available else "CCC's built-in session search"
@@ -1027,7 +1112,8 @@ def assemble_sources(answer: str, candidates: list[dict], db_path: str = INDEX_D
 
 def run_mazkir(question: str, history: list | None = None, range_key: str | None = None,
                runner=None, base: str | None = None, claude_bin: str | None = None,
-               fetch=None, prefetch_runner=None, db_path: str = INDEX_DB) -> tuple[dict, int]:
+               fetch=None, prefetch_runner=None, db_path: str = INDEX_DB,
+               focused=None) -> tuple[dict, int]:
     """Full Ask pipeline. Returns (response dict, HTTP status)."""
     t0 = time.time()
     question = (question or "").strip()
@@ -1075,7 +1161,8 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
         return cands, snap
 
     def make_prompt(cands: list[dict], snap: str) -> str:
-        return build_prompt(question, history, cands, snap, range_key, index_available=bool(INDEX_BIN))
+        return build_prompt(question, history, cands, snap, range_key, index_available=bool(INDEX_BIN),
+                            focused=focused)
 
     cwd = _scratch_dir()
     env = dict(os.environ)

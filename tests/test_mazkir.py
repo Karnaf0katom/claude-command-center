@@ -78,7 +78,7 @@ class McpProtocolTest(unittest.TestCase):
         with mock.patch.object(mazkir, "checkin_enabled", return_value=True):
             names = [t["name"] for t in self.rpc("tools/list")["result"]["tools"]]
         self.assertEqual(names, ["list_sessions", "live_activity", "throughput_window", "queue_status",
-                                 "session_detail", "fleet_diagnostics", "daily_checkin", "daily_brief",
+                                 "session_detail", "fleet_diagnostics", "inject_diagnostics", "daily_checkin", "daily_brief",
                                  "propose_spawn_session", "propose_inject",
                                  "propose_wt_add", "propose_wt_comment"])
 
@@ -380,6 +380,76 @@ class SourceHygieneTest(unittest.TestCase):
         cands = [{"session_id": "aaaaaa1", "title": "One"}, {"session_id": "bbbbbb2", "title": "Two"}]
         sources, cited, _ = mazkir.assemble_sources("see [[session:bbbbbb2]]", cands, "/nonexistent.db")
         self.assertEqual([(s["id"], s["cited"]) for s in sources], [("bbbbbb2", True), ("aaaaaa1", False)])
+
+
+class FocusedSessionAndInjectTest(unittest.TestCase):
+    """CCC-1214: Mazkir knows the on-screen session and can explain a failed inject."""
+
+    def test_focused_session_lands_in_prompt(self):
+        sid = "8ec0c98c-1127-4fad-a43a-eba5fc437fb9"
+        prompt = mazkir.build_prompt("why won't this session take my message?", [], [], "fleet: x", None,
+                                     focused={"session_id": sid, "title": "Fix  the\nlane map"})
+        self.assertIn(f'ON SCREEN: the user is viewing session {sid} ("Fix the lane map")', prompt)
+        self.assertIn("the ON SCREEN session", mazkir.system_prompt())
+        self.assertIn("inject_diagnostics", mazkir.system_prompt())
+
+    def test_bad_or_missing_focus_is_dropped(self):
+        for focused in (None, {}, {"session_id": ""}, {"session_id": "x y; rm"}, "abc"):
+            self.assertEqual(mazkir.focused_line(focused), "")
+            self.assertNotIn("ON SCREEN", mazkir.build_prompt("q", [], [], "fleet", None, focused=focused))
+
+    def test_inject_diagnostics_surfaces_rejections_and_receipts(self):
+        sid = "s-question"
+        events = [
+            {"ts": "t1", "category": "inject", "verb": "INJECT", "detail": f"session={sid} ok"},
+            {"ts": "t2", "category": "inject", "verb": "INJECT_REJECT",
+             "detail": f"session={sid} code=repo_not_allowed error=x"},
+            {"ts": "t3", "category": "inject", "verb": "Q_HELD", "detail": f"session={sid} reason=headless_turn"},
+        ]
+        receipts = {"outstanding": {"inject_id": "i1", "text_preview": "hello", "source": "ui",
+                                    "sent_ts": 1.0, "age_s": 95.0}}
+
+        def fetch(path):
+            if path.startswith("/api/session/"):
+                return receipts
+            if path.startswith("/api/activity-log"):
+                self.assertIn(f"session_id={sid}", path)
+                return {"ok": True, "events": events}
+            return fake_fetch(path)
+        out = mazkir.CccState("http://x", fetch=fetch).call("inject_diagnostics", {"session_id": sid})
+        text = "\n".join(out["findings"])
+        self.assertIn("undelivered inject 95s old", text)
+        self.assertIn("force-restart", text)
+        self.assertIn("INJECT_REJECT (repo_not_allowed)", text)
+        self.assertIn("Q_HELD (headless_turn)", text)
+        self.assertIn("no live process", text)
+        self.assertEqual(len(out["recent_inject_events"]), 3)
+        self.assertIn("inject_diagnostics", [t["name"] for t in mazkir.available_tools()])
+
+    def test_inject_diagnostics_clean_and_invalid_ids(self):
+        def fetch(path):
+            if path.startswith("/api/session/"):
+                return {"outstanding": None}
+            if path.startswith("/api/activity-log"):
+                return {"events": [{"ts": "t", "category": "inject", "verb": "INJECT", "detail": "ok"}]}
+            return fake_fetch(path)
+        st = mazkir.CccState("http://x", fetch=fetch)
+        out = st.call("inject_diagnostics", {"session_id": "s-working-ok"})
+        self.assertEqual(len(out["findings"]), 1)
+        self.assertIn("no delivery problem recorded", out["findings"][0])
+        self.assertIn("error", st.call("inject_diagnostics", {"session_id": "../etc"}))
+
+    def test_ask_forwards_focus_to_mazkir(self):
+        from ccc_server import ask
+        seen = {}
+
+        def fake_run(question, history, range_key, focused=None):
+            seen["focused"] = focused
+            return {"ok": True}, 200
+        with mock.patch.object(mazkir, "run_mazkir", fake_run), \
+                mock.patch.dict(os.environ, {"CCC_ASK_MODE": "mazkir"}):
+            ask.handle_assistant_ask({"question": "q", "focused": {"session_id": "abc12345"}})
+        self.assertEqual(seen["focused"], {"session_id": "abc12345"})
 
 
 if __name__ == "__main__":

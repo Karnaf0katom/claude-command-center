@@ -678,7 +678,8 @@ def handle_assistant_ask(payload, runner=None):
     if runner is None and os.environ.get("CCC_ASK_MODE", "mazkir").lower() != "legacy":
         try:
             from ccc_server import mazkir as _mazkir
-            body, status = _mazkir.run_mazkir(question, history, payload.get("range"))
+            body, status = _mazkir.run_mazkir(question, history, payload.get("range"),
+                                               focused=payload.get("focused"))
             if status in (200, 400, 401, 504):
                 return body, status
         except Exception:

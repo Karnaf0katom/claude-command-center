@@ -64143,6 +64143,16 @@
     });
 
     let busy = false;
+    // CCC-1214: tell Mazkir which session is open so "this session" /
+    // "the session on the screen" resolves instead of being guessed.
+    function askFocusedSession() {
+      const convId = (typeof currentConversation !== 'undefined') ? currentConversation : '';
+      if (!convId || convId === '__new__') return null;
+      const row = (conversationsData || []).find(c => c && c.id === convId) || null;
+      const sid = (row && row.session_id) || (typeof sessionIdByConv !== 'undefined' && sessionIdByConv[convId]) || '';
+      if (!sid) return null;
+      return { session_id: sid, title: (row && row.display_name) || '' };
+    }
     async function submit() {
       const q = (input.value || '').trim();
       if (!q || busy) return;
@@ -64168,7 +64178,7 @@
         const res = await fetch('/api/assistant/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q, history, range: rangeKey }),
+          body: JSON.stringify({ question: q, history, range: rangeKey, focused: askFocusedSession() }),
         });
         const data = await res.json();
         delete turn.pending;
