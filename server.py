@@ -25597,6 +25597,7 @@ _BACKGROUND_API_READ_PATHS = frozenset({
     "/api/sessions/live-activity",
     "/api/system/services",
     "/api/system/scheduled-jobs",
+    "/api/jobs",
     "/api/throughput/daily",
     "/api/vercel-deploy",
     "/api/watchtower/service/status",
@@ -25769,6 +25770,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             force = (qs.get("force", ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
             self.send_json(collect_scheduled_jobs(force=force))
+        elif path == "/api/jobs":
+            # Jobs tab feed: Hermes systemd timers + scheduled laptop launchd
+            # agents with outcomes. Serves the cache; refreshes in background.
+            from ccc_server.scheduled_jobs_feed import get_jobs_feed
+            self.send_json(get_jobs_feed())
         elif path == "/api/system/scheduled-jobs/log":
             from ccc_server.scheduled_jobs import get_scheduled_job_log
             qs = urllib.parse.parse_qs(parsed.query)

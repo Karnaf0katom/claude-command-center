@@ -372,6 +372,8 @@ def get_scheduled_job_log(job_id, max_lines=50):
 
     if job_id.startswith("hermes:"):
         unit = job_id.split(":", 1)[1]
+        if not re.fullmatch(r"[A-Za-z0-9@_.\-]+", unit):
+            return {"ok": False, "id": job_id, "error": "Invalid unit name", "log": ""}
         try:
             res = subprocess.run(
                 [
