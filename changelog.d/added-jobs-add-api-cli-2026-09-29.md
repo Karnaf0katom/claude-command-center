@@ -1,0 +1,1 @@
+- `POST /api/jobs/add` and `ccc jobs add` create a scheduled job through an agent session (host, repo, what, when); `ccc jobs ls` lists jobs with status, last/next run and outcome. The Jobs tab's + Add dialog now uses the same endpoint.

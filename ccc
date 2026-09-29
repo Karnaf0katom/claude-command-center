@@ -36,6 +36,10 @@ command, without opening the dashboard:
     ccc consent show <item>                     # exact diff for one item
     ccc consent approve <item...|all>           # or: decline / revoke <item...|all>
 
+    ccc jobs ls [--host hermes]                 # scheduled jobs: status, last/next run, outcome
+    ccc jobs add --host hermes --repo BYM --what "..." --when "hourly" [--name slug] [--wait]
+                                                # an agent session creates the job (POST /api/jobs/add)
+
     ccc brain <subcmd> ...    # passthrough to an optional private plugin (no-op if unconfigured)
 
 <session> is a session id, a unique id prefix, or a (unique, case-
@@ -71,7 +75,7 @@ PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
                "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where",
-               "brain", "consent")
+               "brain", "consent", "jobs")
 
 BRAIN_CONFIG_FILE = os.path.expanduser("~/.claude/command-center/brain-plugin.json")
 
@@ -1573,6 +1577,136 @@ def cmd_rebind_report_to(args):
     return 0
 
 
+def _fmt_rel(ts, now=None):
+    """'3m ago' / 'in 2h05m' for an ISO timestamp; '-' when absent."""
+    dt = _parse_iso(ts)
+    if dt is None:
+        return "-"
+    now = now or datetime.now(timezone.utc)
+    delta = (dt - now).total_seconds()
+    return f"in {_fmt_age(delta)}" if delta >= 0 else f"{_fmt_age(-delta)} ago"
+
+
+def _job_line(job, now=None):
+    outcome = " ".join(str(job.get("outcome") or "").split())
+    if len(outcome) > 70:
+        outcome = outcome[:69] + "…"
+    return (
+        f"{str(job.get('host') or '?'):<7} {str(job.get('name') or '?'):<40} "
+        f"{str(job.get('status') or '?'):<9} last {_fmt_rel(job.get('last_run_at'), now):<10} "
+        f"next {_fmt_rel(job.get('next_run_at'), now):<10} {outcome}"
+    ).rstrip()
+
+
+def cmd_jobs_ls(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(f"ccc: no server found — is CCC running? (looked for --server, $CCC_SERVER, {PORT_FILE})",
+              file=sys.stderr)
+        return 1
+    try:
+        payload = _get_json(base, "/api/jobs", timeout=30)
+    except OSError as e:
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    jobs = [j for j in (payload.get("jobs") or []) if not args.host or j.get("host") == args.host]
+    if args.json:
+        print(json.dumps(dict(payload, jobs=jobs), indent=2))
+        return 0
+    for host, info in sorted((payload.get("hosts") or {}).items()):
+        if args.host and host != args.host:
+            continue
+        if isinstance(info, dict) and info.get("status") not in (None, "online"):
+            print(f"{host}: {info.get('status')}{' — ' + info['error'] if info.get('error') else ''}",
+                  file=sys.stderr)
+    now = datetime.now(timezone.utc)
+    for j in jobs:
+        print(_job_line(j, now))
+    if not jobs:
+        print("(no jobs)", file=sys.stderr)
+    return 0
+
+
+def _wait_for_turn_end(base, sid, timeout_s, poll_s=5.0):
+    """Block until the spawned session stops working; return (ok, text).
+    Polls GET /api/session/<sid> (state + last_assistant_text)."""
+    import time
+    deadline = time.monotonic() + timeout_s
+    seen_working = False
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        try:
+            d = _get_json(base, f"/api/session/{urllib.parse.quote(sid, safe='')}", timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                return False, f"HTTP {e.code}"
+            d = {}
+        except OSError:
+            d = {}
+        state = d.get("state") if d.get("ok") else None
+        if state == "working":
+            seen_working = True
+        # A brand-new transcript can read as idle before the first turn starts;
+        # accept a non-working state once the turn was seen or after a grace.
+        elif state and (seen_working or time.monotonic() - started > 60):
+            return True, (d.get("last_assistant_text") or "").strip()
+        time.sleep(poll_s)
+    return False, "timeout"
+
+
+def cmd_jobs_add(args):
+    base = _resolve_server(args.server)
+    if not base:
+        print(f"ccc: no server found — is CCC running? (looked for --server, $CCC_SERVER, {PORT_FILE})",
+              file=sys.stderr)
+        return 1
+    payload = {"host": args.host, "repo": args.repo, "what": args.what, "when": args.when,
+               "cwd": os.getcwd()}
+    for key in ("name", "model", "engine", "effort"):
+        if getattr(args, key, None):
+            payload[key] = getattr(args, key)
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        payload["report_to"] = os.environ["CLAUDE_CODE_SESSION_ID"]
+    else:
+        chain = _caller_pid_chain()
+        if chain:
+            payload["caller_pids"] = chain
+            payload["caller_cwd"] = os.getcwd()
+    try:
+        status, result = _post_json(base, "/api/jobs/add", payload, timeout=90)
+    except OSError as e:
+        print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
+        return 1
+    if not result.get("ok"):
+        if args.json:
+            print(json.dumps(result, indent=2))
+        print(f"ccc: jobs add failed: {result.get('error') or f'HTTP {status}'}", file=sys.stderr)
+        return 1
+    sid = result.get("session_id") or ""
+    if not args.wait:
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"spawned session {sid or '?'} ({result.get('session_name')}) to create the job")
+            print("track it: ccc sessions   list jobs: ccc jobs ls")
+        return 0
+    if not sid:
+        print("ccc: spawn returned no session id; cannot --wait", file=sys.stderr)
+        return 1
+    print(f"spawned session {sid} ({result.get('session_name')}); waiting for it to finish...",
+          file=sys.stderr)
+    ok, text = _wait_for_turn_end(base, sid, args.timeout)
+    if args.json:
+        print(json.dumps(dict(result, wait_ok=ok, reply=text if ok else None,
+                              wait_error=None if ok else text), indent=2))
+        return 0 if ok else 1
+    if not ok:
+        print(f"ccc: jobs add --wait: {text} (session {sid} may still be running)", file=sys.stderr)
+        return 1
+    print(text or "(session ended its turn with no reply text)")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # `ccc` is also the Homebrew launcher's name (foreground server /
@@ -1854,6 +1988,40 @@ def main(argv=None):
     p.add_argument("--diff", action="store_true", help="list: include each item's details and diff")
     p.add_argument("--json", action="store_true", help="raw JSON")
     p.set_defaults(func=cmd_consent)
+
+    p = sub.add_parser(
+        "jobs",
+        help="list scheduled jobs, or create one via an agent session",
+        description="Scheduled jobs (Hermes systemd timers + laptop launchd agents), "
+                    "the same data as the Jobs tab.",
+    )
+    jsub = p.add_subparsers(dest="jobs_command", required=True)
+    jp = jsub.add_parser("ls", help="one line per job: host, name, status, last run, next run, outcome")
+    jp.add_argument("--host", choices=("hermes", "laptop"), help="only this host's jobs")
+    jp.add_argument("--json", action="store_true", help="raw /api/jobs JSON (host-filtered)")
+    jp.set_defaults(func=cmd_jobs_ls)
+    jp = jsub.add_parser(
+        "add",
+        help="spawn an agent session that creates a scheduled job",
+        description="POST /api/jobs/add: the server composes the job prompt and "
+                    "spawns a session that creates the systemd timer (hermes) or "
+                    "LaunchAgent (laptop) and checks it appears in `ccc jobs ls`.",
+    )
+    jp.add_argument("--host", required=True, choices=("hermes", "laptop"))
+    jp.add_argument("--repo", required=True,
+                    help="repo path or folder name (hermes: /home/hermes/Apps/<folder>)")
+    jp.add_argument("--what", required=True, help="what the job should do, in plain English")
+    jp.add_argument("--when", required=True, help='when it runs, e.g. "hourly", "daily 7am"')
+    jp.add_argument("--name", help="kebab-case job name (default: the agent picks one)")
+    jp.add_argument("--model", help="model for the spawned session (see `ccc models`)")
+    jp.add_argument("--engine", help="engine for the spawned session")
+    jp.add_argument("--effort", help="reasoning effort for the spawned session")
+    jp.add_argument("--wait", action="store_true",
+                    help="block until the session ends its turn and print its final reply")
+    jp.add_argument("--timeout", type=float, default=1800.0, metavar="SECONDS",
+                    help="with --wait: give up after this long (default 1800)")
+    jp.add_argument("--json", action="store_true", help="raw result JSON")
+    jp.set_defaults(func=cmd_jobs_add)
 
     p = sub.add_parser(
         "brain",

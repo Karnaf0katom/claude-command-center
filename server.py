@@ -32853,6 +32853,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 dry_run=bool(payload.get("dry_run") or payload.get("dryRun"))
             )
             self.send_json(result)
+        elif path == "/api/jobs/add":
+            # Create a scheduled job through an agent session: validate,
+            # compose the prompt server-side, spawn via /api/sessions/spawn.
+            # Shared by the Jobs tab "+ Add" dialog and `ccc jobs add`.
+            from ccc_server.jobs_add import handle_jobs_add
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = None
+            result, status = handle_jobs_add(
+                payload, _known_repo_paths(), self.server.server_address[1],
+                str(CCC_ROOT), user_agent=(self.headers.get("User-Agent") or "").strip(),
+            )
+            if result.get("ok"):
+                _log_activity("jobs", "ADD", f"host={result['host']} repo={result['repo']} sid={result['session_id']}")
+            self.send_json(result, status)
         elif path == "/api/sessions/spawn":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

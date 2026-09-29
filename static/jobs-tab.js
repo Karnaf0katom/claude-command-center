@@ -288,46 +288,12 @@
   }
 
   // ── "+ Add": create a job through an agent session ──────────────────────
-  // CCC never writes systemd units or LaunchAgents itself. The dialog composes
-  // a prompt and spawns a normal session (window.cccSpawnPromptSession, the
-  // composer's Run path) that creates the job and checks it shows up here.
-  function composePrompt(f) {
-    const host = f.host === 'laptop' ? 'laptop' : 'hermes';
-    const lines = [
-      'Create a new scheduled job and confirm it shows up in the CCC Jobs tab.',
-      '',
-      'What it should do: ' + f.what,
-      'When it should run: ' + f.when,
-      'Repo / project folder: ' + f.repo,
-      '',
-      'Pick a short kebab-case job name from what it does. Write the script the job runs inside the repo (committed there, not in /tmp).',
-    ];
-    if (host === 'hermes') {
-      lines.push(
-        'Host: the Hermes VM (reach it with `ssh hermes`; use sudo there).',
-        '- Create /etc/systemd/system/<name>.service and /etc/systemd/system/<name>.timer.',
-        '- The service has a one-line Description=, WorkingDirectory= set to the repo checkout on Hermes (if the folder above is a laptop path, use the matching checkout on the VM), and User=hermes.',
-        '- Translate the schedule into OnCalendar= (or OnUnitActiveSec= for "every N" schedules) on the timer.',
-        '- Run `sudo systemctl daemon-reload` and `sudo systemctl enable --now <name>.timer`.'
-      );
-    } else {
-      lines.push(
-        'Host: this laptop (launchd).',
-        '- Create ~/Library/LaunchAgents/<label>.plist, where <label> uses the same reverse-DNS prefix the existing scheduled LaunchAgents there use, followed by <name>.',
-        '- Use StartCalendarInterval for clock times or StartInterval for "every N" schedules; set WorkingDirectory to the repo.',
-        '- StandardOutPath and StandardErrorPath go under ~/Library/Logs/<name>/.',
-        '- Load it with `launchctl bootstrap gui/$(id -u) <plist>`.'
-      );
-    }
-    lines.push(
-      '',
-      'The job script must end by printing one line `CCC_OUTCOME: <one plain sentence about what this run did>` so the Jobs row shows a readable outcome, and must print any ticket refs or PR URLs it creates.',
-      '',
-      'Then force-refresh GET /api/jobs on the CCC dashboard (it caches for ~45s) until the new job is listed, and report its name, schedule, next run time, and the files you created.'
-    );
-    return lines.join('\n');
-  }
-
+  // CCC never writes systemd units or LaunchAgents itself. The dialog sends
+  // the fields to POST /api/jobs/add (via window.cccSpawnPromptSession, so the
+  // composer's engine/model and spawn placeholder apply); the server composes
+  // the prompt (ccc_server/jobs_add.py) and spawns a normal session that
+  // creates the job and checks it shows up here. `ccc jobs add` uses the same
+  // endpoint.
   function closeAddDialog() {
     const d = document.getElementById('jobsAddDialog');
     if (d) d.remove();
@@ -389,7 +355,7 @@
       // Spawn where the job lives when that folder is on this machine.
       const local = _repoPaths.indexOf(f.repo) !== -1;
       const res = await window.cccSpawnPromptSession({
-        prompt: composePrompt(f),
+        job: f,
         name: 'New job: ' + f.what.split('\n')[0].slice(0, 60),
         repoPath: local ? f.repo : '',
       });
@@ -478,5 +444,5 @@
     else render(); // keep relative times fresh
   }, 5000);
 
-  window.CCCJobsTab = { mount: mount, attentionCount: attentionCount, composePrompt: composePrompt, openAddDialog: openAddDialog };
+  window.CCCJobsTab = { mount: mount, attentionCount: attentionCount, openAddDialog: openAddDialog };
 })();

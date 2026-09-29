@@ -70673,11 +70673,14 @@
   // does (engine/model/effort from the composer, optimistic placeholder that
   // auto-selects and follows the spawn). For surfaces outside this closure,
   // e.g. the Jobs tab's "+ Add" (static/jobs-tab.js). Resolves {ok, error?}.
+  // opts.job ({host, repo, what, when, name?}) routes through POST
+  // /api/jobs/add instead, which composes the job prompt server-side.
   window.cccSpawnPromptSession = async function (opts) {
-    const prompt = String((opts && opts.prompt) || '').trim();
+    const job = (opts && opts.job) || null;
+    const prompt = job ? '' : String((opts && opts.prompt) || '').trim();
     const repoPath = String((opts && opts.repoPath) || '').trim()
       || (typeof getSpawnCwd === 'function' && getSpawnCwd()) || '';
-    if (!prompt) return { ok: false, error: 'empty prompt' };
+    if (!prompt && !job) return { ok: false, error: 'empty prompt' };
     const engine = getSpawnEngine();
     const subject = String((opts && opts.name) || '').trim() || (prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt);
     const tempPid = 'tmp-' + Date.now();
@@ -70690,10 +70693,19 @@
     };
     try {
       const choice = currentSpawnChoice(engine);
-      const body = buildSpawnBody({ engine, model: choice.model, effort: choice.effort, prompt, repoPath });
-      if (opts && opts.name) body.name = String(opts.name).slice(0, 80);
+      let body;
+      if (job) {
+        // Same engine/model/effort sanitising as a composer spawn.
+        const sb = buildSpawnBody({ engine, model: choice.model, effort: choice.effort, prompt: '' });
+        body = Object.assign({}, job, { engine, cwd: repoPath });
+        if (sb.model) body.model = sb.model;
+        if (sb.reasoning_effort) body.effort = sb.reasoning_effort;
+      } else {
+        body = buildSpawnBody({ engine, model: choice.model, effort: choice.effort, prompt, repoPath });
+        if (opts && opts.name) body.name = String(opts.name).slice(0, 80);
+      }
       body.idempotency_key = durableActionId('spawn');
-      const res = await fetch(spawnEndpointForEngine(engine), {
+      const res = await fetch(job ? '/api/jobs/add' : spawnEndpointForEngine(engine), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
