@@ -58,6 +58,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ccc_server import core as _core
+from ccc_server import wt_review as _wt_review
 
 CONFIG_FILE_NAME = "decision-inbox.json"
 STATE_DIR_NAME = "decision-inbox"
@@ -1068,10 +1069,16 @@ def queue_github_repos(reader=None):
     return out
 
 
-def decision_inbox_api_payload(*, cards=None, cfg=None):
+def decision_inbox_api_payload(*, cards=None, cfg=None, review_cards=None):
     cfg = cfg or load_config()
     cards = load_cards() if cards is None else cards
     ordered = sorted(cards.values(), key=lambda c: (c.get("status") != "open", -(_di_parse_iso(c.get("created_at")) or 0)))
+    # WatchTower tickets awaiting a person's review (WT-5): derived live from
+    # the queue store on every read, never persisted, so a card leaves the
+    # moment its ticket leaves in_review. They lead: each one holds dependents.
+    if review_cards is None:
+        review_cards = _wt_review.live_review_cards()
+    ordered = list(review_cards) + ordered
     with _di_lock:
         findings = list(_last_findings["governor"])
         findings_at = _last_findings["at"]
@@ -1168,7 +1175,10 @@ def perform_action(action, *, title="", cfg=None, spawn=None, inject=None,
     return {"ok": False, "error": f"unknown action kind {kind!r}"}
 
 
-def decision_inbox_decide(card_id, option_index, *, cards=None, now=None, persist=True, **hooks):
+def decision_inbox_decide(card_id, option_index, *, cards=None, now=None, persist=True,
+                          reason="", review_runner=None, **hooks):
+    if str(card_id or "").startswith(_wt_review.CARD_ID_PREFIX):
+        return _decide_review_card(str(card_id), option_index, reason=reason, runner=review_runner)
     now = time.time() if now is None else now
     cards = load_cards() if cards is None else cards
     card = cards.get(str(card_id))
@@ -1192,6 +1202,20 @@ def decision_inbox_decide(card_id, option_index, *, cards=None, now=None, persis
     if persist:
         save_cards(cards)
     return {"ok": bool(result.get("ok")), "card": card, "result": result}
+
+
+def _decide_review_card(card_id, option_index, *, reason="", runner=None):
+    """Accept / Reject on a live WatchTower review card (not in cards.json)."""
+    ref = card_id[len(_wt_review.CARD_ID_PREFIX):]
+    try:
+        idx = int(option_index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "unknown option"}
+    if idx not in (0, 1):
+        return {"ok": False, "error": "unknown option"}
+    verb = "accept" if idx == 0 else "reject"
+    result = _wt_review.run_review_verb(ref, verb, reason=reason, runner=runner)
+    return {"ok": bool(result.get("ok")), "result": result, "error": result.get("error")}
 
 
 def decision_inbox_dismiss(card_id, *, cards=None, now=None, persist=True):

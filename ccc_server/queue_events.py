@@ -170,8 +170,10 @@ def _queue_history_path():
 
 def _current_queue_counts(items):
     return {
-        "open": sum(1 for it in items if it.get("status") not in ("closed", "in_progress")),
+        "open": sum(1 for it in items if it.get("status") not in ("closed", "in_progress", "in_review")),
         "in_progress": sum(1 for it in items if it.get("status") == "in_progress"),
+        # WT-5 gate stage: not closed (dependents still wait), not claimable.
+        "in_review": sum(1 for it in items if it.get("status") == "in_review"),
         "closed": sum(1 for it in items if it.get("status") == "closed"),
         "needs_input": sum(
             1 for it in items
@@ -207,7 +209,7 @@ def _record_queue_snapshot_if_due(items):
     counts = _current_queue_counts(items)
     row = {
         "ts": now,
-        "open": counts["open"] + counts["in_progress"],
+        "open": counts["open"] + counts["in_progress"] + counts["in_review"],
         "needs_input": counts["needs_input"],
         "closed": counts["closed"],
     }
@@ -745,6 +747,7 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
     gated_by_q = {}
     claimable_by_q = {}  # queue → open items a worker is ALLOWED to claim
     in_progress_by_q = {}  # queue → items currently claimed/in progress
+    in_review_by_q = {}  # queue → items closed by a worker, awaiting a gate (WT-5)
     last_activity_q = {}  # queue → most-recent item-touch epoch (any status)
     last_progress_q = {}  # queue → most-recent close OR claim epoch (WT health semantics)
     try:
@@ -760,6 +763,8 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
                 close_ts = _core._uxq_parse_ts(it.get("closed_at"))
                 if close_ts and close_ts > last_progress_q.get(qn, 0):
                     last_progress_q[qn] = close_ts
+            if it.get("status") == "in_review":
+                in_review_by_q[qn] = in_review_by_q.get(qn, 0) + 1
             if it.get("status") == "in_progress":
                 in_progress_by_q[qn] = in_progress_by_q.get(qn, 0) + 1
                 # A fresh claim means a worker just started on previously-idle
@@ -904,6 +909,7 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
             "depth": depth,
             "claimable": claimable,
             "in_progress": int(in_progress_by_q.get(q, 0)),
+            "in_review": int(in_review_by_q.get(q, 0)),
             "closed": int(closed_by_q.get(q, 0)),
             "total": int(total_by_q.get(q, 0)),
             "gated": int(gated_by_q.get(q, 0)),

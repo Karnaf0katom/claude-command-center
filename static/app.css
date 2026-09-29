@@ -22782,6 +22782,9 @@ body.has-gc-reader .pwa-install-banner {
 .fq-row.is-blocked { background: rgba(248,81,73,0.06); }
 .fq-row.is-blocked .fq-status { background: var(--red, #f85149); }
 .fq-row.is-blocked .fq-note { color: #ff7b72; }
+/* in_review (WT-5 gate): closed by its worker, waiting on accept/reject. */
+.fq-chip.fq-review { background: rgba(163,113,247,0.20); color: #d2a8ff; }
+.fq-row.is-in_review .fq-status { background: #a371f7; box-shadow: 0 0 0 3px rgba(163,113,247,0.18); }
 /* Blocked panel inside the ticket detail modal. */
 /* ── Ticket Detail Modal (world-class redesign CCC-387/388) ── */
 .uxq-td-overlay {

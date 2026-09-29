@@ -45942,6 +45942,16 @@
   // Keep the two Queue filters composable. This is deliberately independent
   // of scope, so All queues applies the same status/type intersection as a
   // repo-derived queue on every refresh.
+  // WT-5 acceptance gates: a worker's close lands a gated ticket in
+  // `in_review` until its pending stage passes. `gate_pending` is `verify`
+  // (independent verifier), `review` (the submitter) or `review:<who>`.
+  // Mirrors watchtower.queue.gate_stage_label.
+  function _uxqReviewLabel(it) {
+    const stage = String((it && it.gate_pending) || 'review');
+    const who = stage === 'verify' ? 'verifier'
+      : stage.indexOf('review:') === 0 ? (stage.slice(7).trim() || 'submitter') : 'submitter';
+    return 'awaits review · ' + who;
+  }
   function _uxqFilterItems(items, statusFilter, typeFilter) {
     const source = Array.isArray(items) ? items : [];
     const recentClosedCutoff = Date.now() - 12 * 60 * 60 * 1000;
@@ -46577,7 +46587,7 @@
     // Only queues with something in them can be "not draining". A configured
     // but empty queue is idle, not stuck, and counting it would make the strip
     // cry wolf on every quiet morning.
-    const live = queues.filter(q => num(q.depth) || num(q.in_progress) || num(q.workers));
+    const live = queues.filter(q => num(q.depth) || num(q.in_progress) || num(q.in_review) || num(q.workers));
     const open = live.reduce((n, q) => n + num(q.depth), 0);
     const inProgress = live.reduce((n, q) => n + num(q.in_progress), 0);
     const draining = live.filter(q => q.auto_drain).length;
@@ -46598,6 +46608,12 @@
         : 'No queue is holding open or claimed work right now.'));
     chips.push(chip('is-quiet', '<b>' + open + '</b> open · <b>' + inProgress + '</b> in progress',
       'Open tickets and tickets currently claimed by a worker, across every active queue.'));
+    const inReview = live.reduce((n, q) => n + num(q.in_review), 0);
+    if (inReview) {
+      chips.push(chip('is-warn', '<b>' + inReview + '</b> awaiting review',
+        'Closed by a worker but held by an acceptance gate (WT-5). Dependents wait until '
+        + 'each one is accepted: ' + names(live.filter(q => num(q.in_review)), 'queue')));
+    }
     if (stuck.length) {
       chips.push(chip('is-bad', '<b>' + stuck.length + '</b> stuck',
         'Not draining: ' + names(stuck, 'queue')
@@ -47270,7 +47286,8 @@
       return '<span class="uxq-td-badge uxq-td-badge-jump ' + cls + '" data-jump-target="' + escapeAttr(target)
         + '" role="button" tabindex="0" title="Jump to section">' + escapeHtml(label) + '</span>';
     }
-    const topBadges = _jumpBadge(statusClass, status, statusJumpTarget)
+    const topBadges = _jumpBadge(statusClass, status === 'in_review' ? _uxqReviewLabel(item) : status,
+        status === 'in_review' ? '.uxq-td-review-sec' : statusJumpTarget)
       + (item.lane ? _jumpBadge('uxq-bs-lane', item.lane, '.uxq-td-pg-origin') : '')
       + (item.priority ? _jumpBadge(priorityClass, item.priority, '.uxq-td-pg-properties') : '')
       + (item.type ? _jumpBadge('uxq-bs-type', item.type, '.uxq-td-pg-properties') : '');
@@ -47437,6 +47454,10 @@
       if (type === 'answer') return _tlEvt('uxq-tl-answer', _tlHead('Answered', ev), _tlText(ev.text, 'uxq-tl-sub-note uxq-tl-sub-answer'));
       if (type === 'comment') return _tlEvt('uxq-tl-comment', _tlHead('Comment', ev), _tlText(ev.text));
       if (type === 'reopen') return _tlEvt('uxq-tl-reopen', _tlHead('Reopened', ev), _tlText(ev.reason));
+      // WT-5 gate events: the close landed in review, then accept / reject.
+      if (type === 'in_review') return _tlEvt('uxq-tl-progress', _tlHead('Awaiting review', ev), '');
+      if (type === 'accept') return _tlEvt('uxq-tl-closed', _tlHead('Accepted', ev), '');
+      if (type === 'reject') return _tlEvt('uxq-tl-reopen', _tlHead('Rejected', ev), _tlText(ev.reason || ev.text));
       // Prefer the ticket's live `resolution` over the close event's
       // snapshot: `wt ack` mutates the live field (see queue.ack_resolution)
       // and never rewrites the historical close record, so the snapshot
@@ -47457,7 +47478,8 @@
       : '';
 
     if (!item.closed_at) {
-      const verb = status === 'in_progress' ? 'In progress' : status === 'blocked' ? 'Agent needs your input' : 'Open';
+      const verb = status === 'in_progress' ? 'In progress' : status === 'blocked' ? 'Agent needs your input'
+        : status === 'in_review' ? 'Closed by worker, ' + _uxqReviewLabel(item) : 'Open';
       tlHtml += _tlEvt('uxq-tl-open',
         '<span class="uxq-tl-verb">' + verb + '</span>' + _tlWorker(item.claimed_by), '');
     }
@@ -47639,7 +47661,21 @@
     // resolution summary the way a worker's `wt close --summary` does —
     // "Close" in the footer only closed the modal. Same textarea treatment
     // as Reopen above.
-    const closeSectionHtml = item.status !== 'closed'
+    // in_review (WT-5 gate): the worker already closed it; what is left is
+    // Accept (close + unblock dependents) or Reject (back to open with a
+    // reason, worker resumes) -- `wt accept` / `wt reject` server-side.
+    const reviewSectionHtml = item.status === 'in_review'
+      ? '<div class="uxq-td-sec uxq-td-review-sec">'
+        + '<div class="uxq-td-sec-label">Review (' + escapeHtml(_uxqReviewLabel(item)) + ')</div>'
+        + (item.accept ? '<div class="uxq-tl-sub-note">Accept when: ' + escapeHtml(item.accept) + '</div>' : '')
+        + '<textarea class="uxq-td-review-input" rows="2" placeholder="Reject reason: what must change (required to reject)" aria-label="Reject reason"></textarea>'
+        + '<div class="uxq-reopen-row">'
+        + '<button type="button" class="ann-btn ann-primary uxq-td-review-accept">Accept</button>'
+        + '<button type="button" class="ann-btn uxq-td-review-reject">Reject</button>'
+        + '</div>'
+        + '</div>'
+      : '';
+    const closeSectionHtml = item.status === 'in_review' ? reviewSectionHtml : item.status !== 'closed'
       ? '<div class="uxq-td-sec uxq-td-close-sec">'
         + '<div class="uxq-td-sec-label">Mark as Closed</div>'
         + '<textarea class="uxq-td-mark-closed-input" rows="3" placeholder="Resolution summary (optional)" aria-label="Resolution summary"></textarea>'
@@ -47912,6 +47948,40 @@
         });
       }
     }
+
+    // Accept / Reject an in_review ticket (WT-5 review gate).
+    const reviewInput = modal.querySelector('.uxq-td-review-input');
+    modal.querySelectorAll('.uxq-td-review-accept, .uxq-td-review-reject').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const accept = btn.classList.contains('uxq-td-review-accept');
+        const reason = reviewInput ? reviewInput.value.trim() : '';
+        if (!accept && !reason) {
+          showOpToast('Say what must change before rejecting', 'error');
+          if (reviewInput) reviewInput.focus();
+          return;
+        }
+        btn.disabled = true;
+        try {
+          const res = await fetch(accept ? '/api/ux-fixes/accept' : '/api/ux-fixes/reject', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ref, reason }),
+          });
+          const d = await res.json().catch(() => ({}));
+          if (res.ok && d.ok) {
+            showOpToast(accept ? 'Accepted' : 'Rejected, back to open', 'success');
+            _uxqHealthCache.ts = 0;
+            _uxqItemsCache.ts = 0;
+            _renderQueuePanel(); close();
+          } else {
+            showOpToast((accept ? 'Accept' : 'Reject') + ' failed: ' + (d.error || res.status), 'error');
+            btn.disabled = false;
+          }
+        } catch (e) {
+          showOpToast((accept ? 'Accept' : 'Reject') + ' failed: ' + e, 'error');
+          btn.disabled = false;
+        }
+      });
+    });
 
     // Add comment (any status) — logs a timestamped status update to the
     // canonical Activity timeline, without touching item.status.
@@ -48406,7 +48476,7 @@
       const _operationalBucket = it => {
         const status = _effectiveStatus(it);
         if (_isLiveWip(it)) return 0;
-        if (status === 'blocked') return 1;
+        if (status === 'blocked' || status === 'in_review') return 1;
         if (_hasUnresolved(it)) return 2;
         if (_isWaitingToDrain(it)) return 3;
         if (status === 'closed') return 5;
@@ -48450,6 +48520,11 @@
           } else {
             c.push('<span class="fq-chip fq-blocked" title="' + escapeAttr(it.block_question || 'needs human input') + '">needs input</span>');
           }
+        }
+        if (it.status === 'in_review') {
+          const label = _uxqReviewLabel(it);
+          c.push('<span class="fq-chip fq-review" title="' + escapeAttr('Closed by its worker, ' + label + ' (wt accept / wt reject)') + '">'
+            + escapeHtml(label.replace('awaits review · ', 'review · ')) + '</span>');
         }
         const unresolvedNotes = _uxqUnresolvedNotes(it);
         if (it.status === 'closed' && unresolvedNotes.length) {
@@ -48524,13 +48599,15 @@
         const statusTitle = blocked ? 'needs input' : hasUnresolved ? 'closed - unresolved follow-up'
           : unverifiedClaim ? 'claimed by ' + String(it.claimed_by || '') + ', liveness unverified'
           : staleClaim ? 'stale claim - no current live worker'
-          : queuedToRun ? 'queued to run' : status;
+          : queuedToRun ? 'queued to run'
+          : status === 'in_review' ? _uxqReviewLabel(it) + ' (wt accept / wt reject)' : status;
         const statusAction = (status === 'open' && !staleClaim)
           ? '<button class="fq-status fq-status-action fq-run' + (queuedToRun ? ' is-queued-run' : '')
             + '" data-ref="' + escapeAttr(ref) + '" data-run-cancel="' + (queuedToRun ? '1' : '0') + '"'
             + (runBusy ? ' disabled aria-busy="true"' : '')
             + ' title="' + escapeAttr(runTitle) + '" aria-label="' + escapeAttr(runTitle) + '">▶</button>'
-          : '<span class="fq-status" title="' + escapeAttr(statusTitle) + '">' + escapeHtml(status) + '</span>';
+          : '<span class="fq-status" title="' + escapeAttr(statusTitle) + '">'
+            + escapeHtml(status === 'in_review' ? _uxqReviewLabel(it) : status) + '</span>';
         const ageSrc = status === 'closed'
           ? (it.closed_at || it.updated_at || it.created_at)
           : (it.updated_at || it.created_at);

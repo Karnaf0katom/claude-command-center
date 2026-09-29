@@ -28,7 +28,7 @@ class TestQueueWipOrder(unittest.TestCase):
             app_js,
         )
         self.assertIn("if (_isLiveWip(it)) return 0;", app_js)
-        self.assertIn("if (status === 'blocked') return 1;", app_js)
+        self.assertIn("if (status === 'blocked' || status === 'in_review') return 1;", app_js)
         self.assertIn("if (_hasUnresolved(it)) return 2;", app_js)
         self.assertIn("if (_isWaitingToDrain(it)) return 3;", app_js)
         self.assertIn("if (status === 'closed') return 4;", app_js)

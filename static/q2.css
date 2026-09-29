@@ -1031,6 +1031,8 @@ body.q2-resizing-v .q2-col { pointer-events: none; }
 .q2-n { white-space: nowrap; }
 .q2-n b { color: var(--text); font-weight: 600; }
 .q2-n.is-blocked, .q2-n.is-blocked b { color: var(--wip-blue); }
+/* in_review (WT-5 gate): closed by its worker, waiting on accept/reject. */
+.q2-n.is-review, .q2-n.is-review b { color: var(--wip-blue); }
 .q2-n.is-open, .q2-n.is-open b { color: var(--orange); }
 .q2-n.is-wip, .q2-n.is-wip b { color: var(--green); }
 .q2-n.is-done, .q2-n.is-done b { color: var(--text-muted); }
@@ -1652,6 +1654,7 @@ h1.q2-detail-title[data-q2-title-open]:hover { background: var(--bg-hover, rgba(
 .q2-status.is-open { color: var(--orange); }
 .q2-status.is-in_progress { color: var(--green); }
 .q2-status.is-blocked { color: var(--wip-blue); }
+.q2-status.is-in_review { color: var(--wip-blue); }
 .q2-status.is-closed { color: var(--text-muted); }
 /* Queued to run: idle but not "just open" — WatchTower's reconciler will
    pick it up on its own. Purple keeps it out of the orange/green/blue set

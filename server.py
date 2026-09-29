@@ -113,6 +113,7 @@ from ccc_server import test_isolation_active, register as _ccc_core_register
 from ccc_server import report_routes as _report_routes
 from ccc_server import model_discovery as _model_discovery
 from ccc_server import run_in_terminal as _run_in_terminal
+from ccc_server import wt_review as _wt_review
 from ccc_server.events import DashboardEventHub
 
 # Pure helpers and path constants moved to leaf modules (slice 3)
@@ -2586,8 +2587,9 @@ def _build_queue_diagnostic_snapshot(queue_name, *, now=None):
             "matched_ticket": matched,
         })
     counts = {
-        "open": sum(item.get("status") not in {"closed", "in_progress"} for item in items),
+        "open": sum(item.get("status") not in {"closed", "in_progress", "in_review"} for item in items),
         "in_progress": len(in_progress),
+        "in_review": sum(item.get("status") == "in_review" for item in items),
         "closed": sum(item.get("status") == "closed" for item in items),
         "claimable": sum(item.get("status") == "open" and item.get("claimable") is not False for item in items),
         "needs_input": sum(item.get("status") == "blocked" or bool(item.get("needs_input")) for item in items),
@@ -3048,7 +3050,7 @@ def _apply_watchtower_worker_display_names(rows):
         if not isinstance(it, dict):
             continue
         status = str(it.get("status") or "")
-        if status not in ("in_progress", "closed"):
+        if status not in ("in_progress", "in_review", "closed"):
             continue
         sid = str(it.get("claimed_session_id") or "").strip()
         if not sid:
@@ -31477,6 +31479,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 400)
             return
+        if path in ("/api/ux-fixes/accept", "/api/ux-fixes/reject"):
+            # WT-5 review gate: accept closes an in_review ticket (dependents
+            # unblock); reject sends it back to open with the reason and
+            # resumes its worker. Both shell to `wt` so WatchTower's own
+            # resume path runs (see ccc_server/wt_review.py).
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            res = _wt_review.run_review_verb(
+                str(payload.get("ref") or ""),
+                "accept" if path.endswith("/accept") else "reject",
+                reason=str(payload.get("reason") or ""),
+            )
+            self.send_json(res, 200 if res.get("ok") else 400)
+            return
         if path == "/api/ux-fixes/ack":
             # Dim a closed ticket's caveat/follow-up/unresolved chip without
             # rewriting the close record (parity with WatchTower's own
@@ -35042,7 +35064,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if path.endswith("/run"):
                 self.send_json(decision_inbox_start_background_run())
             elif path.endswith("/decide"):
-                self.send_json(decision_inbox_decide(payload.get("card_id"), payload.get("option")))
+                self.send_json(decision_inbox_decide(
+                    payload.get("card_id"), payload.get("option"),
+                    reason=str(payload.get("reason") or "")[:2000]))
             elif path.endswith("/dismiss"):
                 self.send_json(decision_inbox_dismiss(payload.get("card_id")))
             else:

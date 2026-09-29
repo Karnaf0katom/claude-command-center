@@ -242,11 +242,21 @@
   var STATUS_LABEL = {
     blocked: 'needs input',
     in_progress: 'in progress',
+    in_review: 'awaits review',
     open: 'open',
     closed: 'closed'
   };
   function statusLabel(st) {
     return STATUS_LABEL[st] || String(st || '').replace(/_/g, ' ');
+  }
+
+  // WT-5 acceptance gates: a worker's close lands a gated ticket in
+  // `in_review` until its pending stage passes. Not closed (dependents still
+  // wait), not claimable. Mirrors watchtower.queue.gate_stage_label.
+  function reviewer(it) {
+    var stage = String((it && it.gate_pending) || 'review');
+    if (stage === 'verify') return 'independent verifier';
+    return stage.indexOf('review:') === 0 ? (stage.slice(7).trim() || 'submitter') : 'submitter';
   }
 
   function unresolvedNotes(it) {
@@ -287,7 +297,7 @@
   function operationalBucket(it) {
     var st = statusOf(it);
     if (isLiveWip(it)) return 0;
-    if (st === 'blocked') return 1;
+    if (st === 'blocked' || st === 'in_review') return 1;
     if (String(it.status) === 'closed' && unresolvedNotes(it).length) return 2;
     if (isWaitingToDrain(it)) return 3;
     if (st === 'closed') return 4;
@@ -380,7 +390,7 @@
     var by = {};
     var typesCache = {};
     function bucket(k) {
-      if (!by[k]) by[k] = { github: 0, local: 0, needsInput: 0, wip: 0, waiting: 0, parked: 0 };
+      if (!by[k]) by[k] = { github: 0, local: 0, needsInput: 0, review: 0, wip: 0, waiting: 0, parked: 0 };
       return by[k];
     }
     (state.items || []).forEach(function (it) {
@@ -394,6 +404,7 @@
         if (it.block_kind === 'rationale') b.gated = (b.gated || 0) + 1;
         b.needsInput++;
       }
+      else if (st === 'in_review') b.review++;
       else if (st === 'in_progress') b.wip++;
       // Waiting = open, unclaimed, and something a worker is actually allowed
       // to pick up. `claimable === false` marks GitHub issues without the
@@ -432,10 +443,14 @@
         ? '<span class="q2-n is-gated" title="Product-gate pitch awaiting human Ack/Nack">'
           + '<b>' + f.gated + '</b> gated</span>'
         : '',
-      needsInput: f.needsInput
+      needsInput: (f.needsInput
         ? '<span class="q2-n is-blocked" title="Blocked waiting on a human answer">'
           + '<b>' + f.needsInput + '</b> needs input</span>'
-        : '',
+        : '')
+        + (f.review
+          ? '<span class="q2-n is-review" title="Closed by a worker, waiting on its review gate (accept / reject)">'
+            + '<b>' + f.review + '</b> review</span>'
+          : ''),
       wip: f.wip
         ? '<span class="q2-n is-wip" title="Claimed by a worker and in progress">'
           + '<b>' + f.wip + '</b> wip</span>'
@@ -1025,13 +1040,14 @@
     });
 
     var allItems = (state.items || []).filter(function (it) { return statusOf(it) !== 'closed'; });
-    var allFacts = { waiting: 0, wip: 0, needsInput: 0, gated: 0 };
+    var allFacts = { waiting: 0, wip: 0, needsInput: 0, gated: 0, review: 0 };
     allItems.forEach(function (it) {
       var st = statusOf(it);
       if (st === 'blocked') {
         if (it.block_kind === 'rationale') allFacts.gated++;
         allFacts.needsInput++;
       }
+      else if (st === 'in_review') allFacts.review++;
       else if (st === 'in_progress') allFacts.wip++;
       else allFacts.waiting++;
     });
@@ -1216,7 +1232,7 @@
         if (isFinite(t) && now - t < DONE_WINDOW_MS) doneRecent.push(it);
         return;
       }
-      if (st === 'blocked') blocked.push(it);
+      if (st === 'blocked' || st === 'in_review') blocked.push(it);
       else if (st === 'in_progress') working.push(it);
       else if (it.claimable === false || !isClaimableType(it, types)) parked.push(it);
       else waiting.push(it);
@@ -2434,7 +2450,9 @@
       // it. Say so plainly for the unclaimed case, since "Open" alone reads
       // like an action someone just took.
       var verb = st === 'in_progress' ? 'In progress'
-        : st === 'blocked' ? 'Needs your input' : 'Open · unclaimed';
+        : st === 'blocked' ? 'Needs your input'
+        : st === 'in_review' ? 'Closed by worker · awaits review by ' + reviewer(item)
+        : 'Open · unclaimed';
       rows += evt('now', '<span class="q2-tl-verb" title="Current status, not a new event">' + esc(verb) + '</span>'
         + (item.claimed_by ? '<span class="q2-tl-who">' + esc(withMachine(item.claimed_by, item.claimed_machine).slice(0, 30)) + '</span>' : ''), '');
     }
@@ -2611,6 +2629,7 @@
       close_completed:    ['Resolution summary (optional)', 'Mark as completed', 'close_completed'],
       close_not_relevant: ['Reason (optional)', 'Mark as not relevant', 'close_not_relevant'],
       reopen:              ['Reason for reopening (optional)', 'Reopen ticket', 'reopen'],
+      review_reject:       ['What must change before this can be accepted?', 'Reject', 'review_reject'],
     };
     function armedForm(key) {
       var spec = FORMS[key];
@@ -2631,7 +2650,22 @@
     // single generic "Close" button couldn't tell the difference later when
     // triaging a queue's history. Run now stays a one-click action — it
     // doesn't need a comment, it needs to happen now.
-    var resolveActionsHtml = closed ? '' :
+    var inReview = st === 'in_review';
+    var reviewActionsHtml = !inReview ? '' :
+      '<section class="q2-sec q2-resolve-actions q2-review-actions">'
+      + '<div class="q2-resolve-row">'
+      + '<span class="q2-dim">Closed by its worker; waiting on review by ' + esc(reviewer(item))
+      + (item.accept ? '. Accept when: ' + esc(item.accept) : '') + '</span>'
+      + '</div>'
+      + '<div class="q2-resolve-row">'
+      + '<button type="button" class="q2-btn q2-btn-primary" data-q2-act="review_accept"'
+      + ' title="Close it and unblock its dependents">Accept</button>'
+      + '<button type="button" class="q2-btn' + (state.arm === 'review_reject' ? ' is-armed' : '') + '"'
+      + ' data-q2-arm="review_reject" title="Back to open with your reason; its worker resumes">Reject</button>'
+      + '</div>'
+      + armedForm('review_reject')
+      + '</section>';
+    var resolveActionsHtml = inReview ? reviewActionsHtml : closed ? '' :
       '<section class="q2-sec q2-resolve-actions">'
       + '<div class="q2-resolve-row">'
       + '<button type="button" class="q2-btn' + (state.arm === 'close_completed' ? ' is-armed' : '') + '"'
@@ -3016,6 +3050,8 @@
         note: 'Not relevant' + (detailInput('close_not_relevant') ? ': ' + detailInput('close_not_relevant') : '') },
         false, 'Closed as not relevant', 'Closing…'],
       reopen:  ['/api/ux-fixes/reopen',  { ref: ref, note: detailInput('reopen') },  false, 'Ticket reopened', 'Reopening…'],
+      review_accept: ['/api/ux-fixes/accept', { ref: ref }, false, 'Accepted', 'Accepting…'],
+      review_reject: ['/api/ux-fixes/reject', { ref: ref, reason: detailInput('review_reject') }, true, 'Rejected', 'Rejecting…'],
     }[act];
     if (!plan) return;
     // Answer and comment carry the user's words; sending an empty one would
