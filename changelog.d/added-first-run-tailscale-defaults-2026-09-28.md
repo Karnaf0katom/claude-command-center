@@ -1,1 +1,0 @@
-First run now ends the engines screen with a "Default for new sessions" row (engine, model, effort, installed engines only) and an optional Tailscale step ("Use CCC from your phone or other machines") that reuses Phone access setup. Every not-installed engine row now shows its Install button while collapsed, and Settings, Phone access is always reachable.

@@ -1,1 +1,0 @@
-- A /compact sent while Claude is mid-turn now shows "Compact queued" instead of a spinner that claims it is compacting, and a stalled or queued compact no longer blocks you from running /compact again.

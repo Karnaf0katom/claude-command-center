@@ -1,1 +1,0 @@
-When the selected engine is not installed, the new-session composer now says so with an Install button (and "Use <engine> instead" when another engine is available), instead of failing with a raw "Spawn failed" message. Spawn errors for a missing CLI now carry `error_code: "engine_not_installed"` and `engine`.

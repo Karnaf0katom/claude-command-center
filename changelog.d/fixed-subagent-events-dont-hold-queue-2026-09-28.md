@@ -1,1 +1,0 @@
-- Queued messages no longer sit on "sending…" while a background agent is still running after the session finished its turn.

@@ -1,1 +1,0 @@
-The guide now walks the queue hands-on: create a first queue, file a first ticket, what auto-drain does, and where a queue's worker model is chosen. The Server health step now points at the System chip at the bottom left of the sidebar.

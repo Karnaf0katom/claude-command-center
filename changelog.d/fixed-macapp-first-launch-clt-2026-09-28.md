@@ -1,1 +1,0 @@
-On a Mac without Apple's Command Line Tools, the app now opens Apple's install window on first launch, explains what to click, and continues setup by itself when it finishes, instead of failing with "The installation exited with status 1".

@@ -1,1 +1,0 @@
-The first screen on a fresh install is now "Review the engines that are installed": the Settings Engines page (install, sign in, on/off) shown once before the guide, instead of a step inside the optional guide. Devin and Grok now have Install and Sign in buttons, and every engine row shows its command name.

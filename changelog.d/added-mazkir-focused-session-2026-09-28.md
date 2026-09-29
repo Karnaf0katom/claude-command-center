@@ -1,1 +1,0 @@
-- Ask (Mazkir) now knows which session you have open, so "this session" resolves, and it can explain why a session won't accept a message (undelivered inject, rejections, held input).

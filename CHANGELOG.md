@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.35.0] - 2026-09-28
+
+### Added
+- When the selected engine is not installed, the new-session composer now says so with an Install button (and "Use <engine> instead" when another engine is available), instead of failing with a raw "Spawn failed" message. Spawn errors for a missing CLI now carry `error_code: "engine_not_installed"` and `engine`.
+- First run now ends the engines screen with a "Default for new sessions" row (engine, model, effort, installed engines only) and an optional Tailscale step ("Use CCC from your phone or other machines") that reuses Phone access setup. Every not-installed engine row now shows its Install button while collapsed, and Settings, Phone access is always reachable.
+- Ask (Mazkir) now knows which session you have open, so "this session" resolves, and it can explain why a session won't accept a message (undelivered inject, rejections, held input).
+
+### Changed
+- The "Agent config access" prompt is now one short message with OK and Not now; the per-item list moved under Details. It only appears for agents you have installed (Claude Code, Codex).
+- Conversation search now shows each backend call it is waiting on (history index, recall, repo), with a live seconds counter and hit counts, instead of a bare "SEARCHING...".
+- The first screen on a fresh install is now "Review the engines that are installed": the Settings Engines page (install, sign in, on/off) shown once before the guide, instead of a step inside the optional guide. Devin and Grok now have Install and Sign in buttons, and every engine row shows its command name.
+- The Mac app is now named "CCC" (CCC.app), so it is easy to find in Finder and Spotlight. Existing installs keep working and update in place.
+- The Mac app now updates itself silently in the background and installs on quit, with no "new version is available" prompt. "Check for Updates..." stays in the app menu.
+- The guide now walks the queue hands-on: create a first queue, file a first ticket, what auto-drain does, and where a queue's worker model is chosen. The Server health step now points at the System chip at the bottom left of the sidebar.
+
+### Fixed
+- A /compact sent while Claude is mid-turn now shows "Compact queued" instead of a spinner that claims it is compacting, and a stalled or queued compact no longer blocks you from running /compact again.
+- On a phone, tapping a session under **Other machines** now opens it full screen (Close returns to the list); before, it opened off screen.
+- The curl installer now says to run `xcode-select --install` on a Mac without Apple's Command Line Tools, instead of failing with a misleading Python version or clone error.
+- The lane map no longer shows an orchestrator's sibling sessions as its own lanes stuck on "working" when its parent session is in another repo.
+- On a Mac without Apple's Command Line Tools, the app now opens Apple's install window on first launch, explains what to click, and continues setup by itself when it finishes, instead of failing with "The installation exited with status 1".
+- The "Install CCC as an App" banner no longer shows inside the Mac app or inside embedded conversations from other machines.
+- Queued messages no longer sit on "sending…" while a background agent is still running after the session finished its turn.
+
 ## [5.34.0] - 2026-09-28
 
 ### Added
@@ -3538,7 +3562,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.34.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.35.0...HEAD
+[5.35.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.35.0
 [5.34.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.34.0
 [5.33.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.33.0
 [5.32.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.32.0

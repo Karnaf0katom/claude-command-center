@@ -1,1 +1,0 @@
-- The lane map no longer shows an orchestrator's sibling sessions as its own lanes stuck on "working" when its parent session is in another repo.

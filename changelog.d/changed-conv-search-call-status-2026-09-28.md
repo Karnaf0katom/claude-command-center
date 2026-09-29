@@ -1,1 +1,0 @@
-- Conversation search now shows each backend call it is waiting on (history index, recall, repo), with a live seconds counter and hit counts, instead of a bare "SEARCHING...".
