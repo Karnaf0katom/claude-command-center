@@ -141,14 +141,22 @@ def run_review_verb(ref, verb, *, reason="", by="dashboard", runner=None, timeou
         proc = subprocess.run([wt] + args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": str(e)[:300]}
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return {"ok": False, "error": (err[-1] if err else f"wt {verb} failed")[:300]}
+    return parse_verb_output(verb, proc.returncode, proc.stdout, proc.stderr)
+
+
+def parse_verb_output(verb, returncode, stdout, stderr):
+    """Success needs exit 0 AND the ticket JSON ``--json`` prints on success.
+    Exit status alone is not trusted: a `wt` wrapper that drops main()'s
+    return code reports every refusal ("not in_review") as exit 0."""
+    out = (stdout or "").strip()
     item = None
-    out = (proc.stdout or "").strip()
-    try:
-        # reject may print resume notes after the JSON; decode the first object.
-        item = json.JSONDecoder().raw_decode(out[out.index("{"):])[0] if "{" in out else None
-    except ValueError:
-        item = None
+    if "{" in out:
+        try:
+            # reject may print resume notes after the JSON; decode the first object.
+            item = json.JSONDecoder().raw_decode(out[out.index("{"):])[0]
+        except ValueError:
+            item = None
+    if returncode != 0 or not isinstance(item, dict):
+        err = (stderr or stdout or "").strip().splitlines()
+        return {"ok": False, "error": (err[-1] if err else f"wt {verb} failed")[:300]}
     return {"ok": True, "effect": "accepted" if verb == "accept" else "rejected", "item": item}

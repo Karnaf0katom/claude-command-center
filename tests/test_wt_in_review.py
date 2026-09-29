@@ -111,6 +111,23 @@ class AcceptRejectTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class VerbOutputTest(unittest.TestCase):
+    def test_refusal_with_exit_zero_is_a_failure(self):
+        res = wr.parse_verb_output(
+            "accept", 0, "", "error: CCC-6 is closed, not in_review -- nothing to accept")
+        self.assertFalse(res["ok"])
+        self.assertIn("not in_review", res["error"])
+
+    def test_json_item_is_success(self):
+        res = wr.parse_verb_output("reject", 0, '{"ref": "CCC-3", "status": "in_progress"}\nresumed', "")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["item"]["status"], "in_progress")
+
+    def test_nonzero_exit_is_a_failure(self):
+        res = wr.parse_verb_output("accept", 1, "", "error: boom")
+        self.assertEqual(res, {"ok": False, "error": "error: boom"})
+
+
 class FrontendWiringTest(unittest.TestCase):
     """The views that enumerate statuses must know in_review."""
 
