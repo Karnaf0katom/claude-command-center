@@ -1,0 +1,1 @@
+- The "Install CCC as an App" banner no longer shows inside the Mac app or inside embedded conversations from other machines.

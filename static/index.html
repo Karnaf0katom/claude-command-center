@@ -4254,6 +4254,9 @@
         || window.navigator.standalone === true;
   }
   if (isStandalone()) return;
+  // Already an app: the Mac app's WKWebView (UA tag "CCC-macOS"), or a frame
+  // inside another CCC (embedded peer conversation, popouts in panes).
+  if (/CCC-macOS/.test(navigator.userAgent || '') || window.parent !== window) return;
 
   // Honor previous dismissal for 14 days. After that the banner re-appears
   // on the next non-standalone visit — long enough not to be annoying,
