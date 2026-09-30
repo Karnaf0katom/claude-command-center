@@ -7,6 +7,7 @@
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![Zero dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 ![Local only](https://img.shields.io/badge/runs-100%25%20local-purple)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff69b4)](CONTRIBUTING.md)
 
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-D97757?logo=claude&logoColor=white)
 ![Codex](https://img.shields.io/badge/Codex-000000)
