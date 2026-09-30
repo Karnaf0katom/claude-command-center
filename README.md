@@ -1,5 +1,22 @@
 # CCC
 
+[![Release](https://img.shields.io/github/v/release/amirfish1/claude-command-center?color=blue)](https://github.com/amirfish1/claude-command-center/releases)
+[![Stars](https://img.shields.io/github/stars/amirfish1/claude-command-center?style=flat&color=yellow)](https://github.com/amirfish1/claude-command-center/stargazers)
+[![License: FSL-1.1-MIT](https://img.shields.io/badge/license-FSL--1.1--MIT-green)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
+![Zero dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+![Local only](https://img.shields.io/badge/runs-100%25%20local-purple)
+
+![Claude Code](https://img.shields.io/badge/Claude%20Code-D97757?logo=claude&logoColor=white)
+![Codex](https://img.shields.io/badge/Codex-000000)
+![Cursor](https://img.shields.io/badge/Cursor-1E1E1E?logo=cursor&logoColor=white)
+![Antigravity](https://img.shields.io/badge/Antigravity-4285F4?logo=google&logoColor=white)
+![Kilo Code](https://img.shields.io/badge/Kilo%20Code-F8F675?logoColor=black)
+![Kimi Code](https://img.shields.io/badge/Kimi%20Code-1A1A2E)
+![OpenCode](https://img.shields.io/badge/OpenCode-2B2B2B)
+![Devin](https://img.shields.io/badge/Devin-0EA5E9)
+
 **Your coding agents outgrew your terminal.**
 
 CCC puts every session on one local board and tells you which one needs you.
