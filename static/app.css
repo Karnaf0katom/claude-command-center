@@ -8932,6 +8932,17 @@
       padding-bottom: max(0px, env(safe-area-inset-bottom));
     }
   }
+  /* CCC-1233: the same zoom hits every other field (sidebar Search zoomed in
+     with no way back). On touch/phone widths no text field may render below
+     16px; !important beats the many later per-field 11-13px rules. */
+  @media (pointer: coarse), (hover: none), (max-width: 600px) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]),
+    textarea,
+    select,
+    [contenteditable="true"] {
+      font-size: 16px !important;
+    }
+  }
   .conv-pane.has-conv-bg .conv-input-bar input,
   .conv-pane.has-conv-bg .conv-input-bar textarea {
     color: var(--conv-text);
