@@ -1,0 +1,1 @@
+- The queue's "waiting on REF" chip and blocked count now come from WatchTower's own `waiting_on`, so they always match what workers will claim. Needs a WatchTower with `waiting_on`; older installs just show no chip.

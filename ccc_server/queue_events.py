@@ -21,7 +21,6 @@ import threading
 import time
 
 from ccc_server import core as _core
-from ccc_server import wt_review as _wt_review
 from ccc_server.github_issues import github_rate_limited
 
 # ---------------------------------------------------------------------------
@@ -753,10 +752,7 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
     last_activity_q = {}  # queue → most-recent item-touch epoch (any status)
     last_progress_q = {}  # queue → most-recent close OR claim epoch (WT health semantics)
     try:
-        all_items = (_core._q.list_items() if items is None else items) or []
-        # One ref index per pass (not per row) for the WT-4 dependency check.
-        by_ref = _wt_review.refs_index(all_items) if any(
-            it.get("blocked_by") for it in all_items if isinstance(it, dict)) else {}
+        all_items = with_waiting_on((_core._q.list_items() if items is None else items) or [])
         for it in all_items:
             qn = _norm(it.get("project"))
             if not qn or qn == "?":
@@ -792,7 +788,9 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
                 # Dependency gating (WT-4): WatchTower skips a ticket until
                 # every blocked_by ref is closed as completed, so it is not
                 # claimable work and must not read as an unstaffed queue.
-                if it.get("blocked_by") and _wt_review.blocker_verdict(it, by_ref)[0] != "ok":
+                # waiting_on is WatchTower's own verdict (WT-9); an older WT
+                # without it counts nothing as blocked.
+                if it.get("waiting_on"):
                     blocked_by_q[qn] = blocked_by_q.get(qn, 0) + 1
                     continue
                 # Readiness gating, the other half of WatchTower's claim
@@ -959,6 +957,41 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
     return out
 
 
+def with_waiting_on(items, extra=None):
+    """Attach WatchTower's ``waiting_on`` (WT-9) to tickets with ``blocked_by``.
+
+    WatchTower owns the blocker rule (``watchtower.queue.waiting_on``, the
+    same one ``wt ls --json`` and the claim gate use); CCC keeps no copy. The
+    ref index is built once per call, never per row; ``extra`` adds tickets
+    that may hold cross-queue blockers outside ``items``. An older WatchTower
+    without ``waiting_on`` returns ``items`` unchanged, so no chip shows.
+    """
+    fn = getattr(_core._q, "waiting_on", None)
+    if not callable(fn) or not items or not any(
+            isinstance(it, dict) and it.get("blocked_by") for it in items):
+        return items
+    by_ref = {}
+    for it in list(extra or []) + list(items):
+        if isinstance(it, dict) and it.get("ref"):
+            by_ref[str(it["ref"])] = it
+    return [
+        dict(it, waiting_on=fn(it, by_ref))
+        if isinstance(it, dict) and it.get("blocked_by") else it
+        for it in items
+    ]
+
+
+def _list_items_with_waiting_on(status_filter, lane_filter, **kw):
+    items = _core._q.list_items(status=status_filter, lane=lane_filter, **kw) or []
+    extra = None
+    if status_filter or lane_filter:
+        # A filtered list can miss its blockers; resolve against the full memo.
+        with _ux_fixes_list_cache_lock:
+            ent = _ux_fixes_list_cache.get(("", ""))
+        extra = ent["items"] if ent else None
+    return with_waiting_on(items, extra)
+
+
 _UX_FIXES_LIST_TTL = 10.0
 _ux_fixes_list_cache = {}
 _ux_fixes_list_cache_lock = threading.Lock()
@@ -968,7 +1001,7 @@ _ux_fixes_list_refreshing = set()
 def _ux_fixes_list_refresh(status_filter, lane_filter):
     key = (status_filter or "", lane_filter or "")
     try:
-        items = _core._q.list_items(status=status_filter, lane=lane_filter) or []
+        items = _list_items_with_waiting_on(status_filter, lane_filter)
         with _ux_fixes_list_cache_lock:
             _ux_fixes_list_cache[key] = {"ts": time.time(), "items": items}
     except Exception:
@@ -991,9 +1024,9 @@ def _ux_fixes_list_items_cached(status_filter=None, lane_filter=None, fresh=Fals
     key = (status_filter or "", lane_filter or "")
     if fresh:
         try:
-            items = _core._q.list_items(status=status_filter, lane=lane_filter, fresh=True) or []
+            items = _list_items_with_waiting_on(status_filter, lane_filter, fresh=True)
         except TypeError:
-            items = _core._q.list_items(status=status_filter, lane=lane_filter) or []
+            items = _list_items_with_waiting_on(status_filter, lane_filter)
         with _ux_fixes_list_cache_lock:
             _ux_fixes_list_cache[key] = {"ts": time.time(), "items": items}
         return items
@@ -1012,7 +1045,7 @@ def _ux_fixes_list_items_cached(status_filter=None, lane_filter=None, fresh=Fals
                     daemon=True, name="uxq-list-refresh",
                 ).start()
         return ent["items"]
-    items = _core._q.list_items(status=status_filter, lane=lane_filter) or []
+    items = _list_items_with_waiting_on(status_filter, lane_filter)
     with _ux_fixes_list_cache_lock:
         if len(_ux_fixes_list_cache) > 32:
             _ux_fixes_list_cache.clear()
@@ -1188,6 +1221,7 @@ def _gh_queue_poll_once():
     except Exception:
         return False
 
+    items = with_waiting_on(items)
     with _ux_fixes_list_cache_lock:
         _ux_fixes_list_cache[("", "")] = {"ts": time.time(), "items": items}
 

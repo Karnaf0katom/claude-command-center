@@ -4,7 +4,8 @@ WatchTower skips a ticket until every blocker is closed as completed. CCC
 must agree: a blocked ticket is not claimable work (no fake staffing alarm),
 the queue panel names the blocker instead of READY, and the header counts
 blocked tickets apart from ready ones. Fixtures: open / closed / declined
-blocker. The JS predicate is exercised under node against the same fixtures.
+blocker. CCC-1226: the rule itself is WatchTower's (``waiting_on``, WT-9);
+CCC only attaches it to ticket lists and reads it, with no copy of its own.
 """
 
 import json
@@ -16,8 +17,7 @@ import unittest
 from unittest import mock
 
 import server
-from ccc_server import wt_review as wr
-from ccc_server.queue_events import compute_queues_health
+from ccc_server.queue_events import compute_queues_health, with_waiting_on
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -46,41 +46,64 @@ ITEMS = [
 ]
 
 EXPECTED = {
-    "CCC-10": ["waiting", "CCC-1"],
-    "CCC-11": ["ok", ""],
-    "CCC-12": ["stuck", "CCC-3"],
-    "CCC-13": ["stuck", "CCC-4"],
-    "CCC-14": ["waiting", "CCC-1"],
-    "CCC-15": ["waiting", "CCC-5"],
-    "CCC-16": ["ok", ""],
+    "CCC-10": ["CCC-1"],
+    "CCC-11": [],
+    "CCC-12": ["CCC-3"],
+    "CCC-13": ["CCC-4"],
+    "CCC-14": ["CCC-1"],
+    "CCC-15": ["CCC-5"],
+    "CCC-16": [],
 }
 
 
-class PredicateTest(unittest.TestCase):
-    def test_python_verdicts(self):
-        by_ref = wr.refs_index(ITEMS)
-        got = {it["ref"]: list(wr.blocker_verdict(it, by_ref))
-               for it in ITEMS if it.get("blocked_by")}
+class WaitingOnTest(unittest.TestCase):
+    def test_attaches_watchtower_waiting_on(self):
+        got = {it["ref"]: it["waiting_on"] for it in with_waiting_on(ITEMS)
+               if it.get("blocked_by")}
         self.assertEqual(got, EXPECTED)
+        # Tickets without blocked_by are passed through untouched.
+        self.assertNotIn("waiting_on", with_waiting_on(ITEMS)[0])
+
+    def test_cross_queue_blocker_resolved_from_extra(self):
+        it = _t("OTHER-1", blocked_by=["CCC-1"], project="OTHER")
+        self.assertEqual(with_waiting_on([it])[0]["waiting_on"], [])
+        self.assertEqual(with_waiting_on([it], extra=ITEMS)[0]["waiting_on"], ["CCC-1"])
 
     def test_escalated_stuck_blocker_answered_by_a_human_counts_as_satisfied(self):
         it = _t("CCC-20", blocked_by=["CCC-3"], blocker_escalated=["CCC-3"])
-        self.assertEqual(wr.blocker_verdict(it, wr.refs_index(ITEMS)), ("ok", ""))
+        self.assertEqual(with_waiting_on([it], extra=ITEMS)[0]["waiting_on"], [])
+
+    def test_older_watchtower_without_waiting_on_adds_nothing(self):
+        class OldWT:
+            pass
+        with mock.patch.object(server, "_q", OldWT()):
+            out = with_waiting_on(ITEMS)
+        self.assertIs(out, ITEMS)
+        self.assertFalse(any("waiting_on" in it for it in out))
+
+    def test_ccc_keeps_no_copy_of_the_rule(self):
+        from ccc_server import wt_review
+        self.assertFalse(hasattr(wt_review, "blocker_verdict"))
+        src = (ROOT / "static" / "app.js").read_text()
+        self.assertNotIn("_uxqBlockerVerdict", src)
+        self.assertNotIn("b.product_nack", src)
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
-    def test_js_verdicts_match(self):
+    def test_js_reads_waiting_on(self):
         src = (ROOT / "static" / "app.js").read_text()
-        m = re.search(r"  function _uxqBlockerVerdict\(it, byRef\) \{.*?\n  \}\n", src, re.S)
+        m = re.search(r"  function _uxqWaitingOn\(it\) \{.*?\n  \}\n", src, re.S)
         self.assertIsNotNone(m)
+        items = with_waiting_on(ITEMS) + [_t("CCC-30", blocked_by=["CCC-1"])]  # no field: old WT
         script = (m.group(0)
-                  + "const items = " + json.dumps(ITEMS) + ";\n"
-                  + "const byRef = new Map(items.map(i => [i.ref, i]));\n"
+                  + "const items = " + json.dumps(items) + ";\n"
                   + "const out = {};\n"
-                  + "items.filter(i => i.blocked_by).forEach(i => { out[i.ref] = _uxqBlockerVerdict(i, byRef); });\n"
+                  + "items.filter(i => i.blocked_by).forEach(i => { out[i.ref] = _uxqWaitingOn(i); });\n"
                   + "process.stdout.write(JSON.stringify(out));\n")
         res = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(json.loads(res.stdout), EXPECTED)
+        want = {ref: (v[0] if v else "") for ref, v in EXPECTED.items()}
+        want["CCC-30"] = ""
+        self.assertEqual(json.loads(res.stdout), want)
 
 
 class QueueHealthTest(unittest.TestCase):

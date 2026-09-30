@@ -45953,47 +45953,13 @@
       : stage.indexOf('review:') === 0 ? (stage.slice(7).trim() || 'submitter') : 'submitter';
     return 'awaits review · ' + who;
   }
-  // WT-4 ticket dependencies: WatchTower skips a ticket until every blocked_by
-  // ref is closed as completed. Port of watchtower.queue.blocker_verdict
-  // (also ccc_server/wt_review.py) -> ['ok'|'waiting'|'stuck', blockerRef].
-  // The ref index is built once per item-list identity, never per row.
-  let _uxqRefIndexMemo = { src: null, map: null };
-  function _uxqRefIndex(items) {
-    if (_uxqRefIndexMemo.src !== items) {
-      const map = new Map();
-      (items || []).forEach(it => { if (it && it.ref) map.set(String(it.ref), it); });
-      _uxqRefIndexMemo = { src: items, map };
-    }
-    return _uxqRefIndexMemo.map;
-  }
-  function _uxqBlockerVerdict(it, byRef) {
-    let waiting = '';
-    for (const raw of ((it && it.blocked_by) || [])) {
-      const ref = String(raw);
-      const b = byRef.get(ref);
-      if (!b) continue;
-      let state = 'satisfied';
-      if (b.status !== 'closed') state = 'waiting';
-      else if (b.product_nack) state = 'stuck';
-      else {
-        const un = b.resolution && Array.isArray(b.resolution.unresolved) ? b.resolution.unresolved : [];
-        if (un.some(x => String(x || '').trim())) state = 'stuck';
-      }
-      if (state === 'stuck') {
-        if ((it.blocker_escalated || []).indexOf(ref) !== -1 && !it.needs_input) continue;
-        return ['stuck', ref];
-      }
-      if (state === 'waiting' && !waiting) waiting = ref;
-    }
-    return waiting ? ['waiting', waiting] : ['ok', ''];
-  }
-  // The blocker an open ticket is waiting on ('' when none). Stuck blockers
-  // are already escalated to needs_input by WatchTower with the blocker named
-  // in block_question, so they surface as the normal needs-input state.
-  function _uxqWaitingOn(it, items) {
-    if (!it || it.status !== 'open' || !Array.isArray(it.blocked_by) || !it.blocked_by.length) return '';
-    const v = _uxqBlockerVerdict(it, _uxqRefIndex(items || (_uxqItemsCache && _uxqItemsCache.items) || []));
-    return v[0] === 'waiting' ? v[1] : '';
+  // WT-4 ticket dependencies: the first blocker an open ticket is waiting on
+  // ('' when none). WatchTower computes waiting_on (WT-9) with the same rule
+  // its claim gate uses, and the server attaches it to the list; CCC keeps no
+  // copy of that rule. An older WatchTower sends no waiting_on: no chip.
+  function _uxqWaitingOn(it) {
+    if (!it || it.status !== 'open' || !Array.isArray(it.waiting_on) || !it.waiting_on.length) return '';
+    return String(it.waiting_on[0]);
   }
   // WT-5/WT-6 acceptance data for the ticket detail: the one-line `accept`
   // criterion, then each check in gate order with its state and evidence
@@ -48378,7 +48344,7 @@
     // WT-4: open tickets held back by an unfinished blocker, counted apart
     // from ready ones. Same item list the rows render from; no extra fetch.
     const blockedCount = (items || []).filter(it => it && _uxqProjectKey(it.project) === key
-      && _uxqWaitingOn(it, items)).length;
+      && _uxqWaitingOn(it)).length;
     const workers = (liveWorkers || []).filter(w => w && _uxqProjectKey(w.queue) === key);
     // CCC-789 follow-up: a read-only "Auto-drain off" line left no path to
     // actually change it (or claim types/worker count) from this compact
@@ -48634,7 +48600,7 @@
       const _isWaitingToDrain = it => {
         if (_effectiveStatus(it) !== 'open') return false;
         return !_isStaleClaim(it) && it.claimable !== false && it.watchtower_runnable !== false && !_unready(it)
-          && !_uxqWaitingOn(it, items);
+          && !_uxqWaitingOn(it);
       };
       // WIP → needs input → unresolved attention → claimable work →
       // non-claimable, unready, or otherwise inert open work → clean closes.
@@ -48707,7 +48673,7 @@
         }
         // Readiness is meaningless once closed; while a blocker is still open
         // the ticket is not READY either, so name what it waits on (WT-4).
-        const waitingOn = _uxqWaitingOn(it, items);
+        const waitingOn = _uxqWaitingOn(it);
         if (waitingOn) {
           c.push('<span class="fq-chip fq-waiting-on" role="button" tabindex="0" data-blocker-ref="' + escapeAttr(waitingOn) + '"'
             + ' title="' + escapeAttr('Blocked by ' + waitingOn + ': no worker picks this up until it closes as completed. Click to open ' + waitingOn + '.') + '">'
