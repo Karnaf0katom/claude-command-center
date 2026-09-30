@@ -7677,6 +7677,20 @@
       box-shadow: -8px 0 10px -2px var(--surface-2);
     }
   }
+  /* CCC-1229: on touch the selected row's sticky :hover keeps the trash +
+     kebab overlay up, and absolutely positioned it covered the lanes chip,
+     so a parent's lanes couldn't be collapsed. Put the slot in flow there so
+     the row end grows and pushes the chip left instead of sitting on it. */
+  @media (hover: none) {
+    .conv-item.active .conv-row-hover-slot,
+    .conv-item:focus-within .conv-row-hover-slot {
+      position: static;
+      transform: none;
+    }
+    .conv-item.is-actions-open .conv-row-hover-slot {
+      display: none;
+    }
+  }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
   }

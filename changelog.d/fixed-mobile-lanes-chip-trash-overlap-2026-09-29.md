@@ -1,0 +1,1 @@
+- On phones, the selected session row's trash and actions buttons no longer cover its lanes chip, so a parent session's lanes can be collapsed again.
