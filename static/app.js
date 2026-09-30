@@ -13821,6 +13821,22 @@
   // hard-refresh CCC (-> Reload), a CCC launchctl kickstart (-> Restart CCC),
   // other `backticked` shell commands (-> Run in a visible terminal + Copy),
   // and URLs / file paths (-> Open).
+  // CCC-1232: a quoted reply the agent asked for (Say "ship now" or "hold")
+  // becomes a one-tap chip that sends that exact text.
+  const NEEDS_YOU_SAY_RE = /\b(?:say|type|reply(?: with)?|respond(?: with)?|answer(?: with)?|send(?: me)?|tell me)\s*:?\s+((?:["\u201c'\u2018`][^"\u201d'\u2019`\n]{1,40}["\u201d'\u2019`](?:\s*(?:,|\/|or|and)\s*)?)+)/gi;
+  function needsYouSayPhrases(src) {
+    const out = [];
+    let m;
+    NEEDS_YOU_SAY_RE.lastIndex = 0;
+    while ((m = NEEDS_YOU_SAY_RE.exec(src))) {
+      const quoted = m[1].match(/["\u201c'\u2018`][^"\u201d'\u2019`\n]{1,40}["\u201d'\u2019`]/g) || [];
+      for (const q of quoted) {
+        const phrase = q.slice(1, -1).trim();
+        if (phrase && !NEEDS_YOU_CMD_RE.test(phrase + ' ')) out.push(phrase);
+      }
+    }
+    return out;
+  }
   const NEEDS_YOU_CMD_RE = /^(?:sudo\s+)?(?:\.\/|~\/|launchctl|brew|git|gh|npm|npx|pnpm|yarn|bun|node|python3?|pip3?|uv|wt|ccc|curl|make|open|bash|sh|zsh|docker|kubectl|vercel|supabase|wrangler|cargo|go|ssh|trash|claude|codex|redditctl|ffmpeg|pytest)\s/;
   const NEEDS_YOU_REPLY_RE = /^(?:\(?\d+\)?\s*)?(?:decide|confirm|tell|say|answer|pick|choose|approve|reply|give|let me know|accept|send (?:me|your)|either)\b/i;
   function needsYouActions(text) {
@@ -13833,6 +13849,9 @@
       actions.push(a);
     };
     const src = String(text || '');
+    for (const phrase of needsYouSayPhrases(src)) {
+      add({ act: 'say', label: phrase, value: phrase, title: 'Send "' + phrase + '"' });
+    }
     const codeSpans = [];
     src.replace(/`([^`\n]+)`/g, (m, inner) => { codeSpans.push(inner.trim()); return m; });
     for (const code of codeSpans) {
@@ -13897,6 +13916,14 @@
     } else if (act === 'reply') {
       const input = composerInputForPane(paneId) || $convInput;
       if (input) input.focus();
+    } else if (act === 'say') {
+      const input = composerInputForPane(paneId) || $convInput;
+      if (!input) return;
+      const draft = (input.value || '').trim();
+      if (draft && draft !== value && !confirm('Replace your draft and send "' + value + '"?')) return;
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      sendToTerminal(paneId);
     } else if (act === 'run') {
       if (!confirm('Run this in a new terminal window?\n\n' + value)) return;
       const ctx = _pathLinkSessionContext(btn);

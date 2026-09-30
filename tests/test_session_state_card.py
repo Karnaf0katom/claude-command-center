@@ -131,6 +131,26 @@ class TestSessionStateCard(unittest.TestCase):
         self.assertIn('>Open plan.md</a>', html)
         self.assertIn('data-ssb-act="reply"', html)
 
+    def test_quoted_reply_becomes_one_tap_say_chip(self):
+        html = render_session_state(
+            'NEXT_STEP_USER: Say "ship now" or \u201chold\u201d if you want SLOTPERF-5 released '
+            "before the 09:00 PT run; either way I'll delete `GMAIL_REFRESH_TOKEN`.",
+            PROJECT_ROOT / "static" / "app.js",
+        )
+
+        self.assertIn('data-ssb-act="say" data-ssb-value="ship now"', html)
+        self.assertIn('data-ssb-act="say" data-ssb-value="hold"', html)
+        self.assertLess(html.index('data-ssb-value="ship now"'), html.index('data-ssb-act="reply"'))
+
+    def test_quoted_command_is_not_a_say_chip(self):
+        html = render_session_state(
+            "NEXT_STEP_USER: Type `git push origin main` when ready.",
+            PROJECT_ROOT / "static" / "app.js",
+        )
+
+        self.assertNotIn('data-ssb-act="say"', html)
+        self.assertIn('data-ssb-act="run"', html)
+
     def test_plain_ask_gets_no_action_row(self):
         html = render_session_state(
             "NEXT_STEP_USER: Use the same login for the form and screencast.",
