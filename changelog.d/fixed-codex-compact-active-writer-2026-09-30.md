@@ -1,0 +1,1 @@
+- Compacting a Codex session that another process is still driving (for example a headless WatchTower `codex exec` worker) now says which process owns the thread and its pid, instead of a generic "already has an active writer" error with a misleading retry hint.

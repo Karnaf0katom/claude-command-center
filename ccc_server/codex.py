@@ -4786,6 +4786,109 @@ def _codex_error_text(response):
     return message
 
 
+def _codex_error_is_active_writer(response):
+    """Codex refuses to load a thread another process is already driving."""
+    return "active writer" in _codex_error_text(response).lower()
+
+
+def _codex_describe_writer_command(cmd):
+    """Short human label for a process holding a Codex rollout. Pure."""
+    cmd = cmd or ""
+    if ".app/Contents/" in cmd and "app-server" in cmd:
+        return "the Codex desktop app"
+    if " exec" in f" {cmd}" and "codex" in cmd:
+        worker = re.search(r"--worker\s+([\w.-]+)", cmd)
+        if worker:
+            return f"WatchTower worker {worker.group(1)}, a headless `codex exec`"
+        return "a headless `codex exec` run"
+    if "app-server" in cmd:
+        return "another Codex app-server"
+    if "codex" in cmd:
+        return "a Codex terminal session"
+    return "another process"
+
+
+def _codex_rollout_writer_holders(rollout_path):
+    """Processes (other than CCC's own app-server) holding a rollout open.
+
+    One `lsof` on one file, only called on the active-writer failure path of a
+    user action, never per session row.
+    """
+    if not rollout_path:
+        return []
+    lsof_bin = shutil.which("lsof") or "/usr/sbin/lsof"
+    if not os.path.isfile(lsof_bin):
+        return []
+    try:
+        out = subprocess.run(
+            [lsof_bin, "-w", "-t", "--", str(rollout_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3.0,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    own = {os.getpid()}
+    proc = _core._CODEX_APP_SERVER_PROC
+    if proc is not None:
+        own.add(proc.pid)
+    pids = sorted({int(p) for p in out.split() if p.isdigit()} - own)
+    if not pids:
+        return []
+    commands = {}
+    try:
+        ps_out = subprocess.run(
+            ["/bin/ps", "-p", ",".join(str(p) for p in pids), "-o", "pid=,command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3.0,
+            check=False,
+        ).stdout
+        for line in ps_out.splitlines():
+            head, _, cmd = line.strip().partition(" ")
+            if head.isdigit():
+                commands[int(head)] = cmd.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return [
+        {"pid": pid, "command": commands.get(pid, "")[:200],
+         "label": _codex_describe_writer_command(commands.get(pid, ""))}
+        for pid in pids
+    ]
+
+
+def _codex_active_writer_result(sid, response, via):
+    """Actionable failure for "thread already has an active writer" (CCC-1246).
+
+    The raw Codex text names no process and the card's "try again" suggests a
+    transient glitch. Name the process that owns the thread instead.
+    """
+    try:
+        holders = _core._codex_rollout_writer_holders(_core._resolve_codex_rollout_path(sid))
+    except Exception:
+        holders = []
+    if holders:
+        who = holders[0]
+        subject = f"{who['label']} (pid {who['pid']})"
+    else:
+        subject = "another Codex process"
+    return {
+        "ok": False,
+        "via": via,
+        "code": "codex_active_writer",
+        "session_id": sid,
+        "writers": holders,
+        "error": (
+            f"This thread is still being driven by {subject}. Codex allows one "
+            "writer per thread, so compact after that process finishes or stop it first."
+        ),
+        "detail": _codex_error_text(response),
+    }
+
+
 def _codex_error_is_not_steerable(response):
     text = _codex_error_text(response)
     lowered = text.lower()
@@ -7101,6 +7204,8 @@ def _codex_compact_via_app_server(session_id, cwd=None, model=None):
     if model:
         resume_params["model"] = model
     resumed = _core._codex_app_server_request("thread/resume", resume_params, timeout=20)
+    if _codex_error_is_active_writer(resumed):
+        return _codex_active_writer_result(sid, resumed, "codex-compact")
     if resumed.get("error"):
         return {
             "ok": False,
@@ -7203,6 +7308,8 @@ def _codex_compact_via_app_server(session_id, cwd=None, model=None):
             "code": "codex_compact_unavailable",
             "error": compacted.get("error") or "Codex app-server unavailable",
         }
+    if _codex_error_is_active_writer(compacted):
+        return _codex_active_writer_result(sid, compacted, "codex-compact")
     return {
         "ok": False,
         "via": "codex-compact",
