@@ -117,14 +117,20 @@ def _authored(lines):
     return [ln for ln in out if ln.strip() and not _SYSTEMD_NOISE_RE.search(ln.strip())]
 
 
+# A job's own log() helper often stamps each line, so `CCC_OUTCOME:` may sit
+# behind an ISO timestamp (bym-ship: "2026-09-30T14:27:37Z CCC_OUTCOME: ...").
+_OUTCOME_RE = re.compile(
+    r"^(?:\[?\d{4}-\d\d-\d\d[T ][\d:.]+(?:Z|[+-]\d\d:?\d\d)?\]?\s+)?CCC_OUTCOME:\s*(.*)$")
+
+
 def pick_outcome(lines):
     """(text, kind): last CCC_OUTCOME: line -> ('..','summary'); else the last
     job-authored line -> ('..','output'); else ('', '')."""
     cleaned = _authored(lines)
     for ln in reversed(cleaned):
-        s = ln.strip()
-        if s.startswith("CCC_OUTCOME:"):
-            return s[len("CCC_OUTCOME:"):].strip()[:300], "summary"
+        m = _OUTCOME_RE.match(ln.strip())
+        if m:
+            return m.group(1).strip()[:300], "summary"
     return (cleaned[-1].strip()[:300], "output") if cleaned else ("", "")
 
 

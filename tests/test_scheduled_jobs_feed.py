@@ -92,6 +92,14 @@ class HermesParse(unittest.TestCase):
         self.assertEqual(self.jobs["bym-ship"]["outcome_kind"], "summary")
         self.assertEqual(f.pick_outcome(["a", "\x1b[32mdone\x1b[0m", ""]), ("done", "output"))
 
+    def test_outcome_behind_log_timestamp(self):
+        # CCC-1240: bym-ship's log() stamps every line, so the marker sits behind
+        # a timestamp; it must still win over the chip/raw-output fallback.
+        lines = ["2026-09-30T14:27:37Z CCC_OUTCOME: Shipped PR #1884 (3 commits).", "trailing noise"]
+        self.assertEqual(f.pick_outcome(lines), ("Shipped PR #1884 (3 commits).", "summary"))
+        self.assertEqual(f.pick_outcome(["[2026-09-30 14:27:37.1+00:00] CCC_OUTCOME: ok"]), ("ok", "summary"))
+        self.assertEqual(f.pick_outcome(["NOTIFY: CCC_OUTCOME: nope"]), ("NOTIFY: CCC_OUTCOME: nope", "output"))
+
     def test_outcome_drops_systemd_lines(self):
         lines = ["Finished x.service - y.", "x.service: Deactivated successfully.", "x.service: Consumed 3s CPU time."]
         self.assertEqual(f.pick_outcome(lines), ("", ""))

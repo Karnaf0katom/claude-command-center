@@ -1,0 +1,1 @@
+- **Jobs tab**: a job whose log stamps each line with a timestamp (like `bym-ship`) now shows its `CCC_OUTCOME:` sentence (e.g. "Shipped PR #1884 (3 commits).") instead of only a PR chip.
