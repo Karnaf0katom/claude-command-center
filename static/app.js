@@ -50279,8 +50279,14 @@
     const $list = document.getElementById('sidebarFilesList');
     if (!$panel || !$count || !$list) return;
     _syncFilesPanelChrome();
+    // Files tab label count + empty state (CCC-1228).
+    const $tabCount = document.getElementById('filesTabCount');
+    const $empty = document.getElementById('filesTabEmpty');
+    const n = (data && data.count) || 0;
+    if ($tabCount) $tabCount.textContent = n ? String(n) : '';
+    if ($empty) $empty.hidden = !!n;
 
-    if (!data || !data.count) {
+    if (!n) {
       $panel.style.display = 'none';
       $count.textContent = '';
       $list.innerHTML = '';
@@ -62319,9 +62325,7 @@
     const rail = document.getElementById('statusRail');
     if (!rail) return;
     const queuePane = rail.querySelector('#statusRailQueuePane');
-    // 'files' is a legacy value (the Files tab folded into Metadata); the
-    // files panel now lives at the bottom of the Metadata pane.
-    const next = (tab === 'queue' || tab === 'orchestration' || tab === 'ask' || tab === 'log') ? tab : 'metadata';
+    const next = (tab === 'queue' || tab === 'orchestration' || tab === 'files' || tab === 'ask' || tab === 'log') ? tab : 'metadata';
     if (next === 'ask' && typeof askWarmUp === 'function') askWarmUp();
     rail.querySelectorAll('[data-rail-tab]').forEach(btn => {
       const active = btn.getAttribute('data-rail-tab') === next;
@@ -64018,13 +64022,7 @@
           metadataPane.appendChild(liveOrig);
         }
       }
-      if (liveAct) {
-        // Files panel is docked at the bottom of Metadata; activity sits
-        // right above it.
-        const filesPanel = metadataPane.querySelector('#filesPanel');
-        if (filesPanel && filesPanel.parentNode === metadataPane) metadataPane.insertBefore(liveAct, filesPanel);
-        else metadataPane.appendChild(liveAct);
-      }
+      if (liveAct) metadataPane.appendChild(liveAct);
     } else if (sticky) {
       const askCol = sticky.querySelector('.csh-col-ask');
       const row = sticky.querySelector('.csh-row');

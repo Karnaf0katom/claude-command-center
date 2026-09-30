@@ -1252,8 +1252,9 @@
                    session, plus a live lane map of the sessions it spawns.
                    Files no longer has its own tab -- the files panel is docked
                    at the bottom of the Metadata pane. -->
-              <button class="status-rail-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="statusRailOrchestrationPane" data-rail-tab="orchestration" data-tour="orchestration">Orchestration</button>
               <button class="status-rail-tab" type="button" role="tab" aria-selected="false" aria-controls="statusRailMetadataPane" data-rail-tab="metadata">Metadata</button>
+              <button class="status-rail-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="statusRailOrchestrationPane" data-rail-tab="orchestration" data-tour="orchestration">Orchestration</button>
+              <button class="status-rail-tab" type="button" role="tab" aria-selected="false" aria-controls="statusRailFilesPane" data-rail-tab="files">Files<span class="status-rail-tab-count" id="filesTabCount"></span></button>
               <button class="status-rail-tab" type="button" role="tab" aria-selected="false" aria-controls="statusRailQueuePane" data-rail-tab="queue" data-tour="queue">Queue</button>
               <button class="status-rail-tab" type="button" role="tab" aria-selected="false" aria-controls="statusRailAskPane" data-rail-tab="ask">Ask</button>
               <button class="status-rail-tab" type="button" role="tab" aria-selected="false" aria-controls="statusRailLogPane" data-rail-tab="log">Log</button>
@@ -1337,9 +1338,10 @@
                 </div>
                 <div class="subagents-list" id="subagentsList"></div>
               </div>
-              <!-- Files panel docked at the bottom of Metadata (it used to be
-                   its own tab). Activity feed above it takes the slack;
-                   _applyStatusRailLayout keeps this element last. -->
+            </div>
+            <!-- Files: its own tab again (CCC-1228); it was hard to find at the
+                 bottom of Metadata. -->
+            <div class="status-rail-pane" id="statusRailFilesPane" role="tabpanel" data-rail-pane="files" hidden>
               <div class="files-panel" id="filesPanel" style="display: none;">
                 <div class="files-resize-handle" id="filesResizeHandle" title="Drag up to resize · double-click to reset"></div>
                 <div class="files-header">
@@ -1350,6 +1352,7 @@
                 </div>
                 <div class="files-list" id="sidebarFilesList"></div>
               </div>
+              <div class="files-tab-empty" id="filesTabEmpty">No files touched in this session yet.</div>
             </div>
             <div class="status-rail-pane" id="statusRailQueuePane" role="tabpanel" data-rail-pane="queue">
               <div class="shared-queue-host shared-queue-host-rail" id="statusRailQueueHost">

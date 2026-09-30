@@ -28333,19 +28333,22 @@ button.orch-node:hover { border-color: color-mix(in srgb, var(--accent) 60%, var
 /* Depth indentation for nested lanes (sub-lanes of lanes). */
 .orch-node-indent { display: inline-block; flex-shrink: 0; }
 
-/* Files panel docked at the bottom of the Metadata pane. */
-body.status-pos-right .status-rail-pane[data-rail-pane="metadata"] > .files-panel {
-  flex: 0 0 auto;
-  max-height: 38%;
-  min-height: 0;
-  display: flex;
-  border-top: 1px solid var(--border);
-  padding: 8px 12px 10px;
+/* Files tab (CCC-1228): the list fills the pane, so the dock-era collapse
+   toggle and resize handle have nothing to do here. */
+.status-rail-pane[data-rail-pane="files"] > .files-panel .files-toggle { display: none; }
+.status-rail-pane[data-rail-pane="files"] > .files-panel.collapsed {
+  max-height: none; height: auto !important; overflow: visible; padding: 8px 12px 10px;
 }
-body.status-pos-right .status-rail-pane[data-rail-pane="metadata"] > .files-panel .files-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+.status-rail-pane[data-rail-pane="files"] > .files-panel.collapsed .files-list { display: block; }
+.files-tab-empty {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.status-rail-tab-count:not(:empty) {
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 /* Ask tab (right rail) — Mazkir Fleet Memory & Intelligence */

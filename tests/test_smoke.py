@@ -5742,9 +5742,9 @@ class TestServerImports(unittest.TestCase):
         )
 
     def test_right_rail_uses_metadata_files_and_queue_tabs(self):
-        """The right rail leads with Orchestration, keeps activity (and the
-        Files panel, docked at the bottom) in Metadata, and Queue as its own
-        utility pane."""
+        """The right rail leads with Metadata, then Orchestration, then Files
+        as its own tab (CCC-1228: it was hard to find docked in Metadata),
+        keeps activity in Metadata, and Queue as its own utility pane."""
         index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
@@ -5752,23 +5752,26 @@ class TestServerImports(unittest.TestCase):
         self.assertIn('data-rail-tab="orchestration"', index_html)
         self.assertIn('data-rail-tab="metadata"', index_html)
         self.assertIn('data-rail-tab="queue"', index_html)
-        self.assertNotIn('data-rail-tab="files"', index_html)
+        self.assertIn('data-rail-tab="files"', index_html)
         self.assertNotIn('data-rail-tab="activity"', index_html)
         self.assertIn('id="statusRailTopbar"', index_html)
         self.assertIn('id="statusRailAnnotateBtn"', index_html)
         self.assertLess(index_html.index('id="statusRailAnnotateBtn"'), index_html.index('id="statusRailCloseBtn"'))
-        self.assertLess(index_html.index('data-rail-tab="orchestration"'), index_html.index('data-rail-tab="metadata"'))
-        self.assertLess(index_html.index('data-rail-tab="metadata"'), index_html.index('data-rail-tab="queue"'))
+        self.assertLess(index_html.index('data-rail-tab="metadata"'), index_html.index('data-rail-tab="orchestration"'))
+        self.assertLess(index_html.index('data-rail-tab="orchestration"'), index_html.index('data-rail-tab="files"'))
+        self.assertLess(index_html.index('data-rail-tab="files"'), index_html.index('data-rail-tab="queue"'))
         self.assertIn('id="statusRailOrchestrationPane"', index_html)
         self.assertIn('id="statusRailMetadataPane"', index_html)
         self.assertIn('id="statusRailQueuePane"', index_html)
         self.assertNotIn('id="statusRailActivityPane"', index_html)
-        self.assertNotIn('id="statusRailFilesPane"', index_html)
-        metadata_block = index_html[index_html.index('id="statusRailMetadataPane"'):index_html.index('id="statusRailQueuePane"')]
+        self.assertIn('id="statusRailFilesPane"', index_html)
+        metadata_block = index_html[index_html.index('id="statusRailMetadataPane"'):index_html.index('id="statusRailFilesPane"')]
         self.assertIn('id="subagentsPanel"', metadata_block)
-        # Files is docked at the bottom of Metadata, not a tab of its own.
-        self.assertIn('id="filesPanel"', metadata_block)
-        self.assertLess(metadata_block.index('id="subagentsPanel"'), metadata_block.index('id="filesPanel"'))
+        # Files is its own tab again, not docked in Metadata.
+        self.assertNotIn('id="filesPanel"', metadata_block)
+        files_block = index_html[index_html.index('id="statusRailFilesPane"'):index_html.index('id="statusRailQueuePane"')]
+        self.assertIn('id="filesPanel"', files_block)
+        self.assertIn('id="filesTabEmpty"', files_block)
         self.assertNotIn('id="filesViewToggle"', index_html)
         self.assertIn("function setStatusRailTab(tab)", app_js)
         self.assertIn("rail.querySelector('#statusRailMetadataPane')", app_js)
@@ -5778,7 +5781,7 @@ class TestServerImports(unittest.TestCase):
         # asserted against index.html above.
         self.assertIn("rail.querySelector('#statusRailQueuePane')", app_js)
         self.assertNotIn("rail.querySelector('#statusRailActivityPane')", app_js)
-        self.assertIn("const next = (tab === 'queue' || tab === 'orchestration' || tab === 'ask' || tab === 'log') ? tab : 'metadata';", app_js)
+        self.assertIn("const next = (tab === 'queue' || tab === 'orchestration' || tab === 'files' || tab === 'ask' || tab === 'log') ? tab : 'metadata';", app_js)
         self.assertIn("const $statusRailAnnotateBtn = document.getElementById('statusRailAnnotateBtn');", app_js)
         self.assertIn("$statusRailAnnotateBtn.addEventListener('click', annStart);", app_js)
         self.assertNotIn("getElementById('filesViewToggle')", app_js)
