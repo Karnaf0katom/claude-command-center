@@ -87,7 +87,7 @@ def test_path_match_beats_everything_and_longest_wins(rg, tmp_path, monkeypatch)
     a, b = _repos(tmp_path, monkeypatch, "alpha", "beta")
     _no_network(monkeypatch)
     out = rg.repo_guess_request({"prompt": f"look at {b}/src/x.py and alpha"})
-    assert (out["repo_path"], out["confidence"], out["source"]) == (b, 1.0, "path")
+    assert (out["repo_path"], out["confidence"], out["source"]) == (b, 0.9, "path")
     nested = tmp_path / "work" / "alpha" / "inner"
     nested.mkdir()
     server = _server()
@@ -112,7 +112,7 @@ def test_name_match_single(rg, tmp_path, monkeypatch):
     a, b = _repos(tmp_path, monkeypatch, "shopfront", "billing")
     _no_network(monkeypatch)
     out = rg.repo_guess_request({"prompt": "The Billing page crashes on refunds"})
-    assert (out["repo_path"], out["confidence"], out["source"]) == (b, 0.95, "name")
+    assert (out["repo_path"], out["confidence"], out["source"]) == (b, 0.9, "name")
 
 
 def test_name_match_needs_whole_word_and_min_length(rg, tmp_path, monkeypatch):
@@ -309,7 +309,7 @@ def test_handler_returns_documented_shape(rg, tmp_path, monkeypatch):
     assert set(out) == {"ok", "repo_path", "confidence", "source", "candidates", "latency_ms"}
     assert out["ok"] is True and out["repo_path"] == b and out["source"] == "name"
     assert isinstance(out["latency_ms"], int)
-    assert out["candidates"] == [{"repo_path": b, "label": "beta", "probability": 0.95}]
+    assert out["candidates"] == [{"repo_path": b, "label": "beta", "probability": 0.9}]
 
 
 def test_handler_survives_garbage_body(rg, tmp_path, monkeypatch):
@@ -417,7 +417,7 @@ def test_with_key_jev_failure_falls_back_to_local_decision(rg, tmp_path, monkeyp
     monkeypatch.setattr(rg, "_rg_jev_key", lambda: "jev-test-key")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
     out = rg.repo_guess_request({"prompt": f"read {b}/runbook.md"})
-    assert (out["repo_path"], out["source"], out["confidence"]) == (b, "path", 1.0)
+    assert (out["repo_path"], out["source"], out["confidence"]) == (b, "path", 0.9)
 
 
 def test_container_current_repo_not_sent_as_hint(rg, tmp_path, monkeypatch):

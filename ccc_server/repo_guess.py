@@ -46,6 +46,7 @@ _RG_OVERRIDE_MAX = 500
 _RG_OVERRIDE_REL = Path(".claude") / "ccc-repo-description.md"
 _RG_DESC_SOURCES = ("README.md", "CLAUDE.md", "AGENTS.md")
 _RG_READ_BYTES = 16384
+_RG_LOCAL_CONF = 0.9
 
 _RG_INSTRUCTIONS = (
     "A developer starts a new AI coding-agent session with first_message. "
@@ -508,10 +509,13 @@ def repo_guess_request(body):
         path_hit = _rg_match_path(prompt, collapse)
         name_hits = _rg_match_names(prompt, cands)
         local = None
+        # Local matches stay below the UI's 0.95 auto-pick bar: on real
+        # history a mentioned path or name was the work's repo only ~70% of
+        # the time, so without Jev they surface as a suggestion, never a switch.
         if path_hit:
-            local = done(path_hit, 1.0, "path", [_rg_cand_row(path_hit, 1.0)])
+            local = done(path_hit, _RG_LOCAL_CONF, "path", [_rg_cand_row(path_hit, _RG_LOCAL_CONF)])
         elif len(name_hits) == 1:
-            local = done(name_hits[0], 0.95, "name", [_rg_cand_row(name_hits[0], 0.95)])
+            local = done(name_hits[0], _RG_LOCAL_CONF, "name", [_rg_cand_row(name_hits[0], _RG_LOCAL_CONF)])
         key = _rg_jev_key()
         if key:
             # Local matches are evidence, not decisions, once Jev can weigh

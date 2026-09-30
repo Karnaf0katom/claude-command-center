@@ -19,20 +19,20 @@ const A = '/w/alpha';
 const B = '/w/beta';
 
 test('confident guess that differs auto-picks', () => {
-  assert.deepEqual({ ...decide({ repo_path: B, confidence: 0.93 }, { current: A, userPicked: false }) },
+  assert.deepEqual({ ...decide({ repo_path: B, confidence: 0.97 }, { current: A, userPicked: false }) },
     { action: 'auto', path: B });
 });
 
-test('threshold is inclusive at 0.9', () => {
-  assert.equal(decide({ repo_path: B, confidence: 0.9 }, { current: A, userPicked: false }).action, 'auto');
-  assert.equal(decide({ repo_path: B, confidence: 0.89 }, { current: A, userPicked: false }).action, 'suggest');
+test('threshold is inclusive at 0.95', () => {
+  assert.equal(decide({ repo_path: B, confidence: 0.95 }, { current: A, userPicked: false }).action, 'auto');
+  assert.equal(decide({ repo_path: B, confidence: 0.94 }, { current: A, userPicked: false }).action, 'suggest');
 });
 
 test('a manual pick is never overridden, only suggested', () => {
   assert.equal(decide({ repo_path: B, confidence: 1.0 }, { current: A, userPicked: true }).action, 'suggest');
 });
 
-test('0.5 to 0.9 suggests; below 0.5 shows nothing', () => {
+test('0.5 to 0.95 suggests; below 0.5 shows nothing', () => {
   assert.equal(decide({ repo_path: B, confidence: 0.5 }, { current: A, userPicked: false }).action, 'suggest');
   assert.equal(decide({ repo_path: B, confidence: 0.49 }, { current: A, userPicked: false }).action, 'none');
 });

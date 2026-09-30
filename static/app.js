@@ -78725,7 +78725,7 @@
 
   // ── New-session repo auto-guess ──
   // POST /api/repo/guess reads the prompt and names the folder it belongs in.
-  // Confident guesses (>= 0.9) fill the picker unless the user already chose;
+  // Confident guesses (>= 0.95) fill the picker unless the user already chose;
   // middling ones (>= 0.5) become a click-to-apply chip. An auto-pick is NOT
   // a user choice: it is only saved as the last-used folder if it spawns.
   function repoGuessDecide(guess, state) {
@@ -78734,7 +78734,7 @@
     const conf = Number(guess.confidence);
     if (!(conf >= 0.5)) return none;
     if (guess.repo_path === state.current) return none;
-    if (conf >= 0.9 && !state.userPicked) return { action: 'auto', path: guess.repo_path };
+    if (conf >= 0.95 && !state.userPicked) return { action: 'auto', path: guess.repo_path };
     return { action: 'suggest', path: guess.repo_path };
   }
   // end repoGuessDecide
