@@ -46955,15 +46955,22 @@
           ? '<span class="fq-working-worker-age" title="' + escapeAttr('Worker ' + r.worker + ' running ' + r.workerAge) + '">up ' + escapeHtml(r.workerAge) + '</span>'
           : '';
         if (_uxqPicker.isMobile) {
+          // Engine icon stacks under the ref so the id column stays narrow,
+          // and the hover buttons overlay the title instead of reserving a
+          // column of their own (CCC-1242).
           return '<div class="fq-working-row is-mobile" data-uxq-working-ref="' + escapeAttr(r.ref) + '" data-uxq-session="' + escapeAttr(r.sid) + '">'
+            + '<span class="fq-working-lead">'
             + '<span class="fq-working-id">' + escapeHtml(r.ref || '-') + '</span>'
             + r.icon
+            + '</span>'
             + '<span class="fq-working-body">'
             + '<span class="fq-working-title">' + escapeHtml(r.title) + '</span>'
             + '<span class="fq-working-meta">' + escapeHtml(r.queue + ' · ' + r.elapsed) + chipsHtml + '</span>'
             + '</span>'
+            + '<span class="fq-working-actions">'
             + sessBtn
             + killBtn
+            + '</span>'
             + '<span class="fq-working-dot"></span>'
             + '</div>';
         }
