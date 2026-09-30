@@ -1,0 +1,1 @@
+- "Create queue for this session" now suggests a short, editable queue name, links the queue to the session on the server (so agents and other browsers can find it), tells the session how to split its work into tickets (`--accept`, `--after`, checks), and asks "Start N workers?" once the first tickets land.

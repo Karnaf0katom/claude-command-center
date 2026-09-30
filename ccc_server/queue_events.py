@@ -943,6 +943,10 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
             "backend": cfg_backend.get(q, ""),
             "github_repo": cfg_github_repo.get(q, ""),
             "configured": q in cfg_names,
+            # Session that created this queue for itself, and whether it still
+            # owes the human a "start N workers?" prompt (CCC-1225).
+            "session_id": str(cfg_raw.get(q, {}).get("session_id") or "") or None,
+            "offer_workers": bool(cfg_raw.get(q, {}).get("offer_workers")),
             "worker_plan": plan,
             "config_issue": _queue_worker_config_issue(plan),
             "spawn_issue": _queue_spawn_issue(q, str(plan.get("engine") or ""), launch_failures, now_epoch),

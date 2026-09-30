@@ -44782,6 +44782,7 @@
       if (seq >= _uxqHealthAppliedSeq) {
         _uxqHealthAppliedSeq = seq;
         _uxqHealthCache = { ts: Date.now(), rows, wt_workers, queues, worker_session_ids, worker_session_map, past_workers, github_sync };
+        try { _uxqMaybeOfferWorkers(queues); } catch (_) {}
         // A brand-new sub-queue can arrive here before any of its tickets do, so
         // re-derive the families off the fresh queue list.
         _uxqRefreshFamilyRoots();
@@ -49952,28 +49953,57 @@
 
   // "Create queue for this session" (CCC-769): a one-click way to spin up a
   // fresh WatchTower queue scoped to the open session's repo, so a session
-  // that wants to hand off follow-up work has somewhere to drop tickets
-  // without leaving the dashboard to fill in the full queue-config form.
-  // Auto-drain off is a deliberate default (a human decides when it starts
-  // draining), and the server also enforces it for any brand-new queue
-  // (CCC-768) regardless of what this sends.
-  // CCC-805: one session should have exactly one "its own" queue — repeated
-  // clicks (or double-clicks) on the button previously minted NAME-2, NAME-3,
-  // ... forever. Remember the queue this session already created, keyed the
-  // same way as _uxqScopeKey(), so a second click reuses it instead.
+  // can split its chat into tasks without leaving the dashboard to fill in the
+  // full queue-config form. Auto-drain off is a deliberate default (a human
+  // decides when it starts draining), and the server also enforces it for any
+  // brand-new queue (CCC-768) regardless of what this sends.
+  // CCC-805: one session should have exactly one "its own" queue, so a second
+  // click reuses it. CCC-1225: that link lives on the queue config
+  // (session_id), not localStorage, so agents, a task panel and other browsers
+  // can find a session's queue too. The old localStorage map is read as a
+  // fallback for queues created before the move.
   const _UXQ_SESSION_CREATED_QUEUE_LS = 'ccc-uxq-session-created-queue';
-  function _uxqLoadSessionCreatedQueueMap() {
-    try { return JSON.parse(localStorage.getItem(_UXQ_SESSION_CREATED_QUEUE_LS) || '{}') || {}; } catch (_) { return {}; }
+  function _uxqLegacySessionCreatedQueue() {
+    try {
+      const map = JSON.parse(localStorage.getItem(_UXQ_SESSION_CREATED_QUEUE_LS) || '{}') || {};
+      return String(map[_uxqScopeKey()] || '').toUpperCase();
+    } catch (_) { return ''; }
   }
-  function _uxqRememberSessionCreatedQueue(name) {
-    const k = _uxqScopeKey(); if (!k) return;
-    const map = _uxqLoadSessionCreatedQueueMap();
-    map[k] = name;
-    try { localStorage.setItem(_UXQ_SESSION_CREATED_QUEUE_LS, JSON.stringify(map)); } catch (_) {}
+  const _UXQ_NAME_STOPWORDS = new Set(('a an the and or of to for in on at with from by is it this that '
+    + 'my our please can you we i let lets fix add make into about new session').split(' '));
+  // First 2-3 meaningful words of the session title (CCC-1225), not a 40-char
+  // cut of the whole title: "Fix the flaky login redirect on Safari" -> FLAKY-LOGIN-REDIRECT.
+  function _uxqSuggestSessionQueueName(title, fallback) {
+    const words = String(title || '').match(/[A-Za-z0-9]+/g) || [];
+    const picked = words.filter(w => !_UXQ_NAME_STOPWORDS.has(w.toLowerCase()));
+    let name = (picked.length ? picked : words).slice(0, 3).join('-').toUpperCase().slice(0, 64);
+    if (!name) name = String(fallback || '').toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    if (!name || !/^[A-Z0-9]/.test(name)) name = 'Q-' + (name || 'SESSION');
+    return name.slice(0, 64);
   }
+  function _uxqNormalizeQueueName(raw) {
+    return String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+  }
+  // What the session is told once its queue exists: how to split its work
+  // into tickets the way this queue expects (the watchtower skill's rules).
+  function _uxqSessionQueueInstructions(name, repoPath) {
+    return 'Created WatchTower queue ' + name + ' for this session (repo ' + repoPath + '). '
+      + 'Auto-drain is off: nothing runs until the human starts workers (the dashboard asks '
+      + 'once your first tickets land). Use it to split this chat into tasks:\n'
+      + '- File one ticket per self-contained task: `wt add -q ' + name + ' "<title>" --accept "<one-line acceptance check>"`. '
+      + 'The --accept line is what a worker verifies before closing, so make it concrete.\n'
+      + '- Order dependent work with `--after <REF>` (repeatable), so a ticket is not claimed before the one it builds on closes.\n'
+      + '- Run `wt config -q ' + name + '` to see which checks/gates this queue runs, and write tickets a worker can pass them with.\n'
+      + '- Keep each item in exactly one place: the queue is the home for these tasks, so do not also track them in your todo list or notes.\n'
+      + '- If you work a ticket yourself, claim it first (`wt claim -q ' + name + ' <REF> --worker <your-id>`) so parallel workers don\'t collide, '
+      + 'and close it with `wt close <REF> --worker <your-id> --summary "..."`.';
+  }
+  // Returns the session's queue name (existing or newly created), or '' when
+  // nothing was created (cancelled or failed; a toast already said why).
   async function _createQueueForSession() {
     const repoPath = requireConvRepo('Create queue for this session');
-    if (!repoPath) return;
+    if (!repoPath) return '';
+    const sessionId = (typeof currentConversation !== 'undefined') ? String(currentConversation || '') : '';
     let options;
     try {
       const res = await fetch('/api/queue/config-options', { method: 'POST' });
@@ -49981,10 +50011,14 @@
       if (!res.ok || !options.ok) throw new Error((options && options.error) || res.status);
     } catch (e) {
       showOpToast('Could not load queue configuration: ' + e, 'error');
-      return;
+      return '';
     }
-    const existing = new Set((options.queues || []).map(q => String(q.queue).toUpperCase()));
-    const already = String(_uxqLoadSessionCreatedQueueMap()[_uxqScopeKey()] || '').toUpperCase();
+    const queues = options.queues || [];
+    const existing = new Set(queues.map(q => String(q.queue).toUpperCase()));
+    const linked = sessionId
+      ? queues.find(q => q && q.config && String(q.config.session_id || '') === sessionId)
+      : null;
+    const already = linked ? String(linked.queue).toUpperCase() : _uxqLegacySessionCreatedQueue();
     if (already && existing.has(already)) {
       if (typeof setStatusRailTab === 'function') setStatusRailTab('queue');
       if (typeof _uxqSetScopeOverride === 'function') _uxqSetScopeOverride(already);
@@ -49992,15 +50026,18 @@
       _uxqHealthCache.ts = 0;
       await _renderQueuePanel();
       showOpToast('This session already has queue ' + already + ' - switched to it.', 'info');
-      return;
+      return already;
     }
     const row = openConvRow();
-    const rawTitle = (typeof paneTitleForRow === 'function' ? paneTitleForRow(row) : '')
-      || _pathLeaf(repoPath) || 'Session';
-    let base = String(rawTitle).toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-    if (!base || !/^[A-Z0-9]/.test(base)) base = 'Q-' + (base || 'SESSION');
-    let name = base;
-    for (let n = 2; existing.has(name); n++) name = (base + '-' + n).slice(0, 64);
+    const rawTitle = (typeof paneTitleForRow === 'function' ? paneTitleForRow(row) : '') || '';
+    const base = _uxqSuggestSessionQueueName(rawTitle, _pathLeaf(repoPath) || 'Session');
+    let suggested = base;
+    for (let n = 2; existing.has(suggested); n++) suggested = (base + '-' + n).slice(0, 64);
+    const typed = await promptModal('Name the queue for this session', suggested);
+    if (typed == null) return '';
+    const name = _uxqNormalizeQueueName(typed);
+    if (!name || !/^[A-Z0-9]/.test(name)) { showOpToast('Queue name needs letters or numbers.', 'error'); return ''; }
+    if (existing.has(name)) { showOpToast('Queue ' + name + ' already exists - pick another name.', 'error'); return ''; }
     try {
       const res = await fetch('/api/queue/config', {
         method: 'POST',
@@ -50008,15 +50045,16 @@
         body: JSON.stringify({
           queue: name, repo_path: repoPath, auto_drain: false,
           backend: 'file', desired_workers: 1, claim_types: [],
+          ...(sessionId ? { session_id: sessionId } : {}),
+          offer_workers: true,
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error((data && data.error) || res.status);
     } catch (e) {
       showOpToast('Could not create queue: ' + e, 'error');
-      return;
+      return '';
     }
-    _uxqRememberSessionCreatedQueue(name);
     if (typeof setStatusRailTab === 'function') setStatusRailTab('queue');
     if (typeof _uxqSetScopeOverride === 'function') _uxqSetScopeOverride(name);
     _uxqItemsCache.ts = 0;
@@ -50027,15 +50065,62 @@
     // it needs to be told the queue exists — a silent toast only the human
     // sees defeats that (CCC-769 feedback). Goes through the normal send
     // channel (queued if the session is mid-turn), same as typing a message.
-    const sessionId = (typeof currentConversation !== 'undefined') ? currentConversation : '';
     if (sessionId && typeof injectToSession === 'function') {
-      injectToSession(sessionId,
-        'Created WatchTower queue ' + name + ' for this session (repo ' + repoPath + '). '
-        + 'Auto-drain is off, so nothing runs on it automatically. Use it to track topics '
-        + 'you\'re working on: file a ticket per topic (`wt add -q ' + name + ' "..."`), and '
-        + 'claim it before you start work on that topic (`wt claim -q ' + name + ' <ref> '
-        + '--worker <your-id>`) so parallel threads on this queue don\'t collide.');
+      injectToSession(sessionId, _uxqSessionQueueInstructions(name, repoPath));
     }
+    return name;
+  }
+
+  // "Start N workers?" (CCC-1225): a session queue is created with auto-drain
+  // off and offer_workers set; once its first tickets land, ask once. The
+  // answer (start or not now) clears offer_workers server-side, so every
+  // browser stops asking; the x only hides it for this page load.
+  const _uxqWorkerOfferHidden = new Set();
+  function _uxqMaybeOfferWorkers(queues) {
+    for (const q of (queues || [])) {
+      const name = String((q && q.queue) || '').toUpperCase();
+      if (!name || !q.offer_workers || q.auto_drain || _uxqWorkerOfferHidden.has(name)) continue;
+      const open = Number(q.claimable || 0) || Number(q.depth || 0);
+      if (open < 1) continue;
+      if (document.querySelector('.uxq-worker-offer[data-queue="' + CSS.escape(name) + '"]')) continue;
+      _uxqShowWorkerOffer(name, open);
+    }
+  }
+  function _uxqShowWorkerOffer(queue, open) {
+    const n = Math.max(1, Math.min(3, open));
+    const bar = document.createElement('div');
+    bar.className = 'uxq-worker-offer';
+    bar.dataset.queue = queue;
+    bar.setAttribute('role', 'alert');
+    bar.style.cssText = 'position:fixed;bottom:20px;right:20px;display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);padding:8px 12px;border-radius:6px;font-size:12px;color:var(--text);z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);max-width:460px;';
+    const btnCss = 'flex:0 0 auto;cursor:pointer;border-radius:4px;padding:2px 8px;font-size:11px;line-height:1.4;';
+    bar.innerHTML = '<span style="flex:1 1 auto;min-width:0;">' + escapeHtml(queue) + ' has ' + open
+      + ' ticket' + (open === 1 ? '' : 's') + '. Start ' + n + ' worker' + (n === 1 ? '' : 's') + '?</span>'
+      + '<button type="button" data-offer="start" style="' + btnCss + 'background:var(--accent, #5b8def);border:1px solid var(--accent, #5b8def);color:var(--button-text, #fff);">Start ' + n + '</button>'
+      + '<button type="button" data-offer="decline" style="' + btnCss + 'background:transparent;border:1px solid var(--border);color:var(--text-muted);">Not now</button>'
+      + '<button type="button" data-offer="hide" aria-label="Dismiss" style="flex:0 0 auto;cursor:pointer;background:transparent;border:0;color:var(--text-muted);font-size:16px;line-height:1;padding:0 2px;">&times;</button>';
+    bar.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-offer]');
+      if (!btn) return;
+      _uxqWorkerOfferHidden.add(queue);
+      bar.remove();
+      if (btn.dataset.offer === 'hide') return;
+      const workers = btn.dataset.offer === 'start' ? n : 0;
+      try {
+        const res = await fetch('/api/queue/offer-workers', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queue, workers }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || res.status);
+        if (workers) showOpToast('Starting ' + workers + ' worker' + (workers === 1 ? '' : 's') + ' on ' + queue + ' (auto-drain on).', 'success');
+        _uxqHealthCache.ts = 0;
+        _renderQueuePanel();
+      } catch (err) {
+        showOpToast('Could not update ' + queue + ': ' + err, 'error');
+      }
+    });
+    document.body.appendChild(bar);
   }
 
   // Plan-to-fleet (W51): drop a plan/spec/mission-brief document, preview the
@@ -63039,8 +63124,7 @@
     if (!currentConversation) { showOpToast('Select a session first.', 'error'); return; }
     if (typeof _createQueueForSession !== 'function') { showOpToast('Queue tools are not available.', 'error'); return; }
     orchFlashPlaybook('queue');
-    await _createQueueForSession();
-    const name = String((_uxqLoadSessionCreatedQueueMap() || {})[_uxqScopeKey()] || '');
+    const name = await _createQueueForSession();
     if (!name) return;   // creation failed; its toast already said why
     try {
       const res = await fetch('/api/queue/config-options', { method: 'POST' });
@@ -63060,6 +63144,7 @@
         desired_workers: Number(conf.desired_workers) || 1,
         claim_types: Array.isArray(conf.claim_types) ? conf.claim_types : [],
         auto_drain: true,
+        offer_workers: false,   // this tap already answered "start workers?"
       };
       const r2 = await fetch('/api/queue/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const d2 = await r2.json().catch(() => ({}));

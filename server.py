@@ -26183,6 +26183,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(build_ux_fixes_health_payload())
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/queue/for-session":
+            # Which queue(s) a session created for itself (CCC-1225). The link
+            # lives on the queue config, so agents and every browser see it.
+            qs = urllib.parse.parse_qs(parsed.query)
+            from ccc_server.session_queue import queues_for_session, valid_session_id
+            try:
+                sid = valid_session_id((qs.get("session_id", [""])[0]))
+            except ValueError as e:
+                self.send_json({"ok": False, "error": str(e)}, 400)
+            else:
+                names = queues_for_session(_wt_read_config() or {}, sid)
+                self.send_json({"ok": True, "session_id": sid,
+                                "queue": names[0] if names else None, "queues": names})
         elif path == "/api/wt/queue/history":
             # All-queues open/needs_input/closed series for the Queues
             # dashboard's history graph (CCC-903). ?days= (default 7, cap 30),
@@ -31804,6 +31817,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body) if body else {}
                 normalized = _queue_config_from_payload(payload)
+                session_link = ""
+                if str(payload.get("session_id") or "").strip():
+                    from ccc_server.session_queue import valid_session_id
+                    session_link = valid_session_id(payload.get("session_id"))
             except (json.JSONDecodeError, ValueError) as e:
                 self.send_json({"ok": False, "error": str(e)}, 400)
                 return
@@ -31896,7 +31913,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     cfg_path.parent.mkdir(parents=True, exist_ok=True)
                     if matched and matched != queue_name:
                         del cfg[matched]
-                    for kept in ("queue_label", "grace_s", "fallback_to_default_worker"):
+                    for kept in ("queue_label", "grace_s", "fallback_to_default_worker",
+                                 "session_id", "offer_workers"):
                         if kept not in payload and before_conf.get(kept) is not None:
                             normalized["config"][kept] = before_conf[kept]
                     cfg[queue_name] = normalized["config"]
@@ -31904,6 +31922,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     with open(tmp, "w") as f:
                         json.dump(cfg, f, indent=2)
                     tmp.replace(cfg_path)
+                # Session -> queue link (CCC-1225): present-only, like
+                # queue_label, so a plain re-save never clears it.
+                link = {}
+                if "session_id" in payload:
+                    link["session_id"] = session_link or None
+                if "offer_workers" in payload:
+                    link["offer_workers"] = True if payload.get("offer_workers") else None
+                if link:
+                    from ccc_server.session_queue import patch_queue_config
+                    patch_queue_config(_wt_config_path(), queue_name, link)
                 # Activity-log the save as a before/after diff (CCC-1037).
                 after_conf = (_wt_read_config() or {}).get(queue_name)
                 if after_conf is None:
@@ -31973,6 +32001,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "queue": key, "auto_drain": auto_drain})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
+            return
+        if path == "/api/queue/offer-workers":
+            # Answer a session queue's one-time "start N workers?" prompt
+            # (CCC-1225). Body: {queue, workers}; 0 declines, N starts draining
+            # with N workers. Either way the offer is cleared for every browser.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            from ccc_server.session_queue import patch_queue_config, worker_offer_updates
+            try:
+                payload = json.loads(body) if body else {}
+                if not isinstance(payload, dict):
+                    raise ValueError("expected JSON object")
+                queue_name = str(payload.get("queue") or "").strip().upper()
+                if not queue_name:
+                    raise ValueError("queue required")
+                updates = worker_offer_updates(payload.get("workers", 0))
+            except (json.JSONDecodeError, ValueError) as e:
+                self.send_json({"ok": False, "error": str(e)}, 400)
+                return
+            try:
+                before = dict((_wt_read_config() or {}).get(queue_name) or {})
+                after = patch_queue_config(_wt_config_path(), queue_name, updates)
+            except KeyError:
+                self.send_json({"ok": False, "error": f"unknown queue {queue_name}"}, 404)
+                return
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+                return
+            if after.get("auto_drain"):
+                _wt_log_queue_config_change(
+                    queue_name, _queue_config_diff(before, after) or "no changes")
+                _reconcile_once_async()
+            self.send_json({"ok": True, "queue": queue_name,
+                            "auto_drain": bool(after.get("auto_drain")),
+                            "desired_workers": after.get("desired_workers")})
             return
         if path == "/api/wt/queue/workers":
             # Set desired_workers for a queue (the compact status strip's
