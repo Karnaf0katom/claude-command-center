@@ -45002,7 +45002,7 @@
     const { worker, rest: restDetail } = _wtLogExtractWorker(p.verb, restDetailWithRef);
     const refHtml = ref ? '<span class="wl-ref">' + escapeHtml(ref) + '</span>' : '';
     const workerHtml = worker ? '<span class="wl-worker-id" title="' + escapeAttr(worker) + '">' + escapeHtml(worker) + '</span>' : '';
-    const detailHtml = escapeHtml(restDetail).replace(/\b([A-Z]+-\d+)\b/g, '<span class="wl-ref">$1</span>');
+    const detailHtml = _wtLogDetailHtml(restDetail);
     return {
       utcMs,
       ref,
@@ -45019,6 +45019,24 @@
         + '<span class="wl-detail">' + detailHtml + '</span>'
         + '</div>',
     };
+  }
+
+  // CCC-1238: most details are a human sentence followed by machine
+  // key=value fields ("no spawn wanted: ... | reconcile_id=... queue=WT").
+  // Bold the sentence and drop the fields to their own dimmer line so the
+  // statement reads at a glance. Lines that are only key=value stay plain.
+  function _wtLogDetailHtml(detail) {
+    const refs = (text) => escapeHtml(text).replace(/\b([A-Z]+-\d+)\b/g, '<span class="wl-ref">$1</span>');
+    const text = String(detail || '');
+    const cut = [text.indexOf(' | '), text.search(/\s[a-z_][a-z0-9_]*=\S/), text.search(/\s\[sid:/)]
+      .filter(i => i > 0);
+    const at = cut.length ? Math.min(...cut) : text.length;
+    const headline = text.slice(0, at).trim().replace(/^[—|-]\s*/, '').replace(/\s*[—:|-]$/, '');
+    if (!headline || /^[a-z_][a-z0-9_]*=/.test(headline)) return refs(text);
+    const tail = text.slice(at).replace(/^\s*\|\s*/, '').trim();
+    return '<span class="wl-headline">' + refs(headline) + '</span>'
+      // A bare "[sid:…]" stays on the headline's line; fields get their own.
+      + (tail ? '<span class="wl-kv' + (tail.includes('=') ? ' is-block' : '') + '">' + refs(tail) + '</span>' : '');
   }
 
   // A collapsed reconciler burst renders as ONE summary row — the digest is
