@@ -1,5 +1,6 @@
 # CCC
 
+[![CI](https://github.com/amirfish1/claude-command-center/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/amirfish1/claude-command-center/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/amirfish1/claude-command-center?color=blue)](https://github.com/amirfish1/claude-command-center/releases)
 [![Stars](https://img.shields.io/github/stars/amirfish1/claude-command-center?style=flat&color=yellow)](https://github.com/amirfish1/claude-command-center/stargazers)
 [![License: FSL-1.1-MIT](https://img.shields.io/badge/license-FSL--1.1--MIT-green)](LICENSE)
