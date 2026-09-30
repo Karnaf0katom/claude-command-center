@@ -15613,13 +15613,18 @@
     flex: 0 0 auto; font-size: 11px;
     overflow: visible; text-overflow: clip;
   }
-  #queuePanel.fq-mobile .fq-working-row .fq-working-body {
+  /* Keyed on the row's own .is-mobile class, not #queuePanel, so the same
+     rows in the Workers tab (.conv-workers-activity) get them too: without
+     the min-width:0 body the title spilled past the card (CCC-1237). A phone
+     row has room to wrap the title rather than truncate it. */
+  .fq-working-row.is-mobile .fq-working-body {
     display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto;
   }
-  #queuePanel.fq-mobile .fq-working-row .fq-working-title {
-    font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  .fq-working-row.is-mobile .fq-working-title {
+    font-size: 12.5px; white-space: normal; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
   }
-  #queuePanel.fq-mobile .fq-working-row .fq-working-meta {
+  .fq-working-row.is-mobile .fq-working-meta {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10px; color: #565e68;
   }
