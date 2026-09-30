@@ -48502,9 +48502,163 @@
       + '\neffort: ' + (plan.effort || '(engine default)') + ' — ' + src('effort')
       + '\nClick to change.';
     return '<button type="button" class="fq-status-plan' + (plan.is_default ? ' is-default' : '') + '"'
-      + ' data-fq-config-queue="' + escapeAttr(queue) + '"'
+      + ' data-fq-plan-queue="' + escapeAttr(queue) + '"'
+      + ' data-engine="' + escapeAttr(plan.engine) + '" data-model="' + escapeAttr(plan.model || '') + '"'
+      + ' aria-haspopup="dialog"'
       + ' title="' + escapeAttr(title) + '" aria-label="' + escapeAttr(title) + '">'
       + escapeHtml(label) + '</button>';
+  }
+
+  // CCC-1234: the plan chip opens a quick popover of 1-tap chips (the same
+  // usage-ranked engine/model favorites the new-session strip shows, plus
+  // the effort ladder) instead of the full queue manager. A tap saves at
+  // once; "More settings" still opens the manager. /api/queue/config is a
+  // full replace, so each save re-sends the queue's current fields.
+  let _fqPlanPopEl = null;
+  let _fqPlanPopCloser = null;
+  function _closeFqPlanPopover() {
+    if (_fqPlanPopEl) { _fqPlanPopEl.remove(); _fqPlanPopEl = null; }
+    if (_fqPlanPopCloser) {
+      document.removeEventListener('click', _fqPlanPopCloser, true);
+      document.removeEventListener('keydown', _fqPlanPopCloser, true);
+      _fqPlanPopCloser = null;
+    }
+  }
+  async function _openFqPlanPopover(btn, queue) {
+    _closeFqPlanPopover();
+    const pop = document.createElement('div');
+    pop.className = 'fq-plan-pop';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-label', 'Worker engine, model and effort for ' + queue);
+    pop.innerHTML = '<div class="fq-plan-pop-status">Loading…</div>';
+    document.body.appendChild(pop);
+    _fqPlanPopEl = pop;
+    const place = () => {
+      const r = btn.getBoundingClientRect();
+      const pr = pop.getBoundingClientRect();
+      pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pr.width - 8)) + 'px';
+      const below = window.innerHeight - r.bottom;
+      pop.style.top = (below >= pr.height + 12 || below >= r.top)
+        ? Math.min(r.bottom + 4, window.innerHeight - pr.height - 8) + 'px'
+        : Math.max(8, r.top - pr.height - 4) + 'px';
+    };
+    place();
+    _fqPlanPopCloser = (ev) => {
+      if (isImeKey(ev)) return;
+      if (ev.type === 'keydown' && ev.key === 'Escape') { _closeFqPlanPopover(); return; }
+      if (ev.type === 'click' && !pop.contains(ev.target) && !btn.contains(ev.target)) _closeFqPlanPopover();
+    };
+    document.addEventListener('click', _fqPlanPopCloser, true);
+    document.addEventListener('keydown', _fqPlanPopCloser, true);
+
+    let options;
+    try {
+      const res = await fetch('/api/queue/config-options', { method: 'POST' });
+      options = await res.json();
+      if (!res.ok || !options.ok) throw new Error((options && options.error) || res.status);
+    } catch (e) {
+      if (_fqPlanPopEl === pop) pop.querySelector('.fq-plan-pop-status').textContent = 'Could not load queue config: ' + e;
+      return;
+    }
+    if (_fqPlanPopEl !== pop) return;
+    const q = (options.queues || []).find(x => String(x.queue).toUpperCase() === String(queue).toUpperCase()) || {};
+    const conf = q.config || q;
+    const cur = { engine: conf.engine || '', model: conf.model || '', effort: conf.effort || '' };
+    const plan = { engine: btn.getAttribute('data-engine') || '', model: btn.getAttribute('data-model') || '' };
+    const allowedEngines = new Set(Object.keys(options.models_by_engine || {}));
+    // "claude-opus-5-5" and "opus-5-5" are one model: one chip, and the
+    // queue's own pin wins so it reads as selected.
+    const sameModel = (p, e, m) => p.engine === e && _normalizeModelId(p.model) === _normalizeModelId(m);
+    const favs = [];
+    const candidates = (cur.engine ? [{ engine: cur.engine, model: cur.model }] : [])
+      .concat(typeof getTopSpawnPicks === 'function' ? getTopSpawnPicks() : []);
+    candidates.forEach(p => {
+      if (!p || !p.engine || (allowedEngines.size && !allowedEngines.has(p.engine))) return;
+      if (!favs.some(f => sameModel(f, p.engine, p.model))) favs.push(p);
+    });
+    const effEngine = cur.engine || plan.engine;
+    const efforts = ((options.efforts_by_engine || {})[effEngine]) || [];
+    const glyph = e => '<span class="orch-glyph orch-glyph-' + escapeAttr(e) + '">'
+      + escapeHtml(MODEL_PICKER_ENGINE_GLYPHS[e] || String(e).charAt(0).toUpperCase() || '?') + '</span>';
+    const chip = (attrs, sel, inner, title) => '<button type="button" class="orch-tier-chip' + (sel ? ' is-selected' : '') + '"'
+      + ' role="radio" aria-checked="' + (sel ? 'true' : 'false') + '" ' + attrs
+      + (title ? ' title="' + escapeAttr(title) + '"' : '') + '>' + inner + '</button>';
+    const modelChips = chip('data-fq-plan-default="1"', !cur.engine, 'Default',
+      'Clear the queue pin: workers use the CCC worker default')
+      + favs.map(p => chip('data-engine="' + escapeAttr(p.engine) + '" data-model="' + escapeAttr(p.model || '') + '"',
+        !!cur.engine && sameModel(p, cur.engine, cur.model),
+        glyph(p.engine) + escapeHtml(getModelPillLabel(p.engine, p.model || '')),
+        p.engine + (p.model ? ' · ' + p.model : ' · engine default'))).join('');
+    const effortChips = efforts.length
+      ? chip('data-effort=""', !cur.effort, 'Default', 'Engine default effort')
+        + efforts.map(e => chip('data-effort="' + escapeAttr(e) + '"', e === cur.effort,
+          escapeHtml(REASONING_LEVEL_LABELS[e] || e))).join('')
+      : '';
+    pop.innerHTML = '<div class="fq-plan-pop-head">Next ' + escapeHtml(queue) + ' worker</div>'
+      + '<div class="fq-plan-pop-label">Engine · model</div>'
+      + '<div class="fq-plan-pop-chips" role="radiogroup" aria-label="Engine and model">' + modelChips + '</div>'
+      + (effortChips ? '<div class="fq-plan-pop-label">Effort</div>'
+        + '<div class="fq-plan-pop-chips" role="radiogroup" aria-label="Effort">' + effortChips + '</div>' : '')
+      + '<div class="fq-plan-pop-foot"><button type="button" class="fq-plan-pop-more" data-fq-plan-more="1">More settings…</button>'
+      + '<span class="fq-plan-pop-status" aria-live="polite"></span></div>';
+    place();
+    const status = pop.querySelector('.fq-plan-pop-status');
+
+    async function save(next) {
+      status.textContent = 'Saving…';
+      status.className = 'fq-plan-pop-status';
+      const body = {
+        queue: q.queue || queue,
+        repo_path: conf.repo_path || '',
+        backend: conf.backend || 'file',
+        github_repo: conf.github_repo || '',
+        github_assignee: conf.github_assignee || '',
+        engine: next.engine,
+        model: next.model,
+        effort: next.effort,
+        desired_workers: Number.isFinite(Number(conf.desired_workers)) ? Number(conf.desired_workers) : 1,
+        claim_types: Array.isArray(conf.claim_types) ? conf.claim_types : [],
+        auto_drain: conf.auto_drain === true,
+        product_gate: conf.product_gate === true,
+      };
+      try {
+        let r = await fetch('/api/queue/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        let d = await r.json().catch(() => ({}));
+        if (!r.ok && /polic/i.test(String(d.error || '')) && window.confirm(String(d.error) + '\n\nUse it anyway?')) {
+          body.confirm_blocked_model = true;
+          r = await fetch('/api/queue/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          d = await r.json().catch(() => ({}));
+        }
+        if (!r.ok || !d.ok) throw new Error((d && d.error) || r.status);
+      } catch (e) {
+        if (_fqPlanPopEl !== pop) return;
+        status.textContent = String(e && e.message ? e.message : e);
+        status.className = 'fq-plan-pop-status is-err';
+        return;
+      }
+      _closeFqPlanPopover();
+      _uxqHealthCache.ts = 0;
+      _uxqItemsCache.ts = 0;
+      await _renderQueuePanel();
+    }
+    pop.addEventListener('click', (ev) => {
+      const t = ev.target.closest && ev.target.closest('button');
+      if (!t || !pop.contains(t)) return;
+      if (t.hasAttribute('data-fq-plan-more')) {
+        _closeFqPlanPopover();
+        openQueueManager(queue);
+      } else if (t.hasAttribute('data-fq-plan-default')) {
+        save({ engine: '', model: '', effort: '' });
+      } else if (t.hasAttribute('data-effort')) {
+        // An effort needs a pinned engine to mean anything; pin the one the
+        // next worker already runs as.
+        save({ engine: cur.engine || plan.engine, model: cur.engine ? cur.model : '', effort: t.getAttribute('data-effort') });
+      } else if (t.hasAttribute('data-engine')) {
+        const engine = t.getAttribute('data-engine');
+        const ladder = ((options.efforts_by_engine || {})[engine]) || [];
+        save({ engine, model: t.getAttribute('data-model') || '', effort: ladder.includes(cur.effort) ? cur.effort : '' });
+      }
+    });
   }
   function _uxqRepaintStatusStrip() {
     const liveWorkers = ((_uxqHealthCache && _uxqHealthCache.wt_workers) || [])
@@ -49270,6 +49424,13 @@
       };
       $health.addEventListener('click', retryQueueReconcile);
       $health.addEventListener('click', inspectQueueWorker);
+      $health.addEventListener('click', (ev) => {
+        const btn = ev.target && ev.target.closest && ev.target.closest('[data-fq-plan-queue]');
+        if (!btn) return;
+        ev.preventDefault(); ev.stopPropagation();
+        if (_fqPlanPopEl) { _closeFqPlanPopover(); return; }
+        _openFqPlanPopover(btn, btn.getAttribute('data-fq-plan-queue'));
+      });
       $health.addEventListener('click', async (ev) => {
         const btn = ev.target && ev.target.closest && ev.target.closest('[data-fq-config-queue], #filesQueueConfigure');
         if (!btn) return;
@@ -78809,7 +78970,8 @@
       return (engineName === 'Claude' && engine !== 'claude' ? engine : engineName) + ' default';
     }
     const options = MODEL_OPTIONS_BY_ENGINE[engine] || [];
-    const found = options.find(o => o.id === modelId);
+    const found = options.find(o => o.id === modelId)
+      || options.find(o => _normalizeModelId(o.id) === _normalizeModelId(modelId));
     if (found && found.label) {
       return found.label;
     }
