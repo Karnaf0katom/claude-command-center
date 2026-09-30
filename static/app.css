@@ -15308,10 +15308,14 @@
      title room next to the claim chips (CCC-1242). Idle rows keep it. */
   .conv-workers-activity .fq-working-row.has-ref .fq-working-queue { display: none; }
   /* Too narrow for title and chips on one line: chips drop to a second line
-     under the title, so only rows holding extra claims grow. */
-  .conv-workers-activity .fq-working-row { flex-wrap: wrap; row-gap: 3px; }
-  .conv-workers-activity .fq-working-title { flex: 1 1 0; }
-  .conv-workers-activity .fq-working-chips { order: 10; flex: 1 0 100%; margin-left: 0; padding-left: 2px; }
+     under the title, so only rows holding extra claims grow. Desktop rows
+     only; the stacked is-mobile row already has its own meta line, and a
+     zero flex-basis there collapses the title to nothing. */
+  .conv-workers-activity .fq-working-row:not(.is-mobile) { flex-wrap: wrap; row-gap: 3px; }
+  .conv-workers-activity .fq-working-row:not(.is-mobile) .fq-working-title { flex: 1 1 0; }
+  .conv-workers-activity .fq-working-row:not(.is-mobile) .fq-working-chips { order: 10; flex: 1 0 100%; margin-left: 0; padding-left: 2px; }
+  /* Stacked row: chips sit on the meta line after "queue · age". */
+  .fq-working-row.is-mobile .fq-working-chips { vertical-align: middle; }
   /* A ticket reference is the durable identity in this narrow Workers strip;
      let its natural width win and truncate the title instead. */
   .conv-workers-activity .fq-working-id {
