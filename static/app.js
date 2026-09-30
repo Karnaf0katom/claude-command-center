@@ -44088,7 +44088,12 @@
     pane.loadBeforeLine = 0;
     pane.wantFull = false;
     if (paneId === activePaneId()) syncMobileOriginalAsk('');
-    syncPaneLastUserMessage(paneId, '');
+    // Seed the pane header with the original ask; a rendered user message
+    // replaces it. Without the seed, a transcript whose loaded tail has no
+    // user message (long Codex/worker runs, peer-only injects) showed no
+    // top bar at all (CCC-1245).
+    const _selRow = (conversationsData || []).find(x => x && (x.id === id || x.session_id === id));
+    syncPaneLastUserMessage(paneId, _selRow && _selRow.first_message ? cleanIssuePrompt(_selRow.first_message) : '');
     // Drop any visual "Clear" watermark (CCC-474) — a fresh (re)select of a
     // conversation always shows full history.
     const _selClearView = getConvViewForPane(paneId);
