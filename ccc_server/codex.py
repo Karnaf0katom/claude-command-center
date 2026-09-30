@@ -9933,7 +9933,49 @@ def backfill_claude_desktop_visibility(
     }
 
 
+def _claude_desktop_startup_backfill_interval_s():
+    raw = os.environ.get("CCC_CLAUDE_DESKTOP_STARTUP_BACKFILL_INTERVAL_S", "43200")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 43200.0
+
+
+def _claude_desktop_backfill_marker_path():
+    return _core.COMMAND_CENTER_STATE_DIR / "claude-desktop-backfill.json"
+
+
+def _claude_desktop_startup_backfill_due(now=None):
+    """False when a startup sweep already ran within the interval (CCC-1248).
+
+    Every app restart restarts server.py, and the sweep (prune every Desktop
+    metadata row + glob every repo's spawn logs) costs ~6 s CPU with load 8-10
+    on a big store. New spawns are made visible live by
+    _spawn_session_id_from_entry, so the sweep is only a safety net; it does not
+    need to run on every restart.
+    """
+    now = time.time() if now is None else float(now)
+    try:
+        last = float(json.loads(_claude_desktop_backfill_marker_path().read_text()).get("last_run") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return True
+    return not (0 < now - last < _claude_desktop_startup_backfill_interval_s())
+
+
+def _claude_desktop_note_backfill_ran(now=None):
+    path = _claude_desktop_backfill_marker_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"last_run": time.time() if now is None else float(now)}))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _claude_desktop_visibility_backfill_once():
+    if not _claude_desktop_startup_backfill_due():
+        return
     try:
         result = _core.backfill_claude_desktop_visibility(
             max_logs=_claude_desktop_startup_backfill_max_logs(),
@@ -9942,6 +9984,7 @@ def _claude_desktop_visibility_backfill_once():
     except Exception as e:
         print(f"  [claude-desktop] backfill skipped ({e})")
         return
+    _claude_desktop_note_backfill_ran()
     if result.get("updated"):
         print(
             "  [claude-desktop] added "
