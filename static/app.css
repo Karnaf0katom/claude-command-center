@@ -15302,7 +15302,8 @@
   }
   /* Worker id is the least useful of the three trailing fields at this width;
      queue and elapsed answer "where" and "how long", which is the question. */
-  .conv-workers-activity .fq-working-worker { display: none; }
+  .conv-workers-activity .fq-working-worker,
+  .conv-workers-activity .fq-working-worker-age { display: none; }
   /* A ticket reference is the durable identity in this narrow Workers strip;
      let its natural width win and truncate the title instead. */
   .conv-workers-activity .fq-working-id {
@@ -15432,6 +15433,13 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 10.5px; color: #565e68; white-space: nowrap;
   }
+  /* CCC-1242: worker process age, kept apart from the ticket's claim age. */
+  .fq-working-worker-age {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px; color: #454c55; white-space: nowrap;
+  }
+  /* A claim parked on a question sorts last and reads quieter than live work. */
+  .fq-working-row.is-needs-input .fq-working-title { color: #7d8590; font-style: italic; }
   /* ── Ticket filter row ──────────────────────────────────────────────── */
   .fq-ticket-filter-row {
     display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 8px 8px;

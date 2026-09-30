@@ -62,3 +62,13 @@ test('session button styled like the kill button with a neutral accent', () => {
   assert.match(m[0], /cursor: pointer/);
   assert.match(css, /\.fq-working-row:hover \.fq-worker-session \{ opacity: 1; \}/);
 });
+
+test('CCC-1242: one row per claim, aged from the claim, worker age labeled apart', () => {
+  const body = sliceFn('_uxqRenderWorkingNow()', '_wtWarmActivityForWorkersLane');
+  assert.match(body, /const claims = items\.filter\(/, 'every claim, not items.find first-match');
+  assert.doesNotMatch(body, /const on = items\.find\(/);
+  assert.match(body, /a\.needs_input \? 1 : 0/, 'needs_input claims sort after live work');
+  assert.match(body, /on \? ageOf\(on\.claimed_at\) : workerAge/, 'ticket age from claimed_at');
+  assert.match(body, /class="fq-working-worker-age"/, 'worker age rendered separately');
+  assert.match(css, /\.conv-workers-activity \.fq-working-worker-age/, 'hidden in the compact sidebar');
+});
