@@ -40,6 +40,7 @@ command, without opening the dashboard:
     ccc jobs add --host hermes --repo BYM --what "..." --when "hourly" [--name slug] [--wait]
                                                 # an agent session creates the job (POST /api/jobs/add)
 
+    ccc astra-check <sid> ... # cost/behavior score for a Codex session (scripts/astra-check)
     ccc brain <subcmd> ...    # passthrough to an optional private plugin (no-op if unconfigured)
 
 <session> is a session id, a unique id prefix, or a (unique, case-
@@ -1713,6 +1714,11 @@ def main(argv=None):
     # --install-service). Keep one name for both roles: known query
     # subcommands run the client below; anything else (no args, unknown
     # flags) passes through to ./run.sh so `ccc` still launches CCC.
+    # `ccc astra-check <sid>` is a thin wrapper over scripts/astra-check (the
+    # astra-guardrail skill's spend audit); it needs no running server.
+    if argv and argv[0] == "astra-check":
+        script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "scripts", "astra-check")
+        os.execv(script, [script] + argv[1:])
     if argv and argv[0] not in SUBCOMMANDS and argv[0] not in ("-h", "--help", "--server"):
         run_sh = os.path.join(os.path.dirname(os.path.realpath(__file__)), "run.sh")
         os.execv(run_sh, [run_sh] + argv)
