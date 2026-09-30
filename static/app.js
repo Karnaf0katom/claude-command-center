@@ -2229,7 +2229,7 @@
   // MODEL_OPTIONS_BY_ENGINE[engine][0] (fable-5, the priciest tier) for
   // the rest of the tab's life. They now wait for the rows like everything
   // else but replay through the plain fetch, outside the abortable pool.
-  const _startupDirectReplayPaths = ['/api/spawn-defaults', '/api/model-picker/picks', '/api/repo/list'];
+  const _startupDirectReplayPaths = ['/api/engines/models', '/api/spawn-defaults', '/api/model-picker/picks', '/api/repo/list'];
   function _startupApiPath(input, init) {
     const rawUrl = typeof input === 'string' ? input : (input && input.url) || '';
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();

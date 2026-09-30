@@ -69,6 +69,9 @@ class FakeWt:
 
 class PerfEventsTestBase(unittest.TestCase):
     def setUp(self):
+        warmup = mock.patch.object(pe, "_PROCESS_STARTED_AT", time.time() - pe.WARMUP_S - 1)
+        warmup.start()
+        self.addCleanup(warmup.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self._orig_override = pe._STATE_DIR_OVERRIDE
@@ -317,8 +320,7 @@ class TestPerfTicketCheckOnce(PerfEventsTestBase):
 
 class TestWarmupSuppression(PerfEventsTestBase):
     """Samples recorded inside the post-boot warmup window are real data but
-    must never qualify a breach pattern on their own -- a giant first-paint
-    outlier during startup contention is expected, not a regression."""
+    archive stalls must still alert, using the cold-load budget."""
 
     def test_record_event_stamps_warmup_flag(self):
         with mock.patch.object(pe, "_PROCESS_STARTED_AT", time.time()):
@@ -334,24 +336,40 @@ class TestWarmupSuppression(PerfEventsTestBase):
         row = json.loads(self.events_path().read_text().strip())
         self.assertFalse(row["warmup"])
 
-    def test_warmup_2x_sample_does_not_qualify(self):
-        now = time.time()
-        row = _row("archive_load", 50000, now, pe.ARCHIVE_COLD_MS)
-        row["warmup"] = True
-        self.assertIsNone(pe.evaluate_breach_pattern([row]))
-        # Same sample without the flag still qualifies.
-        del row["warmup"]
-        self.assertIsNotNone(pe.evaluate_breach_pattern([row]))
+    def test_startup_archive_uses_cold_budget(self):
+        with mock.patch.object(pe, "_PROCESS_STARTED_AT", time.time()), mock.patch.object(
+            pe, "archive_is_warm", return_value=True
+        ):
+            result = pe.record_event("archive_load", 3200)
+        self.assertTrue(result["warmup"])
+        self.assertEqual(result["threshold_ms"], pe.ARCHIVE_COLD_MS)
+        self.assertFalse(result["breach"])
 
-    def test_warmup_rows_dont_file_tickets(self):
+    def test_historical_startup_rows_use_cold_budget(self):
+        row = _row("archive_load", 3200, time.time(), pe.ARCHIVE_WARM_MS)
+        row["warmup"] = True
+        self.assertIsNone(pe.evaluate_breach_pattern([row, dict(row)]))
+        row["ms"] = 6000
+        self.assertIsNotNone(pe.evaluate_breach_pattern([row, dict(row)]))
+        self.assertEqual(row["threshold_ms"], pe.ARCHIVE_WARM_MS)
+        row["threshold_ms"] = 8000
+        row["breach"] = False
+        self.assertIsNotNone(pe.evaluate_breach_pattern([row, dict(row)]))
+
+    def test_extreme_startup_archive_files_ticket(self):
         now = time.time()
-        row = _row("archive_load", 30000, now - 60, pe.ARCHIVE_COLD_MS)
+        row = _row("archive_load", 28016, now - 60, pe.ARCHIVE_WARM_MS)
         row["warmup"] = True
         _append_raw(self.events_path(), row)
         fake = FakeWt()
         pe._WT_RUNNER = fake
-        self.assertEqual(pe.perf_ticket_check_once(now=now), "ok")
-        self.assertFalse(any(call[0] == "add" for call in fake.calls))
+        self.assertEqual(pe.perf_ticket_check_once(now=now), "filed:CCC-501")
+        self.assertTrue(any(call[0] == "add" for call in fake.calls))
+
+    def test_startup_conversation_still_suppressed(self):
+        row = _row("conv_open", 30000, time.time(), pe.CONV_OPEN_MS)
+        row["warmup"] = True
+        self.assertIsNone(pe.evaluate_breach_pattern([row]))
 
 
 if __name__ == "__main__":
@@ -516,16 +534,16 @@ class TestSaturationDowngrade(PerfEventsTestBase):
         ]
         self.assertIsNone(pe.evaluate_breach_pattern(events))
 
-    def test_warmup_saturated_rows_file_nothing(self):
+    def test_warmup_saturated_archive_files_saturation_alert(self):
         now = time.time()
-        row = self._saturated_row("archive_load", 30000, now, pe.ARCHIVE_COLD_MS)
+        row = self._saturated_row("archive_load", 6000, now, pe.ARCHIVE_COLD_MS)
         row["warmup"] = True
         _append_raw(self.events_path(), row)
         _append_raw(self.events_path(), dict(row))
         fake = FakeWt()
         pe._WT_RUNNER = fake
-        self.assertEqual(pe.perf_ticket_check_once(now=now), "ok")
-        self.assertFalse(any(call[0] == "add" for call in fake.calls))
+        self.assertEqual(pe.perf_ticket_check_once(now=now), "saturated-filed:CCC-501")
+        self.assertTrue(any(call[0] == "add" for call in fake.calls))
 
     def _seed_saturated_breaches(self, now):
         path = self.events_path()

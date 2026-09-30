@@ -85,15 +85,9 @@ ARCHIVE_WARM_MS = _env_int("CCC_PERF_ARCHIVE_WARM_MS", 1000)
 CONV_OPEN_MS = _env_int("CCC_PERF_CONV_OPEN_MS", 5000)
 WARM_WINDOW_S = _env_int("CCC_PERF_WARM_WINDOW_S", 3600)
 
-# Process-start marker. Samples recorded during the post-restart startup
-# storm (scratch-gc, lazy state loads, the detached archive-refresh
-# subprocess all competing) measure boot contention, not steady-state perf —
-# and archive_load ones also mislabel "warm" because the persisted response
-# cache seeds _ARCHIVE_BUILD_TS, so a 9-13s first paint seconds after a
-# restart met the 1000ms warm threshold and filed a p1 via the single-2x
-# rule. That exact pattern produced CCC-1128, CCC-1138, and CCC-1159. Warmup
-# samples are still recorded (the data is real) but flagged "warmup" and
-# excluded from breach-pattern filing.
+# Startup archive loads use the cold budget even when a persisted cache
+# exists. Keep the warmup flag for attribution, but do not hide user-visible
+# startup stalls from alerting. Conversation opens retain warmup suppression.
 _PROCESS_STARTED_AT = time.time()
 WARMUP_S = _env_int("CCC_PERF_WARMUP_S", 300)
 
@@ -270,7 +264,7 @@ def record_event(kind, ms, boot_id="", conv_id="", detail=None):
             except (TypeError, ValueError):
                 pass
         warm = archive_is_warm(page_start_ts=now - since_ms / 1000.0, now=now)
-    threshold_ms = _threshold_for(kind, warm)
+    threshold_ms = _threshold_for(kind, warm and not warmup)
     ms_int = int(round(ms_f))
     breach = ms_f >= threshold_ms
     load1, ncpu = _machine_load()
@@ -447,6 +441,20 @@ def summarize(hours=24, now=None):
 # ---------------------------------------------------------------------------
 
 
+def _alert_rows(events):
+    """Apply startup budgets to both new and previously recorded samples."""
+    rows = []
+    for event in events:
+        if event.get("warmup"):
+            if event.get("kind") != "archive_load":
+                continue
+            threshold = ARCHIVE_COLD_MS
+            event = dict(event, threshold_ms=threshold,
+                         breach=(event.get("ms") or 0) >= threshold)
+        rows.append(event)
+    return rows
+
+
 def evaluate_breach_pattern(events):
     """Pick the worst kind that looks like a real regression, or None.
 
@@ -455,17 +463,14 @@ def evaluate_breach_pattern(events):
     truly awful sample is worth a ticket even under saturation). Among
     qualifying kinds, the one with the higher p95 wins.
 
-    Warmup-flagged rows (recorded inside the post-boot window) never
-    qualify: a giant first-paint outlier during startup is expected
-    contention, and counting it here refiles the same false-positive
-    ticket on every restart. Saturated breach rows are likewise downgraded:
-    they measure machine contention, not CCC perf — _saturation_ticket_check
-    surfaces those separately as one "machine saturated" alert.
+    Startup archive rows use the cold-load budget; startup conversation
+    rows remain suppressed. Saturated breaches route to a machine alert.
     """
+    events = _alert_rows(events)
     best = None
     for kind in _VALID_KINDS:
         rows = [
-            e for e in events if e.get("kind") == kind and not e.get("warmup")
+            e for e in events if e.get("kind") == kind
         ]
         if not rows:
             continue
@@ -498,8 +503,8 @@ def evaluate_saturation(events):
     """
     saturated = [
         e
-        for e in events
-        if e.get("breach") and not e.get("warmup") and _row_saturated(e)
+        for e in _alert_rows(events)
+        if e.get("breach") and _row_saturated(e)
     ]
     if len(saturated) < 2 and not any(_row_grossly_saturated(r) for r in saturated):
         return None
@@ -655,6 +660,7 @@ def _build_note(pattern, state):
         % (ARCHIVE_COLD_MS, ARCHIVE_WARM_MS, CONV_OPEN_MS),
         "kind=%s count=%d p50=%sms p95=%sms max=%sms"
         % (pattern["kind"], pattern["count"], pattern["p50"], pattern["p95"], pattern["max"]),
+        "Startup archive loads use the cold-load budget (including persisted warm caches).",
         "",
         "Worst samples (ts  ms  warm/cold  conv_id):",
     ]
@@ -820,9 +826,8 @@ def perf_ticket_check_once(now=None):
         events = read_events(now - 24 * 3600)
         rows = [
             event
-            for event in events
+            for event in _alert_rows(events)
             if event.get("kind") == recent_pattern["kind"]
-            and not event.get("warmup")
         ]
         if not rows:
             return "ok"

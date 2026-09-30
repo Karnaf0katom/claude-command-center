@@ -62,13 +62,15 @@ test('boot beacons and composer catalogs wait for the archive rows', async () =>
 test('released catalog reads survive the spawn-click pool abort', async () => {
   const ctx = harness();
   const spawnDefaults = ctx.fetchViaGate('/api/spawn-defaults', { cache: 'no-store' });
+  const models = ctx.fetchViaGate('/api/engines/models');
   const picks = ctx.fetchViaGate('/api/model-picker/picks');
   const folders = ctx.window.__cccBackgroundApiFetch('/api/repo/list');
   const clientLog = ctx.fetchViaGate('/api/client-log', { method: 'POST', body: '{}' });
   ctx.release();
   ctx.abortPool();
-  const responses = await Promise.all([spawnDefaults, picks, clientLog, folders]);
-  assert.deepEqual(responses.map(r => r.status), [200, 200, 200, 200]);
+  const responses = await Promise.all([spawnDefaults, picks, clientLog, folders, models]);
+  assert.deepEqual(responses.map(r => r.status), [200, 200, 200, 200, 200]);
+  assert.ok(urls(ctx).includes('GET /api/engines/models'));
   assert.ok(urls(ctx).includes('GET /api/spawn-defaults'));
   assert.ok(urls(ctx).includes('GET /api/model-picker/picks'));
   assert.ok(urls(ctx).includes('GET /api/repo/list'));
