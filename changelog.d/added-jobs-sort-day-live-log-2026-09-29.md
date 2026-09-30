@@ -1,0 +1,3 @@
+- Jobs tab: a project / recent / day toggle (choice is remembered). Day lists today's launches in clock order with a "now" marker; recent is flat, running first.
+- Jobs tab: a running job shows a "live" pill. It opens the WatchTower ticket the run printed, or tails the run's log live (auto-scrolls unless you scroll up, stops when the job finishes).
+- Jobs tab: larger text and spacing throughout.

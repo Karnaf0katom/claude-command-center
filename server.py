@@ -25859,7 +25859,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 lines = max(1, min(500, int((qs.get("lines", ["50"])[0] or "50").strip())))
             except Exception:
                 pass
-            self.send_json(get_scheduled_job_log(job_id, max_lines=lines))
+            if (qs.get("live", [""])[0] or "").strip() in ("1", "true"):
+                from ccc_server.scheduled_jobs import get_scheduled_job_log_live
+                self.send_json(get_scheduled_job_log_live(
+                    job_id, cursor=(qs.get("cursor", [""])[0] or ""), max_lines=lines))
+            else:
+                self.send_json(get_scheduled_job_log(job_id, max_lines=lines))
         elif path == "/api/watchtower/service/status":
             self.send_json(_watchtower_service_status())
         elif path == "/api/watchtower/alerts":
