@@ -22,6 +22,7 @@ import time
 
 from ccc_server import core as _core
 from ccc_server.github_issues import github_rate_limited
+from ccc_server.ticket_stages import stage_counts, stage_stuck_seconds, with_stages
 
 # ---------------------------------------------------------------------------
 # Queue / ticket-appearance events for replay (W22 / B4)
@@ -748,11 +749,13 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
     claimable_by_q = {}  # queue → open items a worker is ALLOWED to claim
     in_progress_by_q = {}  # queue → items currently claimed/in progress
     in_review_by_q = {}  # queue → items closed by a worker, awaiting a gate (WT-5)
+    stages_by_q = {}  # queue → {stage: n} for gated tickets (CCC-1236)
     blocked_by_q = {}  # queue → open items waiting on an unsatisfied blocked_by (WT-4)
     last_activity_q = {}  # queue → most-recent item-touch epoch (any status)
     last_progress_q = {}  # queue → most-recent close OR claim epoch (WT health semantics)
     try:
-        all_items = with_waiting_on((_core._q.list_items() if items is None else items) or [])
+        all_items = with_stages(with_waiting_on((_core._q.list_items() if items is None else items) or []))
+        stages_by_q = stage_counts(all_items)
         for it in all_items:
             qn = _norm(it.get("project"))
             if not qn or qn == "?":
@@ -920,6 +923,8 @@ def compute_queues_health(health=None, wt_workers=None, items=None):
             "claimable": claimable,
             "in_progress": int(in_progress_by_q.get(q, 0)),
             "in_review": int(in_review_by_q.get(q, 0)),
+            "stage_counts": dict(stages_by_q.get(q) or {}),
+            "stage_stuck_s": stage_stuck_seconds(),
             "blocked": int(blocked_by_q.get(q, 0)),
             "closed": int(closed_by_q.get(q, 0)),
             "total": int(total_by_q.get(q, 0)),
@@ -989,7 +994,7 @@ def _list_items_with_waiting_on(status_filter, lane_filter, **kw):
         with _ux_fixes_list_cache_lock:
             ent = _ux_fixes_list_cache.get(("", ""))
         extra = ent["items"] if ent else None
-    return with_waiting_on(items, extra)
+    return with_stages(with_waiting_on(items, extra))
 
 
 _UX_FIXES_LIST_TTL = 10.0
@@ -1221,7 +1226,7 @@ def _gh_queue_poll_once():
     except Exception:
         return False
 
-    items = with_waiting_on(items)
+    items = with_stages(with_waiting_on(items))
     with _ux_fixes_list_cache_lock:
         _ux_fixes_list_cache[("", "")] = {"ts": time.time(), "items": items}
 

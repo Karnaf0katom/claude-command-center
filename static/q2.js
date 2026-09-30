@@ -400,6 +400,12 @@
       if (String(it.source || '') === 'github' || it.github_repo) b.github++; else b.local++;
       var st = statusOf(it);
       if (st === 'closed') return;
+      var sp = stagesOf(it);
+      if (sp && sp.current && sp.current !== 'closed') {
+        b.stages = b.stages || {};
+        b.stages[sp.current] = (b.stages[sp.current] || 0) + 1;
+        if (stageStuck(it, sp)) b.stageStuck = (b.stageStuck || 0) + 1;
+      }
       if (it.needs_input) {
         if (it.block_kind === 'rationale') b.gated = (b.gated || 0) + 1;
         b.needsInput++;
@@ -435,6 +441,7 @@
     var openWord = openBase
       ? openBase + ((f.waiting || 0) === 1 ? '' : 's')
       : 'open';
+    var stageN = f.stages || {};
     var openTip = types.length
       ? 'Open and claimable here (this queue drains ' + types.join(' + ') + ')'
       : 'Open and unclaimed';
@@ -450,6 +457,15 @@
         + (f.review
           ? '<span class="q2-n is-review" title="Closed by a worker, waiting on its review gate (accept / reject)">'
             + '<b>' + f.review + '</b> review</span>'
+          : ''),
+      // CCC-1236: where gated tickets are, stage by stage, in pipeline order.
+      stages: STAGE_ORDER.filter(function (k) { return stageN[k]; }).map(function (k) {
+        return '<span class="q2-n is-stage is-stage-' + k + '" title="Tickets in the ' + esc(STAGE_WORD[k]) + ' stage">'
+          + '<b>' + stageN[k] + '</b> ' + esc(STAGE_WORD[k]) + '</span>';
+      }).join('')
+        + (f.stageStuck
+          ? '<span class="q2-n is-stage-stuck" title="In one stage longer than the queue\u2019s stuck threshold"><b>'
+            + f.stageStuck + '</b> stuck</span>'
           : ''),
       wip: f.wip
         ? '<span class="q2-n is-wip" title="Claimed by a worker and in progress">'
@@ -2103,6 +2119,146 @@
     return '<span class="q2-gh-label" title="GitHub label: ' + esc(l) + '">' + esc(l) + '</span>';
   }
 
+  // ── WatchTower stage pipeline (CCC-1236) ─────────────────────────────────
+  // The server attaches `stages` (ccc_server/ticket_stages.py) to any ticket
+  // with gates or a plan: only the stages that ticket really has, which one
+  // it is in, who runs it and since when, and loop counts read from
+  // WatchTower's own events. Nothing is re-derived here; this only draws it.
+  var STAGE_ORDER = ['plan', 'plan_review', 'build', 'checks', 'verify', 'review'];
+  var STAGE_WORD = {
+    plan: 'planning', plan_review: 'plan review', build: 'building',
+    checks: 'checks', verify: 'verifying', review: 'review',
+  };
+  var STATE_WORD = { done: 'done', current: 'now', failed: 'failed', skipped: 'skipped', pending: 'not yet' };
+
+  function stagesOf(it) {
+    var sp = it && it.stages;
+    return (sp && Array.isArray(sp.stages) && sp.stages.length) ? sp : null;
+  }
+
+  function stageStuckSeconds(it) {
+    var k = projectKey(it && it.project);
+    var row = (state.queues || []).filter(function (q) { return projectKey(q.queue) === k; })[0];
+    return (row && row.stage_stuck_s) || 600;
+  }
+
+  // Minutes resolution: rows repaint every poll, and a seconds counter would
+  // change the row html on every one of them.
+  function fmtStageAge(ms) {
+    var m = Math.floor(Math.max(0, ms) / 60000);
+    if (m < 1) return '<1m';
+    if (m < 60) return m + 'm';
+    if (m < 1440) return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+    return Math.floor(m / 1440) + 'd';
+  }
+
+  function stageAgeMs(sp) {
+    var t = Date.parse((sp && sp.since) || '');
+    return t ? Math.max(0, Date.now() - t) : 0;
+  }
+
+  // Stuck at stage: in the same not-closed stage longer than the queue's
+  // stuck threshold (the same no-progress window WatchTower health uses).
+  function stageStuck(it, sp) {
+    if (!sp || sp.current === 'closed' || statusOf(it) === 'closed') return false;
+    return stageAgeMs(sp) > stageStuckSeconds(it) * 1000;
+  }
+
+  function stageRunner(s) {
+    if (!s || !(s.engine || s.model)) return '';
+    return [s.engine, shortModel(s.model)].filter(Boolean).join(' ');
+  }
+
+  function currentStage(sp) {
+    return (sp.stages || []).filter(function (s) { return s.key === sp.current; })[0] || null;
+  }
+
+  // "Verify: codex gpt-6.1-sol · 12m". The age is dropped once closed.
+  function stageNowText(it, sp, withRunner) {
+    var cur = currentStage(sp);
+    if (!cur) return '';
+    if (sp.current === 'closed') return 'Closed';
+    var runner = withRunner ? stageRunner(cur) : '';
+    var age = sp.since ? fmtStageAge(stageAgeMs(sp)) : '';
+    return cur.label + (runner ? ': ' + runner : '') + (age ? ' · ' + age : '');
+  }
+
+  function stageStripHtml(sp, full) {
+    return '<span class="q2-stages' + (full ? ' is-full' : '') + '">'
+      + (sp.stages || []).map(function (s) {
+        var tip = s.label + ': ' + (STATE_WORD[s.state] || s.state)
+          + (stageRunner(s) ? ' (' + (s.role ? s.role.replace('_', ' ') + ', ' : '') + stageRunner(s) + ')' : '')
+          + (s.detail ? ' — ' + s.detail : '');
+        return '<span class="q2-stage is-' + esc(s.state) + '" data-stage="' + esc(s.key) + '"'
+          + ' title="' + esc(tip) + '">'
+          + '<span class="q2-stage-pip" aria-hidden="true"></span>'
+          + (full ? '<span class="q2-stage-label">' + esc(s.label) + '</span>' : '')
+          + '</span>';
+      }).join('')
+      + '</span>';
+  }
+
+  // Detail pane: the full strip, what is running now, loops, floor routing,
+  // why it is not moving, and the plan/verdict/check evidence.
+  function stagePanelHtml(item) {
+    var sp = stagesOf(item);
+    if (!sp) return '';
+    var sessions = sp.sessions || {};
+    var cur = currentStage(sp);
+    var stuck = stageStuck(item, sp);
+    var lines = [];
+    if (cur && sp.current !== 'closed') {
+      lines.push('<div class="q2-stage-now' + (stuck ? ' is-stuck' : '') + '">'
+        + '<b>' + esc(cur.label) + '</b>'
+        + (stageRunner(cur) ? ' <span class="q2-dim">' + esc((cur.role || '').replace('_', ' ')) + '</span> '
+          + '<span class="q2-mono">' + esc(stageRunner(cur)) + '</span>' : '')
+        + (sp.since ? ' <span class="q2-dim" title="' + esc(sp.since) + '">for ' + esc(fmtStageAge(stageAgeMs(sp))) + '</span>' : '')
+        + (stuck ? ' <span class="q2-stage-stuck">stuck at this stage</span>' : '')
+        + (sessions[sp.current] ? ' ' + sessionBtn(sessions[sp.current], 'open ' + (cur.role || 'session').replace('_', ' ')) : '')
+        + '</div>');
+    }
+    if (sp.floor_routed) {
+      lines.push('<div class="q2-stage-note">Routed to <span class="q2-mono">' + esc(sp.floor_routed) + '</span> (floor)</div>');
+    }
+    (sp.loops || []).forEach(function (l) {
+      lines.push('<div class="q2-stage-note is-loop">↻ ' + esc(l.text) + '</div>');
+    });
+    (sp.waiting || []).forEach(function (w) {
+      lines.push('<div class="q2-stage-note is-waiting">' + esc(w.text) + '</div>');
+    });
+    // Per-stage sessions (planner / plan reviewer / builder / verifier).
+    var links = (sp.stages || []).filter(function (s) {
+      return sessions[s.key] && s.key !== sp.current;
+    }).map(function (s) { return sessionBtn(sessions[s.key], s.label); });
+    if (links.length) lines.push('<div class="q2-stage-links"><span class="q2-dim">transcripts</span> ' + links.join(' ') + '</div>');
+
+    var plan = (item.plan && typeof item.plan === 'object') ? item.plan : null;
+    var evidence = '';
+    if (plan && plan.text) {
+      evidence += '<details class="q2-stage-ev"' + (sp.current === 'plan_review' ? ' open' : '') + '>'
+        + '<summary>Plan' + (plan.round > 1 ? ' (round ' + esc(plan.round) + ')' : '') + '</summary>'
+        + (window.CCCTicketProse ? window.CCCTicketProse.render(plan.text) : '<pre class="q2-pre">' + esc(plan.text) + '</pre>')
+        + '</details>';
+    }
+    (plan && Array.isArray(plan.reviews) ? plan.reviews : []).forEach(function (r) {
+      evidence += '<div class="q2-stage-verdict ' + (r.accepted ? 'is-pass' : 'is-fail') + '">'
+        + '<b>Plan review round ' + esc(r.round || 1) + ': ' + (r.accepted ? 'accepted' : 'rejected') + '</b>'
+        + (r.reasons ? '<div class="q2-tl-note">' + esc(r.reasons) + '</div>' : '') + '</div>';
+    });
+    (Array.isArray(item.gate_results) ? item.gate_results : []).forEach(function (g) {
+      if (!g || !g.gate) return;
+      var isVerify = g.gate === 'verify';
+      evidence += '<div class="q2-stage-verdict ' + (g.passed ? 'is-pass' : 'is-fail') + '">'
+        + '<b>' + esc(isVerify ? 'Verify' : g.gate) + ': ' + (g.passed ? 'passed' : 'failed') + '</b>'
+        + (g.model ? ' <span class="q2-mono">' + esc([g.engine, shortModel(g.model)].filter(Boolean).join(' ')) + '</span>' : '')
+        + (g.exit_code != null && !isVerify ? ' <span class="q2-dim">exit ' + esc(g.exit_code) + (g.seconds != null ? ', ' + esc(g.seconds) + 's' : '') + '</span>' : '')
+        + (g.output_tail ? '<pre class="q2-pre q2-stage-tail">' + esc(String(g.output_tail).slice(-1200)) + '</pre>' : '')
+        + '</div>';
+    });
+    return '<section class="q2-sec q2-stage-panel"><div class="q2-sec-label">Stages</div>'
+      + stageStripHtml(sp, true) + lines.join('') + evidence + '</section>';
+  }
+
   function ticketRow(it) {
     var st = statusOf(it);
     var ref = it.ref || '';
@@ -2144,7 +2300,17 @@
     // shrinks below its content and clips instead of pushing the title or
     // the age/status signals off the row.
     var gh = ghLabels(it);
+    var sp = stagesOf(it);
+    // The stage text replaces the status word. Only the build stage belongs
+    // to the claiming worker, so a stale/unverified claim still wins there;
+    // in plan, verify or review the builder being gone is expected.
+    var claimIssue = (stale && st !== 'blocked') || unverified;
+    var stageText = (sp && st !== 'closed' && !queued && !(claimIssue && sp.current === 'build'))
+      ? stageNowText(it, sp, true) : '';
+    var stuckAtStage = sp ? stageStuck(it, sp) : false;
     return '<button type="button" class="q2-trow is-' + esc(st)
+      + (stageText ? ' has-stage' : '')
+      + (stuckAtStage ? ' is-stage-stuck' : '')
       + (ref === state.ref ? ' is-selected' : '')
       + (isNewTicket(ref) ? ' q2-new-ticket' : '')
       + (stale ? ' is-stale-claim' : '')
@@ -2163,6 +2329,7 @@
       // Age then dot: the status marker sits to the RIGHT of the age, matching
       // the main dashboard's .fq-row-signals order.
       + '<span class="q2-tsignals">'
+      + (sp ? stageStripHtml(sp, false) : '')
       + '<span class="q2-tage" title="' + esc(ageSrc || '') + '">' + esc(age) + '</span>'
       + (canRun
           ? '<span class="q2-tdot-wrap' + (queued ? ' is-queued' : '') + '"'
@@ -2173,9 +2340,57 @@
             + (queued ? ICON_TINY_STOP : ICON_TINY_PLAY)
             + '</span>'
           : '<span class="q2-tdot" title="' + esc(dotHoverTitle) + '" aria-label="' + esc(dotHoverTitle) + '"></span>')
-      + '<span class="q2-tstatus">' + esc(dotTitle) + '</span>'
+      + '<span class="q2-tstatus"' + (stageText ? ' title="' + esc(stageText + (stuckAtStage ? ' (stuck at this stage)' : '')) + '"' : '') + '>'
+      + esc(stageText || dotTitle) + '</span>'
       + '</span>'
       + '</button>';
+  }
+
+  // Queue header (CCC-1236): per-stage counts plus the non-builder role
+  // models (the builder is the engine/model spec right before it). Role
+  // models come from /api/queue/roles (WatchTower's role_table, CCC-1235),
+  // fetched once a minute per queue, and only show once the queue actually
+  // runs staged tickets or has a role pinned.
+  var ROLE_TTL_MS = 60000;
+  var rolesByQueue = {};
+  var ROLE_SHORT = { planner: 'plan', plan_reviewer: 'plan review', verifier: 'verify' };
+
+  function queueRoles(queue) {
+    var k = projectKey(queue);
+    var ent = rolesByQueue[k];
+    if (!ent || (Date.now() - ent.ts > ROLE_TTL_MS && !ent.loading)) {
+      rolesByQueue[k] = ent = { ts: Date.now(), roles: ent ? ent.roles : null, loading: true };
+      getJson('/api/queue/roles?queue=' + encodeURIComponent(queue)).then(function (d) {
+        ent.roles = (d && d.available && Array.isArray(d.roles)) ? d.roles : [];
+      }).catch(function () {
+        ent.roles = ent.roles || [];
+      }).then(function () {
+        ent.loading = false;
+        ent.ts = Date.now();
+        if (projectKey(state.queue) === k) renderTickets({ force: true });
+      });
+    }
+    return ent.roles || [];
+  }
+
+  function queueStageHeaderHtml(queue) {
+    if (!queue) return '';
+    var f = queueFacts()[projectKey(queue)] || {};
+    var c = countParts(f, 0, []);
+    var roles = queueRoles(queue).filter(function (r) { return ROLE_SHORT[r.role]; });
+    var staged = !!(f.stages && Object.keys(f.stages).length);
+    var pinned = roles.some(function (r) { return r.source === 'queue'; });
+    var roleHtml = (staged || pinned) ? roles.map(function (r) {
+      var runner = [r.engine, shortModel(r.model)].filter(Boolean).join(' ');
+      return '<span class="q2-role" title="' + esc((r.label || r.role) + ': ' + (runner || 'unresolved')
+          + ' (' + (r.source || 'default') + ') - change in Queue settings') + '">'
+        + '<span class="q2-dim">' + esc(ROLE_SHORT[r.role]) + '</span> ' + esc(runner || '?') + '</span>';
+    }).join('') : '';
+    if (!c.stages && !roleHtml) return '';
+    return '<div class="q2-stage-head">'
+      + (c.stages ? '<span class="q2-stage-head-counts">' + c.stages + '</span>' : '')
+      + (roleHtml ? '<span class="q2-stage-head-roles">' + roleHtml + '</span>' : '')
+      + '</div>';
   }
 
   function renderTickets(opts) {
@@ -2306,7 +2521,8 @@
       : pickShownClosed(closed, function (it) {
           return isRecentClosed(it) || unresolvedNotes(it).length > 0;
         }, state.closedCap));
-    var html = openish.map(ticketRow).join('');
+    var html = (state.viewAll ? '' : queueStageHeaderHtml(state.queue))
+      + openish.map(ticketRow).join('');
     if (shownClosed.length) {
       // Once the recent view has been expanded past its 12h window the label
       // stops being accurate — switch to the plain "Closed" count form.
@@ -2439,6 +2655,18 @@
         return evt('move', head('Moved', ev), text(mv));
       }
       if (type === 'edit')     return evt('edit', head('Edited', ev), editFieldsHtml(ev.fields));
+      // WatchTower stage events (WT-5/6/11): plan, plan review, gates.
+      if (type === 'plan_start')  return evt('stage', head('Planning started', ev), '');
+      if (type === 'plan')        return evt('stage', head('Plan filed' + (ev.round > 1 ? ' (round ' + ev.round + ')' : ''), ev), text(ev.text));
+      if (type === 'plan_review') return evt(ev.passed ? 'stage-pass' : 'stage-fail',
+        head('Plan ' + (ev.passed ? 'accepted' : 'rejected') + (ev.round ? ' (round ' + ev.round + ')' : ''), ev), text(ev.text));
+      if (type === 'plan_failed') return evt('stage-fail', head('Plan stage skipped', ev), text(ev.text));
+      if (type === 'in_review')   return evt('stage', head(ev.reviewer === 'verify'
+        ? 'Checks passed · verifying' : 'Awaiting review' + (ev.reviewer && ev.reviewer !== 'review' ? ' by ' + String(ev.reviewer).replace(/^review:/, '') : ''), ev), '');
+      if (type === 'verify')      return evt(ev.passed ? 'stage-pass' : 'stage-fail', head('Verify ' + (ev.passed ? 'passed' : 'failed'), ev), text(ev.findings));
+      if (type === 'accept')      return evt('stage-pass', head('Accepted', ev), '');
+      if (type === 'gate_ack')    return evt('stage-pass', head('Acked', ev), text(ev.text));
+      if (type === 'gate_nack')   return evt('stage-fail', head('Nacked', ev), text(ev.text));
       return evt('comment', head(type || 'Event', ev), text(ev.text));
     }).join('');
 
@@ -2727,6 +2955,7 @@
             + '</h1>')
       + toolbar
       + reopenFormHtml
+      + stagePanelHtml(item)
       + (showPrompt
           ? '<section class="q2-sec"><div class="q2-sec-label">Full prompt</div>'
             + (window.CCCTicketProse

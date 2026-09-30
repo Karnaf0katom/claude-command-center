@@ -3477,6 +3477,21 @@ def _uxq_item_payload(item):
             out["effective_gates"] = list(eff(item) or [])
         except Exception:
             pass
+    # CCC-1236: the stage pipeline, plus the planner/reviewer/verifier
+    # sessions so the detail timeline can link each transcript.
+    try:
+        from ccc_server import ticket_stages as _ts
+        if not isinstance(item.get("waiting_on"), list) and item.get("blocked_by"):
+            wo = getattr(_q, "waiting_on", None)
+            if callable(wo):
+                by_ref = {str(i.get("ref")): i for i in (_q.list_items() or []) if i.get("ref")}
+                out["waiting_on"] = wo(item, by_ref)
+        sp = _ts.stage_pipeline(out)
+        if sp is not None:
+            sp["sessions"] = _ts.detail_stage_sessions(item)
+            out["stages"] = sp
+    except Exception:
+        pass
     return out
 
 
