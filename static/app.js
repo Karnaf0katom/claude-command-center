@@ -37521,6 +37521,17 @@
       if (/^[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*#\d+\b/.test(plain)) return true;
       return false;
     };
+    // CCC-1239: WatchTower's stage roles (planner, plan reviewer, verifier,
+    // post-fix assessor) spawn via `spawn_adhoc`, which never records their
+    // session_id in the worker ledger, and the auto-titler renames them, so
+    // neither the ledger nor the title check above catches them. Their first
+    // user message is WatchTower's fixed launch prompt, so match that instead.
+    // Same for drain/one-off workers whose ledger entry predates a WT reset.
+    const _WT_LAUNCH_PROMPT_RE = /^(?:drain the [a-z0-9_]+(?:-[a-z0-9_]+)* watchtower queue\b|fix ticket \S+ on the \S+ watchtower queue\b|you are the planner for watchtower ticket |you are an independent (?:plan reviewer|verifier) for watchtower ticket |you are the independent post-fix assessor for the bug ticket )/;
+    const _looksLikeWtLaunchPrompt = (c) => {
+      const first = String((c && c.first_message) || '').trim().toLowerCase();
+      return !!first && _WT_LAUNCH_PROMPT_RE.test(first);
+    };
     const _isWatchTowerWorkerRow = (c) => {
       if (!c) return false;
       // F2 continuation sessions (continued_from_session_id / continuationParentId)
@@ -37528,7 +37539,8 @@
       // classified as WatchTower background workers.
       if (continuationParentId(c) || (c && c.continued_from_session_id)) return false;
       const sid = String(c.session_id || c.id || '').trim();
-      return !!(c._worker_id || (sid && _wtWorkerSessionIds.has(sid)) || _looksLikeWtWorkerTitle(c));
+      return !!(c._worker_id || (sid && _wtWorkerSessionIds.has(sid)) || _looksLikeWtWorkerTitle(c)
+        || _looksLikeWtLaunchPrompt(c));
     };
     // A typed spawn marker is trusted launch-time metadata. It lets internal
     // and external tools choose Workers or Other without fragile title/prompt
