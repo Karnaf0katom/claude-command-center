@@ -608,7 +608,8 @@ Keys are stored per **profile** (name them however you like — `work`,
   counter-mode stream cipher, machine-bound key) on other platforms. Keys
   are never written to disk in plaintext and never appear in the repo.
 - **Supported providers**: Anthropic, OpenAI, OpenRouter, TokenRouter, xAI,
-  Moonshot, Google.
+  Moonshot, Google, plus TypeSafe Jev (used by CCC itself for new-session
+  folder guessing; see `SECURITY.md`).
 - **Routing OpenRouter/TokenRouter models**: OpenCode accepts model ids in
   `<provider>/<vendor>/<model>` form natively (e.g.
   `openrouter/anthropic/claude-sonnet-5`), so pointing a spawn at one of

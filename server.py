@@ -25567,6 +25567,7 @@ _adopt_ccc_module("watchtower_msg")
 
 _adopt_ccc_module("pkood")
 _adopt_ccc_module("byok")
+_adopt_ccc_module("repo_guess")
 
 _adopt_ccc_module("github_issues")
 
@@ -32460,6 +32461,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)}, 400)
                 return
             self.send_json({"ok": True, "path": registered, "repos": load_known_repos()})
+            return
+        if path == "/api/repo/guess":
+            # Guess the folder a new session belongs in from its first
+            # prompt (ccc_server/repo_guess.py). Local path/name match first;
+            # the optional Jev call only happens when a key is configured.
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError, TypeError):
+                body = {}
+            self.send_json(repo_guess_request(body))
             return
         if path == "/api/repo/add":
             # Persist a user-picked repo path so it appears in the picker and

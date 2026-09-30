@@ -46,6 +46,10 @@ BYOK_PROVIDERS = {
     "xai": {"label": "xAI", "env_vars": ["XAI_API_KEY"], "key_hint": "xai-..."},
     "moonshot": {"label": "Moonshot", "env_vars": ["MOONSHOT_API_KEY"], "key_hint": "sk-..."},
     "google": {"label": "Google", "env_vars": ["GOOGLE_API_KEY", "GEMINI_API_KEY"], "key_hint": "AIza..."},
+    # Used by CCC itself (new-session repo guess, ccc_server/repo_guess.py),
+    # not by any agent engine: "agent_env": False keeps it out of spawned
+    # sessions' env unless its profile is explicitly chosen at spawn.
+    "jev": {"label": "TypeSafe Jev", "env_vars": ["JEV_API_KEY"], "key_hint": "tsk-...", "agent_env": False},
 }
 
 # Engines whose CLIs read provider API keys straight from the environment
@@ -354,13 +358,18 @@ def byok_delete_profile(profile):
     return True
 
 
-def byok_env_for_profile(profile):
-    """{"ANTHROPIC_API_KEY": "...", ...} for every provider configured on profile."""
+def byok_env_for_profile(profile, include_ccc_only=True):
+    """{"ANTHROPIC_API_KEY": "...", ...} for every provider configured on profile.
+
+    Providers flagged ``agent_env: False`` (CCC's own keys, e.g. jev) are
+    skipped when ``include_ccc_only`` is False."""
     profile = (profile or "").strip()
     if not profile:
         return {}
     env = {}
     for provider in _load_index().get(profile, []):
+        if not include_ccc_only and BYOK_PROVIDERS.get(provider, {}).get("agent_env") is False:
+            continue
         key = byok_get_key(profile, provider)
         if not key:
             continue
@@ -387,7 +396,9 @@ def byok_spawn_env(engine, model, key_profile):
         profile = "default"
     if not profile or engine not in BYOK_DIRECT_ENV_ENGINES:
         return {}
-    return byok_env_for_profile(profile)
+    # CCC-only keys (jev) ride along only when the profile was picked
+    # explicitly, never via the implicit "default" virtual-model profile.
+    return byok_env_for_profile(profile, include_ccc_only=bool((key_profile or "").strip()))
 
 
 # ---------------------------------------------------------------------------

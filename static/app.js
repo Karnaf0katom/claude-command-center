@@ -13396,7 +13396,7 @@
       rememberInputDraft($convInput, currentConversation);
       _autosizeConvInput();
       refreshSlashCommandMenu($convInput);
-      if (currentConversation === '__new__') scheduleClaudePrewarm();
+      if (currentConversation === '__new__') { scheduleClaudePrewarm(); scheduleRepoGuess(); }
     });
     $convInput.addEventListener('focus', () => refreshSlashCommandMenu($convInput));
     $convInput.addEventListener('click', () => refreshSlashCommandMenu($convInput));
@@ -78009,6 +78009,16 @@
   const SPAWN_CWD_CHIP_LIMIT = 10;
   let spawnCwdOptions = [];
   let spawnCwdAutoDefault = '';
+  // Repo auto-guess state (see the "New-session repo auto-guess" block below);
+  // declared up here so early picker events can't hit a temporal dead zone.
+  let repoGuessSeq = 0;
+  let repoGuessTimer = null;
+  let repoGuessInflight = null;
+  let repoGuessLastPrompt = '';
+  let repoGuessUserPicked = false;
+  let repoGuessApplying = false;
+  let repoGuessAuto = null;        // { path, prev } while an auto-pick stands
+  let repoGuessSuggestion = '';
   // The saved cwd outlives the folder it names: localStorage survives a
   // reinstall or a deleted repo/worktree, and every spawn from it then fails
   // with "invalid cwd: path does not exist". Folders found missing this page
@@ -78641,7 +78651,15 @@
   function persistSpawnCwdPickerValue(ev) {
     if (ev.target && ev.target.id === 'spawnCwdPicker') {
       spawnCwdAutoDefault = '';
-      try { localStorage.setItem(SPAWN_CWD_KEY, normalizeSpawnCwdPath(ev.target.value)); } catch (_) {}
+      if (!repoGuessApplying) {
+        // A real choice (typed, menu, chip, browse, undo): it is final for
+        // this composer, so the guesser stops overriding and its chips go.
+        repoGuessUserPicked = true;
+        repoGuessAuto = null;
+        repoGuessSuggestion = '';
+        renderRepoGuessChips();
+        try { localStorage.setItem(SPAWN_CWD_KEY, normalizeSpawnCwdPath(ev.target.value)); } catch (_) {}
+      }
       if (isSpawnCwdMenuOpen()) renderSpawnCwdMenu(ev.target.value);
       renderSpawnCwdQuickChips();
       updateNewSessionCwdNotice();
@@ -78703,6 +78721,140 @@
   function getSpawnCwd() {
     const sel = document.getElementById('spawnCwdPicker');
     return normalizeSpawnCwdPath(sel && sel.value);
+  }
+
+  // ── New-session repo auto-guess ──
+  // POST /api/repo/guess reads the prompt and names the folder it belongs in.
+  // Confident guesses (>= 0.9) fill the picker unless the user already chose;
+  // middling ones (>= 0.5) become a click-to-apply chip. An auto-pick is NOT
+  // a user choice: it is only saved as the last-used folder if it spawns.
+  function repoGuessDecide(guess, state) {
+    const none = { action: 'none', path: '' };
+    if (!guess || !guess.repo_path) return none;
+    const conf = Number(guess.confidence);
+    if (!(conf >= 0.5)) return none;
+    if (guess.repo_path === state.current) return none;
+    if (conf >= 0.9 && !state.userPicked) return { action: 'auto', path: guess.repo_path };
+    return { action: 'suggest', path: guess.repo_path };
+  }
+  // end repoGuessDecide
+
+  function setRepoGuessPickerValue(value) {
+    const input = document.getElementById('spawnCwdPicker');
+    if (!input) return;
+    repoGuessApplying = true;
+    try {
+      input.value = value;
+      persistSpawnCwdPickerValue({ target: input });
+    } finally {
+      repoGuessApplying = false;
+    }
+  }
+
+  function renderRepoGuessChips() {
+    const host = document.getElementById('spawnCwdGuessChip');
+    if (!host) return;
+    host.textContent = '';
+    if (repoGuessAuto) {
+      const note = document.createElement('span');
+      note.textContent = 'Auto-picked ' + spawnCwdLabel(repoGuessAuto.path) + ' \u00b7 ';
+      note.title = 'Folder chosen from your prompt: ' + repoGuessAuto.path;
+      const undo = document.createElement('button');
+      undo.type = 'button';
+      undo.className = 'spawn-cwd-guess-btn';
+      undo.textContent = 'undo';
+      undo.title = 'Go back to ' + (repoGuessAuto.prev || 'the previous folder');
+      undo.addEventListener('click', () => {
+        const prev = repoGuessAuto ? repoGuessAuto.prev : '';
+        const input = document.getElementById('spawnCwdPicker');
+        if (input) {
+          input.value = prev;
+          persistSpawnCwdPickerValue({ target: input });  // counts as a manual pick
+        }
+      });
+      host.appendChild(note);
+      host.appendChild(undo);
+    }
+    if (repoGuessSuggestion) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'spawn-cwd-guess-btn is-suggest';
+      btn.textContent = spawnCwdLabel(repoGuessSuggestion) + '?';
+      btn.title = 'Looks like this prompt is about ' + repoGuessSuggestion + '. Click to use it.';
+      const target = repoGuessSuggestion;
+      btn.addEventListener('click', () => setSpawnCwdInputValue(target, { focus: false }));
+      host.appendChild(btn);
+    }
+    host.hidden = !host.childNodes.length;
+  }
+
+  function applyRepoGuess(data) {
+    const d = repoGuessDecide(
+      data && { repo_path: normalizeSpawnCwdPath(data.repo_path), confidence: data.confidence },
+      { current: getSpawnCwd(), userPicked: repoGuessUserPicked });
+    if (d.action === 'auto') {
+      const prev = repoGuessAuto ? repoGuessAuto.prev : getSpawnCwd();
+      repoGuessAuto = { path: d.path, prev };
+      repoGuessSuggestion = '';
+      setRepoGuessPickerValue(d.path);
+    } else if (d.action === 'suggest') {
+      repoGuessSuggestion = d.path;
+    } else {
+      repoGuessSuggestion = '';
+    }
+    renderRepoGuessChips();
+  }
+
+  // restore=true puts the picker back if an unspawned auto-pick is standing,
+  // so last-used semantics survive leaving and re-entering new-session mode.
+  function resetRepoGuess(restore) {
+    clearTimeout(repoGuessTimer);
+    repoGuessTimer = null;
+    repoGuessSeq++;
+    repoGuessInflight = null;
+    repoGuessLastPrompt = '';
+    if (restore && repoGuessAuto && !repoGuessUserPicked) setRepoGuessPickerValue(repoGuessAuto.prev);
+    repoGuessUserPicked = false;
+    repoGuessAuto = null;
+    repoGuessSuggestion = '';
+    renderRepoGuessChips();
+  }
+
+  function runRepoGuess() {
+    repoGuessTimer = null;
+    if (currentConversation !== '__new__' || !$convInput) return repoGuessInflight;
+    const prompt = String($convInput.value || '').trim();
+    if (prompt.length < 15 || prompt === repoGuessLastPrompt) return repoGuessInflight;
+    repoGuessLastPrompt = prompt;
+    const seq = ++repoGuessSeq;
+    const current = repoGuessAuto ? repoGuessAuto.prev : getSpawnCwd();
+    const p = fetch('/api/repo/guess', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, current_repo: current }),
+    }).then(r => r.json()).then(data => {
+      if (seq !== repoGuessSeq || currentConversation !== '__new__') return;  // stale
+      applyRepoGuess(data);
+    }).catch(() => {}).then(() => {
+      if (repoGuessInflight === p) repoGuessInflight = null;
+    });
+    repoGuessInflight = p;
+    return p;
+  }
+
+  function scheduleRepoGuess() {
+    if (currentConversation !== '__new__') return;
+    clearTimeout(repoGuessTimer);
+    repoGuessTimer = setTimeout(runRepoGuess, 600);
+  }
+
+  // Send path: let an in-flight (or still-debouncing) guess land first, but
+  // never hold the send for more than 800ms.
+  async function settleRepoGuessBeforeSend() {
+    if (currentConversation !== '__new__') return;
+    if (repoGuessTimer) { clearTimeout(repoGuessTimer); runRepoGuess(); }
+    const pending = repoGuessInflight;
+    if (!pending) return;
+    await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 800))]);
   }
 
   let _claudePrewarmKey = '';
@@ -79421,6 +79573,7 @@
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
     if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     currentConversation = '__new__';
+    resetRepoGuess(true);
     if (getSpawnEngine() === 'claude') abortBackgroundApiReadsForSpawn();
     refreshConversationBackgroundForPane(paneId);
     syncActivePaneChrome('__new__');
@@ -79800,7 +79953,9 @@
     const $autoCompactInput = document.getElementById('convSendAutoCompactK');
     const autoCompactK = $autoCompactInput ? parseInt($autoCompactInput.value, 10) : NaN;
     const engine = getSpawnEngine();
+    await settleRepoGuessBeforeSend();
     const spawnCwd = (typeof getSpawnCwd === 'function') ? getSpawnCwd() : '';
+    const autoPickedCwd = (repoGuessAuto && !repoGuessUserPicked && repoGuessAuto.path === spawnCwd) ? spawnCwd : '';
     const launchCwd = spawnCwd || popoutRepoPath();
     const knownRepo = findSpawnCwdRepo(launchCwd);
     const repoPath = knownRepo ? knownRepo.path : (spawnCwd ? '' : popoutRepoPath());
@@ -79894,6 +80049,10 @@
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
+        // An auto-picked folder becomes the last-used one only now that a
+        // session actually launched in it.
+        if (autoPickedCwd) { try { localStorage.setItem(SPAWN_CWD_KEY, autoPickedCwd); } catch (_) {} }
+        resetRepoGuess(false);
         if (typeof recordSpawnChoice === 'function') {
           recordSpawnChoice(engine, pickedModel, $convInputEffortSelect ? $convInputEffortSelect.value : '');
         }
