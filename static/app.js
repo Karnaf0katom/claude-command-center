@@ -46690,6 +46690,18 @@
         _uxqRenderWorkingNow();
         return;
       }
+      const $chip = ev.target.closest && ev.target.closest('[data-uxq-chip-ref]');
+      if ($chip) {
+        // CCC-1242: a claim chip opens its own ticket, not the row's.
+        ev.preventDefault();
+        ev.stopPropagation();
+        const chipRef = $chip.getAttribute('data-uxq-chip-ref') || '';
+        const chipIt = (Array.isArray(_uxqItemsCache.items) ? _uxqItemsCache.items : [])
+          .find(x => x && _uxqItemRef(x) === chipRef);
+        if (chipIt) _uxqPickerPickTicket(chipRef, chipIt);
+        else if (chipRef && typeof _uxqOpenItemDetail === 'function') _uxqOpenItemDetail(chipRef);
+        return;
+      }
       const $sess = ev.target.closest && ev.target.closest('[data-uxq-open-session]');
       if ($sess) {
         // CCC-1148: open the worker's CCC session without also opening the
@@ -46852,11 +46864,12 @@
       ? (workers.length ? String(workers.length) : '0')
       : (workers.length + ' agent' + (workers.length === 1 ? '' : 's') + ' · '
          + queueNames.length + ' queue' + (queueNames.length === 1 ? '' : 's'));
-    // Build a row per claim: a worker can hold several in_progress tickets
-    // (a needs_input one plus the one it moved on to), and a first-match join
-    // hid all but one. Actively worked claims sort ahead of needs_input ones;
-    // a worker with no claim gets one idle row (CCC-1242).
-    const rows = workers.flatMap(w => {
+    // One row per worker. A worker can hold several in_progress tickets (a
+    // needs_input one plus the one it moved on to); a first-match join showed
+    // the parked one and hid the live one. The row now leads with the newest
+    // actively worked claim and carries every other claim as a chip, so
+    // parked tickets stay visible without reading as current work (CCC-1242).
+    const rows = workers.map(w => {
       const qKey = _uxqProjectKey(w && w.queue);
       const session = String(w.session_id || '').trim();
       const id = String(w.worker_id || '').trim();
@@ -46891,21 +46904,33 @@
         state: Number.isFinite(idleS) && idleS < 60 ? 'working' : 'idle',
       };
       const icon = '<span class="fq-working-engine">' + sessionEngineIconHtml(iconRow) + '</span>';
-      return (claims.length ? claims : [null]).map(on => {
-        const ref = on ? _uxqItemRef(on) : '';
-        const title = on ? String(on.note || on.title || on.text || '').split('\n')[0] : 'idle';
-        // Ticket age from its own claim; an idle row has only the worker's.
-        const elapsed = on ? ageOf(on.claimed_at) : workerAge;
-        const elapsedTip = [on && elapsed ? 'Claimed ' + elapsed + ' ago' : '',
-          workerAge ? 'worker running ' + workerAge : ''].filter(Boolean).join(' · ');
-        const needsInput = !!(on && on.needs_input);
-        // CCC-1148: the row itself must link to the CCC session the claim runs
-        // in — the ticket's claimed_session_id can still be empty here (reconciler
-        // backfill lag, worker-id claims), which left no path to the session.
-        return { ref, title, queue: qKey, worker: String(w.worker_id || 'worker'), elapsed, icon,
-          elapsedTip, workerAge, needsInput,
-          pid: parseInt(w.pid, 10) || 0, workerId: String(w.worker_id || ''), sid: sid };
+      const on = claims.find(it => !it.needs_input) || null;
+      const chips = claims.filter(it => it !== on).map(it => {
+        const cRef = _uxqItemRef(it);
+        // Same-queue refs shrink to their number so chips fit the narrow
+        // sidebar strip; the tooltip keeps the full ref and title.
+        const short = qKey && cRef.indexOf(qKey + '-') === 0 ? cRef.slice(qKey.length + 1) : cRef;
+        return {
+          ref: cRef,
+          label: (it.needs_input ? '?' : '#') + short,
+          needsInput: !!it.needs_input,
+          tip: cRef + (it.needs_input ? ' needs input: ' : ' also claimed: ')
+            + String(it.title || it.note || it.text || '').split('\n')[0],
+        };
       });
+      const ref = on ? _uxqItemRef(on) : '';
+      const title = on ? String(on.note || on.title || on.text || '').split('\n')[0]
+        : (chips.length ? 'waiting on input' : 'idle');
+      // Ticket age from its own claim; without a live claim only the worker's.
+      const elapsed = on ? ageOf(on.claimed_at) : workerAge;
+      const elapsedTip = [on && elapsed ? 'Claimed ' + elapsed + ' ago' : '',
+        workerAge ? 'worker running ' + workerAge : ''].filter(Boolean).join(' · ');
+      // CCC-1148: the row itself must link to the CCC session the claim runs
+      // in — the ticket's claimed_session_id can still be empty here (reconciler
+      // backfill lag, worker-id claims), which left no path to the session.
+      return { ref, title, queue: qKey, worker: String(w.worker_id || 'worker'), elapsed, icon,
+        elapsedTip, workerAge, chips,
+        pid: parseInt(w.pid, 10) || 0, workerId: String(w.worker_id || ''), sid: sid };
     });
     const rowsHtml = rows.map(r => {
         // CCC-1050: one-click kill — releases the worker from queue staffing
@@ -46919,31 +46944,34 @@
         const sessBtn = r.sid
           ? '<button type="button" class="fq-worker-session" data-uxq-open-session="' + escapeAttr(r.sid) + '" title="Open the CCC session this worker is running in" aria-label="Open CCC session">&#8599;</button>'
           : '';
-        const rowCls = r.needsInput ? ' is-needs-input' : '';
+        const chipsHtml = r.chips.length
+          ? '<span class="fq-working-chips">' + r.chips.map(c => '<button type="button" class="fq-working-chip'
+            + (c.needsInput ? ' is-needs-input' : '') + '" data-uxq-chip-ref="' + escapeAttr(c.ref)
+            + '" title="' + escapeAttr(c.tip) + '">' + escapeHtml(c.label) + '</button>').join('') + '</span>'
+          : '';
         const elapsedAttr = r.elapsedTip ? ' title="' + escapeAttr(r.elapsedTip) + '"' : '';
         // Worker age only on claim rows; an idle row's elapsed already is it.
         const workerAgeHtml = r.ref && r.workerAge
           ? '<span class="fq-working-worker-age" title="' + escapeAttr('Worker ' + r.worker + ' running ' + r.workerAge) + '">up ' + escapeHtml(r.workerAge) + '</span>'
           : '';
         if (_uxqPicker.isMobile) {
-          return '<div class="fq-working-row is-mobile' + rowCls + '" data-uxq-working-ref="' + escapeAttr(r.ref) + '" data-uxq-session="' + escapeAttr(r.sid) + '">'
+          return '<div class="fq-working-row is-mobile" data-uxq-working-ref="' + escapeAttr(r.ref) + '" data-uxq-session="' + escapeAttr(r.sid) + '">'
             + '<span class="fq-working-id">' + escapeHtml(r.ref || '-') + '</span>'
             + r.icon
             + '<span class="fq-working-body">'
             + '<span class="fq-working-title">' + escapeHtml(r.title) + '</span>'
-            + '<span class="fq-working-meta">' + escapeHtml(r.queue + ' · ' + r.elapsed
-              + (r.needsInput ? ' · needs input' : '')) + '</span>'
+            + '<span class="fq-working-meta">' + escapeHtml(r.queue + ' · ' + r.elapsed) + chipsHtml + '</span>'
             + '</span>'
             + sessBtn
             + killBtn
             + '<span class="fq-working-dot"></span>'
             + '</div>';
         }
-        return '<div class="fq-working-row' + rowCls + '" data-uxq-working-ref="' + escapeAttr(r.ref) + '"'
-          + (r.needsInput ? ' title="Needs input: blocked on a question"' : '') + '>'
+        return '<div class="fq-working-row' + (r.ref ? ' has-ref' : '') + '" data-uxq-working-ref="' + escapeAttr(r.ref) + '">'
           + '<span class="fq-working-id">' + escapeHtml(r.ref || '-') + '</span>'
           + r.icon
           + '<span class="fq-working-title">' + escapeHtml(r.title) + '</span>'
+          + chipsHtml
           + '<span class="fq-working-right">'
           + '<span class="fq-working-queue">' + escapeHtml(r.queue) + '</span>'
           + '<span class="fq-working-worker">' + escapeHtml(r.worker) + '</span>'

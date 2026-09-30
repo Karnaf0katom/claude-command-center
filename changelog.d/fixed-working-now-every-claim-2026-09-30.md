@@ -1,1 +1,1 @@
-- WORKING NOW lists every ticket a worker holds (live work ahead of needs-input ones) and ages each row from its claim, with the worker's own uptime shown separately.
+- WORKING NOW keeps one row per worker, led by its live ticket and aged from that claim; tickets parked on needs-input (or extra claims) show as clickable chips, and the worker's own uptime is labeled separately.
