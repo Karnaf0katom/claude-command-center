@@ -8679,6 +8679,24 @@
       + '</button>';
   }
 
+  // WT-27: conspicuous badge for any session a WatchTower worker (or one of
+  // its descendants) spawned, e.g. "Worker verifier · WT-24". The server
+  // stamps row.worker_origin from WatchTower's durable origin ledger, so the
+  // badge survives spawner exit, worker pruning, title changes and restarts.
+  // Clickable to the spawning session when it is known.
+  function workerOriginBadgeHtml(row) {
+    const o = row && row.worker_origin;
+    if (!o || !o.label) return '';
+    const parent = String(o.parent_session_id || row.parent_session_id || '').trim();
+    const sid = String(row.session_id || row.id || '').trim();
+    const linked = parent && parent !== sid;
+    const tip = o.label + (linked ? ' - spawned by session ' + parent + ' (click to open)' : ' - spawned by a WatchTower worker');
+    return '<span class="ccc-worker-origin' + (linked ? ' is-linked' : '') + '"'
+      + (linked ? ' role="button" tabindex="0" data-parent-sid="' + escapeAttr(parent) + '"' : '')
+      + ' data-origin-role="' + escapeAttr(o.role || '') + '"'
+      + ' title="' + escapeAttr(tip) + '">' + escapeHtml(o.label) + (linked ? ' \u2197' : '') + '</span>';
+  }
+
   // CCC-1026: the transcript view had no way to tell what spawned a session
   // short of switching to the sidebar and hovering the row for its (hidden by
   // default) origin chip. Mirrors sessionProvenanceChipHtml's parent/successor
@@ -8764,7 +8782,7 @@
   }
 
   function handleBreadcrumbSpawnedByClick(ev) {
-    const chip = ev.target && ev.target.closest && ev.target.closest('.ccc-breadcrumb-spawned-by[data-parent-sid]');
+    const chip = ev.target && ev.target.closest && ev.target.closest('.ccc-breadcrumb-spawned-by[data-parent-sid], .ccc-worker-origin[data-parent-sid]');
     if (!chip) return;
     ev.preventDefault();
     ev.stopPropagation();
@@ -35173,6 +35191,7 @@
             + workingDotHtml
             + sessionStuckWarningHtml(c)
             + (window.cccClaudeReauth ? window.cccClaudeReauth.rowChipHtml(c) : '')
+            + workerOriginBadgeHtml(c)
             + '<div class="conv-title ' + titleClass + '" data-role="title" aria-label="' + escapeAttr(title) + '">' + escapeHtml(title) + '</div>'
             // .conv-meta-col is display:contents everywhere except the Workers
             // table layout, where it becomes the row's single meta CELL. Grid
@@ -39848,7 +39867,7 @@
     if (!$convList._originChipWired) {
       $convList._originChipWired = true;
       $convList.addEventListener('click', (ev) => {
-        const chip = ev.target && ev.target.closest && ev.target.closest('.conv-session-origin-chip[data-parent-sid]');
+        const chip = ev.target && ev.target.closest && ev.target.closest('.conv-session-origin-chip[data-parent-sid], .ccc-worker-origin[data-parent-sid]');
         if (!chip) return;
         ev.stopPropagation();
         ev.preventDefault();
@@ -42101,6 +42120,7 @@
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
           + uxBadge
+          + workerOriginBadgeHtml(row)
           + sidChip
           + spawnedByChip
           + (typeof window._cccHandoffMovedChipHtml === 'function' ? window._cccHandoffMovedChipHtml(row) : '')

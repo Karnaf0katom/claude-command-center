@@ -2851,6 +2851,62 @@ def _wt_read_worker_session_ids():
     return [str(s) for s in ids if isinstance(s, str)]
 
 
+def _wt_session_origins_path():
+    return Path(os.environ.get("WATCHTOWER_SESSION_ORIGINS_FILE")
+                or (_WT_HOME / "session-origins.json"))
+
+
+_WT_ORIGINS_CACHE = {"sig": None, "rows": {}}
+
+_WT_ORIGIN_ROLE_LABELS = {
+    "worker": "Worker", "planner": "Worker planner",
+    "plan_reviewer": "Worker plan reviewer", "verifier": "Worker verifier",
+    "assessor": "Worker assessor", "probe": "Worker probe",
+    "helper": "Worker helper", "adhoc": "Worker helper",
+}
+
+
+def _wt_read_session_origins():
+    """{session_id: origin} from WatchTower's durable session-origins.json.
+
+    The ledger records who spawned a session (worker, ticket, role, parent
+    session) and outlives the spawner, its pruned worker record and title
+    changes. Cached on (mtime, size); empty dict if absent/unreadable."""
+    path = _wt_session_origins_path()
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    sig = (st.st_mtime_ns, st.st_size)
+    if _WT_ORIGINS_CACHE["sig"] == sig:
+        return _WT_ORIGINS_CACHE["rows"]
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        rows = data.get("origins") if isinstance(data, dict) else None
+        rows = {str(k): v for k, v in rows.items() if isinstance(v, dict)} if isinstance(rows, dict) else {}
+    except (OSError, ValueError):
+        rows = {}
+    _WT_ORIGINS_CACHE.update(sig=sig, rows=rows)
+    return rows
+
+
+def _wt_origin_badge(origin):
+    """Normalize a ledger record into the row's ``worker_origin`` field:
+    {role, ref, queue, label, parent_session_id}. label is the visible badge
+    text, e.g. "Worker verifier · WT-24"."""
+    role = str(origin.get("role") or "worker")
+    ref = str(origin.get("ref") or "")
+    label = _WT_ORIGIN_ROLE_LABELS.get(role) or ("Worker " + role.replace("_", " "))
+    if ref:
+        label += " · " + ref
+    return {
+        "role": role, "ref": ref, "queue": str(origin.get("queue") or ""),
+        "label": label,
+        "parent_session_id": str(origin.get("parent_session_id") or ""),
+    }
+
+
 def _wt_clip_title(text, limit=60):
     text = " ".join(str(text or "").split()).strip()
     if limit and len(text) > limit:
@@ -3078,17 +3134,37 @@ def _apply_watchtower_worker_display_names(rows):
             _wt_display_name(it.get("project"), it.get("ref"), clipped_context),
             rest_context,
         )
-    if not titles_by_sid and not sid_to_worker and not worker_session_ids:
+    if not titles_by_sid and not sid_to_worker and not worker_session_ids \
+            and not _wt_read_session_origins():
         return rows
+    try:
+        origins = _wt_read_session_origins()
+    except Exception:
+        origins = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         sid = str(row.get("session_id") or row.get("id") or "").strip()
+        origin = origins.get(sid)
+        # WT-27: recorded spawn provenance. A session with an established
+        # worker lineage (managed spawn, or a descendant that inherited the
+        # worker env markers) gets a visible badge and its spawner as parent.
+        # A user-run `wt spawn` (role adhoc, no parent worker) stays unmarked.
+        if origin and (origin.get("role") != "adhoc" or origin.get("parent_worker_id")):
+            row["worker_origin"] = _wt_origin_badge(origin)
+            if not row.get("parent_session_id") and origin.get("parent_session_id") \
+                    and origin["parent_session_id"] != sid:
+                row["parent_session_id"] = origin["parent_session_id"]
+            if not row.get("continued_from_session_id"):
+                row["is_watchtower_worker"] = True
         if sid in worker_session_ids:
             # Continuation sessions (F2) are user interactive sessions continuing
             # prior work; they must not be classified as WatchTower background workers.
             if not row.get("continued_from_session_id"):
                 row["is_watchtower_worker"] = True
+                # Pre-ledger workers: the worker-sessions ledger is the only
+                # evidence, so badge them plainly and invent no ticket.
+                row.setdefault("worker_origin", _wt_origin_badge({"role": "worker"}))
         if row.get("name_overridden"):
             continue
         titled = titles_by_sid.get(sid)

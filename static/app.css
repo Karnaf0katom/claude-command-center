@@ -30163,3 +30163,15 @@ body.has-mobile-bottom-nav .jobs-add-actions button { min-height: 40px; padding:
 }
 .fq-role-pickers select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.14); }
 .fq-role-error { margin-top: 4px; font-size: 11.5px; color: #f85149; overflow-wrap: anywhere; }
+
+/* WT-27: worker-spawned session badge (Coding list row + breadcrumb header). */
+.ccc-worker-origin {
+  display: inline-flex; align-items: center; flex-shrink: 0;
+  padding: 1px 7px; margin-right: 6px; border-radius: 999px;
+  border: 1px solid rgba(210,153,34,0.55);
+  background: rgba(210,153,34,0.16);
+  color: var(--yellow, #d29922);
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.ccc-worker-origin.is-linked { cursor: pointer; }
+.ccc-worker-origin.is-linked:hover { background: rgba(210,153,34,0.30); }
