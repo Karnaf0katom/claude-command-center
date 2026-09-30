@@ -37521,12 +37521,11 @@
       if (/^[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*#\d+\b/.test(plain)) return true;
       return false;
     };
-    // CCC-1239: WatchTower's stage roles (planner, plan reviewer, verifier,
-    // post-fix assessor) spawn via `spawn_adhoc`, which never records their
-    // session_id in the worker ledger, and the auto-titler renames them, so
-    // neither the ledger nor the title check above catches them. Their first
-    // user message is WatchTower's fixed launch prompt, so match that instead.
-    // Same for drain/one-off workers whose ledger entry predates a WT reset.
+    // CCC-1239: last-resort fallback. WatchTower's stage roles (planner, plan
+    // reviewer, verifier, post-fix assessor) spawn via `spawn_adhoc`; since
+    // CCC-1241 it pins and ledgers their session_id, so the ledger check
+    // catches them. This prompt match only covers sessions spawned before
+    // that, or whose ledger entry predates a WT reset.
     const _WT_LAUNCH_PROMPT_RE = /^(?:drain the [a-z0-9_]+(?:-[a-z0-9_]+)* watchtower queue\b|fix ticket \S+ on the \S+ watchtower queue\b|you are the planner for watchtower ticket |you are an independent (?:plan reviewer|verifier) for watchtower ticket |you are the independent post-fix assessor for the bug ticket )/;
     const _looksLikeWtLaunchPrompt = (c) => {
       const first = String((c && c.first_message) || '').trim().toLowerCase();
