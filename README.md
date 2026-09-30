@@ -9,7 +9,7 @@ _Start the next while Claude builds the first._
 > “Hey Amir, great product. I tried about 20 before finding yours. I have been really enjoying it.”  
 > — CCC user
 
-One local dashboard that attaches to every **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **Kilo Code**, **Kimi Code**, **OpenCode**, and **Devin** session on your machine, however you launched it — plus read-only ingestion of **GitHub Copilot CLI**, **VS Code Copilot Chat**, and **Grok CLI** sessions. Spawn, monitor, and ingest all eight; steer seven of them with follow-up. Local, source-available, free for non-commercial use.
+One local dashboard that attaches to every **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **Kilo Code**, **Kimi Code**, **OpenCode**, and **Devin** session on your machine, however you launched it — plus read-only ingestion of **GitHub Copilot CLI**, **VS Code Copilot Chat**, and **Grok CLI** sessions. Spawn, monitor, and ingest all eight; steer seven of them with follow-up. Local, source-available (FSL-1.1-MIT), free to use and modify, including at work.
 
 > 📢 Shipping fast. **Watch → Releases** (top-right) to get pinged on new versions without the noise.
 
@@ -978,7 +978,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-[Claude Command Center Software License](LICENSE) © 2026 Amir Fish — source-available, free for non-commercial use; commercial use requires permission. Versions released before 2026-07-28 remain under the [MIT License](LICENSE-MIT); some third-party contributions stay MIT (see [NOTICE](NOTICE)).
+[Functional Source License 1.1, MIT Future License (FSL-1.1-MIT)](LICENSE) © 2026 Amir Fish. Free to use, modify, and run at work, including on your own servers for your team. You may not sell CCC or offer it as a competing product or hosted service. Each release becomes MIT two years after it ships. Versions released before 2026-07-28 remain under the [MIT License](LICENSE-MIT); some third-party contributions stay MIT (see [NOTICE](NOTICE)).
 
 ## Acknowledgments
 

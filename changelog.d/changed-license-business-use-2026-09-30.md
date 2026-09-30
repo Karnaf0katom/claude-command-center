@@ -1,0 +1,1 @@
+- License: CCC is now under the Functional Source License 1.1 with MIT future license (FSL-1.1-MIT). You can use and modify it for free, including at work and on your own servers for your team. Selling CCC or offering it as a competing product or hosted service is not allowed. Each release becomes MIT two years after it ships.
