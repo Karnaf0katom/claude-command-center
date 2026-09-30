@@ -12113,6 +12113,29 @@ def _decode_project_slug(slug):
     """
     if not slug.startswith("-"):
         return None
+    # Memoized per slug (CCC-1227): the known-repo scan decodes every project
+    # folder (~2k) and each fresh walk costs dozens of stats, ~70k per scan.
+    # A hit re-checks only the answer (one stat); misses retry after a TTL.
+    now = time.time()
+    hit = _DECODE_SLUG_MEMO.get(slug)
+    if hit is not None:
+        path, at = hit
+        if path is not None and path.is_dir():
+            return path
+        if path is None and now - at < _DECODE_SLUG_MISS_TTL_S:
+            return None
+    result = _decode_project_slug_walk(slug)
+    if len(_DECODE_SLUG_MEMO) > 20000:
+        _DECODE_SLUG_MEMO.clear()
+    _DECODE_SLUG_MEMO[slug] = (result, now)
+    return result
+
+
+_DECODE_SLUG_MEMO = {}
+_DECODE_SLUG_MISS_TTL_S = 600.0
+
+
+def _decode_project_slug_walk(slug):
     parts = slug[1:].split("-")
 
     def search(prefix, remaining):
