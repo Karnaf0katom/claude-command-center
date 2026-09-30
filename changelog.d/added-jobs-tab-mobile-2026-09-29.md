@@ -1,0 +1,1 @@
+- Jobs tab is now on phones: a Jobs button in the bottom nav opens it, with 36px+ tap targets, a scrollable live log and an Add dialog that fits the screen.

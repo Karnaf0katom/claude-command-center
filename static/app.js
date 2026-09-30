@@ -16495,7 +16495,7 @@
     } else {
       // Phone Advanced has no Active/Other. If the stored tab is one of
       // those, land on Coding so the hidden top bar cannot strand us.
-      if (_coreApp !== 'queues' && tab !== 'coding' && tab !== 'workers' && tab !== 'queues') {
+      if (_coreApp !== 'queues' && tab !== 'coding' && tab !== 'workers' && tab !== 'queues' && tab !== 'jobs') {
         try { localStorage.setItem('ccc-sidebar-tab', 'coding'); } catch (_) {}
         if (document.querySelector('[data-role="conv-tab-bar"]')) {
           _activateSidebarTabFromMobileNav('coding');
@@ -16504,7 +16504,7 @@
         tab = 'coding';
       }
       activeNavKey = _coreApp === 'queues' ? 'q2'
-        : (tab === 'workers' ? 'workers' : tab === 'queues' ? 'queues' : 'coding');
+        : (tab === 'workers' ? 'workers' : tab === 'queues' ? 'queues' : tab === 'jobs' ? 'jobs' : 'coding');
     }
     if (!isSimpleMode() && document.body.classList.contains('mobile-ask-open')) activeNavKey = 'ask';
     nav.querySelectorAll('[data-mobile-nav]').forEach(btn => {
@@ -16543,7 +16543,7 @@
         return;
       }
       _setMobileAskOpen(false);
-      if (dest === 'coding' || dest === 'workers' || dest === 'queues') {
+      if (dest === 'coding' || dest === 'workers' || dest === 'queues' || dest === 'jobs') {
         if (typeof cccSwitchCoreApp === 'function') cccSwitchCoreApp('sessions');
         _activateSidebarTabFromMobileNav(dest);
         if (typeof isMobile === 'function' && isMobile() && typeof mobileShowMain === 'function') {
