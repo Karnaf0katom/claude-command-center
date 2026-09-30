@@ -26077,6 +26077,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/queue/roles":
+            # CCC-1235: effective engine/model per role (planner, plan
+            # reviewer, builder, verifier) + the catalog pickers may offer.
+            qs = urllib.parse.parse_qs(parsed.query)
+            from ccc_server.queue_roles import role_state
+            try:
+                result = role_state((qs.get("queue", [""])[0] or "").strip())
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            self.send_json(result, 200 if result.get("ok") else 400)
         elif path == "/api/queue/learnings":
             qs = urllib.parse.parse_qs(parsed.query)
             queue = (qs.get("queue", [""])[0] or "").strip()
@@ -31824,6 +31834,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(e.as_payload(), e.status)
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
+            return
+        if path == "/api/queue/roles":
+            # CCC-1235: the UI equivalent of `wt config -q Q --<role>-engine
+            # /--<role>-model`, through the same WatchTower setter. Per-role
+            # errors come back in "errors" so the dialog shows them inline.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            from ccc_server.queue_roles import set_roles
+            try:
+                payload = json.loads(body) if body else {}
+                result = set_roles(str(payload.get("queue") or ""), payload.get("roles") or {})
+            except (json.JSONDecodeError, ValueError, AttributeError) as e:
+                self.send_json({"ok": False, "error": str(e)}, 400)
+                return
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+                return
+            if result.get("ok"):
+                _log_activity("queue", "ROLES", f"queue={result.get('queue')} roles={','.join(sorted((payload.get('roles') or {}).keys()))}")
+            self.send_json(result, 200 if result.get("ok") else 400)
             return
         if path == "/api/queue/config-options":
             # Suggestions and the current durable config for the Queue manager.

@@ -1,0 +1,1 @@
+- Queue settings now have a Roles section: pick the engine and model for the planner, plan reviewer and verifier (builder shown alongside), with the effective value and where it comes from. Choices come from WatchTower's approved catalog, and refused picks show their error inline.

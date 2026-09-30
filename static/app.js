@@ -49841,6 +49841,9 @@
       +       '<div class="fq-config-field"><label for="fqConfigEffort">Effort (optional)</label><select id="fqConfigEffort"><option value="">Use engine default</option><option value="low">Light</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra High</option><option value="max">Max</option></select><span class="fq-config-help">Reasoning budget passed to WatchTower workers for this queue.</span></div>'
       +       '<div class="fq-config-field wide"><label for="fqConfigPath">Working repository</label><input id="fqConfigPath" list="fqConfigPaths" placeholder="/path/to/repository"><datalist id="fqConfigPaths">' + pathChoices + '</datalist><span class="fq-config-help">Suggestions come from queues already configured on this machine.</span></div>'
       +     '</div></div>'
+      +     '<div class="fq-config-section fq-config-roles" hidden><div class="fq-config-eyebrow">Roles</div>'
+      +       '<div class="fq-config-help">Which engine and model runs each stage. Choices come from the catalog WatchTower validates against.</div>'
+      +       '<div class="fq-roles" id="fqRoles"></div></div>'
       +     '<div class="fq-config-section"><div class="fq-config-eyebrow">Policy</div><div class="fq-config-grid">'
       +       '<div class="fq-config-field"><label>Drain policy</label><div class="fq-config-checkrow"><button type="button" class="settings-toggle" id="fqDrainToggle" role="switch" aria-checked="false" aria-label="Auto-drain new work"><span class="settings-toggle-track"><span class="settings-toggle-thumb"></span></span></button><span class="fq-config-checkrow-label">Auto-drain new work</span></div><input type="checkbox" id="fqConfigDrain" hidden><span class="fq-config-help">Off keeps tickets as a deliberate backlog until run manually.</span></div>'
       +       '<div class="fq-config-field"><label>Claim types</label><div class="fq-config-checks"><label><input name="fq-config-claim-type" value="bug" type="checkbox"> Bugs</label><label><input name="fq-config-claim-type" value="feature" type="checkbox"> Features</label></div><span class="fq-config-help">Choose neither to accept both ticket types.</span></div>'
@@ -49910,7 +49913,93 @@
       syncDrainToggle();
       syncGateToggle();
       syncFallbackToggle();
+      loadRoles(entry ? entry.queue : '');
     };
+    // CCC-1235: per-role engine/model (WatchTower WT-14). Loaded per queue
+    // from /api/queue/roles; edits are held here and written on Save.
+    let rolesState = null;
+    const roleEdits = {};
+    const ROLE_SOURCE_LABELS = { queue: 'set on this queue', default: 'default', ticket: 'ticket', 'policy-fallback': 'policy fallback' };
+    async function loadRoles(queueName) {
+      const section = $('.fq-config-roles');
+      rolesState = null;
+      Object.keys(roleEdits).forEach(k => delete roleEdits[k]);
+      if (!section) return;
+      section.hidden = true;
+      if (!queueName) return;
+      try {
+        const r = await fetch('/api/queue/roles?queue=' + encodeURIComponent(queueName));
+        const d = await r.json();
+        if (!d.ok || !d.available || String(fields.queue.value).toUpperCase() !== String(queueName).toUpperCase()) return;
+        rolesState = d;
+        renderRoles();
+        section.hidden = false;
+      } catch (_) { /* no roles section when WatchTower can't answer */ }
+    }
+    function renderRoles(errors) {
+      const host = $('#fqRoles');
+      if (!host || !rolesState) return;
+      const engines = rolesState.engines || [];
+      const modelsFor = (eng) => ((engines.find(e => e.engine === eng) || {}).models) || [];
+      host.innerHTML = rolesState.roles.map(row => {
+        const edit = roleEdits[row.role] || { engine: row.override_engine, model: row.override_model };
+        const effective = escapeHtml(row.engine || '?') + (row.model ? ' · ' + escapeHtml(modelLabel(row.engine, row.model)) : '');
+        const src = '<span class="fq-role-source is-' + escapeAttr(row.source) + '">' + escapeHtml(ROLE_SOURCE_LABELS[row.source] || row.source) + '</span>';
+        let pickers = '';
+        if (row.editable) {
+          const modelEngine = edit.engine || rolesState.builder_engine;
+          const choices = modelsFor(modelEngine);
+          pickers = '<div class="fq-role-pickers">'
+            + '<select data-role-engine="' + escapeAttr(row.role) + '" aria-label="' + escapeAttr(row.label + ' engine') + '">'
+            + '<option value="">Default engine</option>'
+            + engines.map(e => '<option value="' + escapeAttr(e.engine) + '"' + (e.engine === edit.engine ? ' selected' : '') + '>' + escapeHtml(spawnEngineLabel(e.engine)) + '</option>').join('')
+            + '</select>'
+            + '<select data-role-model="' + escapeAttr(row.role) + '" aria-label="' + escapeAttr(row.label + ' model') + '">'
+            + '<option value="">Default model</option>'
+            + choices.map(m => '<option value="' + escapeAttr(m) + '"' + (m === edit.model ? ' selected' : '') + '>' + escapeHtml(modelLabel(modelEngine, m) + tierText(modelEngine, m)) + '</option>').join('')
+            + '</select></div>';
+        }
+        const err = errors && errors[row.role];
+        return '<div class="fq-role-row" data-role="' + escapeAttr(row.role) + '">'
+          + '<div class="fq-role-head"><span class="fq-role-name">' + escapeHtml(row.label) + '</span>'
+          + '<span class="fq-role-effective">' + effective + '</span>' + src + '</div>'
+          + pickers
+          + '<div class="fq-config-help">' + escapeHtml(row.hint || '') + '</div>'
+          + (err ? '<div class="fq-role-error" role="alert">' + escapeHtml(err) + '</div>' : '')
+          + '</div>';
+      }).join('');
+      host.querySelectorAll('select[data-role-engine]').forEach(sel => sel.addEventListener('change', () => {
+        const role = sel.getAttribute('data-role-engine');
+        // A model belongs to one engine's catalog: switching engine resets it.
+        roleEdits[role] = { engine: sel.value, model: '' };
+        renderRoles();
+      }));
+      host.querySelectorAll('select[data-role-model]').forEach(sel => sel.addEventListener('change', () => {
+        const role = sel.getAttribute('data-role-model');
+        const row = rolesState.roles.find(r => r.role === role) || {};
+        const prev = roleEdits[role] || { engine: row.override_engine || '', model: row.override_model || '' };
+        roleEdits[role] = { engine: prev.engine, model: sel.value };
+      }));
+    }
+    async function saveRoles(queueName) {
+      const changed = {};
+      Object.keys(roleEdits).forEach(role => {
+        const row = (rolesState && rolesState.roles.find(r => r.role === role)) || {};
+        const e = roleEdits[role];
+        if (e.engine !== (row.override_engine || '') || e.model !== (row.override_model || '')) changed[role] = e;
+      });
+      if (!Object.keys(changed).length) return true;
+      const r = await fetch('/api/queue/roles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queue: queueName, roles: changed }) });
+      const d = await r.json().catch(() => ({}));
+      if (d && Array.isArray(d.roles)) {
+        rolesState = d;
+        // Keep the failed picks on screen next to their error; drop the rest.
+        Object.keys(roleEdits).forEach(k => { if (!(d.errors && d.errors[k])) delete roleEdits[k]; });
+        renderRoles(d.errors);
+      }
+      if (!r.ok || !d.ok) throw new Error(d.error || r.status);
+      return true;
+    }
     // Segmented engine/backend pickers drive the hidden selects (kept so the
     // payload code below is untouched); the drain switch drives its checkbox.
     const segBtns = (segId, attr, select) => {
@@ -49964,7 +50053,7 @@
     });
     const close = () => modal.remove();
     apply(findQueue(initialQueue));
-    fields.queue.addEventListener('change', () => { const found = findQueue(fields.queue.value); if (found) apply(found); });
+    fields.queue.addEventListener('change', () => { const found = findQueue(fields.queue.value); if (found) apply(found); else loadRoles(''); });
     fields.backend.addEventListener('change', () => modal.querySelectorAll('.fq-config-github').forEach(el => { el.hidden = fields.backend.value !== 'github'; }));
     fields.engine.addEventListener('change', () => {
       setModel('');
@@ -49995,6 +50084,15 @@
         const res = await fetch('/api/queue/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error(data.error || res.status);
+        try {
+          await saveRoles(data.queue);
+        } catch (e) {
+          // The queue itself saved; keep the dialog open on the role errors.
+          showOpToast('Saved ' + data.queue + ', but a role model was refused: ' + e.message, 'error');
+          save.disabled = false; save.classList.remove('is-saving');
+          _uxqHealthCache.ts = 0; _renderQueuePanel();
+          return;
+        }
         showOpToast('Saved ' + data.queue + ' queue configuration', 'success');
         _uxqHealthCache.ts = 0; _uxqItemsCache.ts = 0; close(); _renderQueuePanel();
       } catch (e) { showOpToast('Could not save queue: ' + e.message, 'error'); save.disabled = false; save.classList.remove('is-saving'); }
