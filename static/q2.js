@@ -401,7 +401,7 @@
       var st = statusOf(it);
       if (st === 'closed') return;
       var sp = stagesOf(it);
-      if (sp && sp.current && sp.current !== 'closed') {
+      if (sp && sp.current && sp.current !== 'closed' && !sp.queued) {
         b.stages = b.stages || {};
         b.stages[sp.current] = (b.stages[sp.current] || 0) + 1;
         if (stageStuck(it, sp)) b.stageStuck = (b.stageStuck || 0) + 1;
@@ -2160,7 +2160,7 @@
   // Stuck at stage: in the same not-closed stage longer than the queue's
   // stuck threshold (the same no-progress window WatchTower health uses).
   function stageStuck(it, sp) {
-    if (!sp || sp.current === 'closed' || statusOf(it) === 'closed') return false;
+    if (!sp || sp.queued || sp.current === 'closed' || statusOf(it) === 'closed') return false;
     return stageAgeMs(sp) > stageStuckSeconds(it) * 1000;
   }
 
@@ -2207,7 +2207,10 @@
     var cur = currentStage(sp);
     var stuck = stageStuck(item, sp);
     var lines = [];
-    if (cur && sp.current !== 'closed') {
+    if (sp.queued) {
+      lines.push('<div class="q2-stage-now"><b>Queued</b> <span class="q2-dim">waiting for a worker; next: '
+        + esc(cur ? cur.label : '') + (stageRunner(cur) ? ' on ' + esc(stageRunner(cur)) : '') + '</span></div>');
+    } else if (cur && sp.current !== 'closed') {
       lines.push('<div class="q2-stage-now' + (stuck ? ' is-stuck' : '') + '">'
         + '<b>' + esc(cur.label) + '</b>'
         + (stageRunner(cur) ? ' <span class="q2-dim">' + esc((cur.role || '').replace('_', ' ')) + '</span> '
@@ -2305,7 +2308,7 @@
     // to the claiming worker, so a stale/unverified claim still wins there;
     // in plan, verify or review the builder being gone is expected.
     var claimIssue = (stale && st !== 'blocked') || unverified;
-    var stageText = (sp && st !== 'closed' && !queued && !(claimIssue && sp.current === 'build'))
+    var stageText = (sp && !sp.queued && st !== 'closed' && !queued && !(claimIssue && sp.current === 'build'))
       ? stageNowText(it, sp, true) : '';
     var stuckAtStage = sp ? stageStuck(it, sp) : false;
     return '<button type="button" class="q2-trow is-' + esc(st)

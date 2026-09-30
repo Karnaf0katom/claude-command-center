@@ -130,6 +130,19 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((st["plan"], st["plan_review"], st["build"]), ("skipped", "skipped", "current"))
 
 
+class QueuedTest(unittest.TestCase):
+    def test_unclaimed_unstarted_ticket_is_queued_not_planning(self):
+        sp = ts.stage_pipeline(_item("open"), roles=ROLES, gates=GATES)
+        self.assertTrue(sp["queued"])
+        self.assertEqual(_states(sp)["plan"], "pending")
+        self.assertEqual(ts.stage_counts([dict(_item("open"), stages=sp)]), {})
+
+    def test_claimed_build_is_not_queued(self):
+        sp = ts.stage_pipeline(_item("in_progress", claimed_by="w"), roles=ROLES, gates=["verify"])
+        self.assertFalse(sp["queued"])
+        self.assertEqual(_states(sp)["build"], "current")
+
+
 class QueueCountsTest(unittest.TestCase):
     def test_health_row_has_per_stage_counts(self):
         items = [

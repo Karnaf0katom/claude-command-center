@@ -206,6 +206,11 @@ def stage_pipeline(item, roles=None, gates=None):
         since_ev = _last(hist, lambda e: e.get("event") in ("claim", "reopen", "plan_review", "plan_failed"))
     if current not in keys:
         current = "build"
+    # Open and unclaimed with nothing started: the ticket is waiting for a
+    # worker, not in a stage yet. Its next stage stays pending (not pulsing)
+    # and it is left out of per-stage counts.
+    queued = bool(status == "open" and not item.get("claimed_by") and (
+        current == "build" or (current == "plan" and not plan_status)))
     since = (item.get("closed_at") if current == "closed" else (since_ev or {}).get("at")) \
         or item.get("claimed_at") or item.get("created_at") or ""
 
@@ -248,7 +253,7 @@ def stage_pipeline(item, roles=None, gates=None):
     stages = []
     for k in keys:
         i = order[k]
-        state = "done" if i < cur_i else ("current" if i == cur_i else "pending")
+        state = "done" if i < cur_i else ("current" if i == cur_i and not queued else "pending")
         detail = ""
         if k == "closed" and current == "closed":
             state = "done"
@@ -299,6 +304,7 @@ def stage_pipeline(item, roles=None, gates=None):
     return {
         "stages": stages,
         "current": current,
+        "queued": queued,
         "since": since,
         "loops": loops,
         "waiting": waiting,
@@ -337,7 +343,7 @@ def stage_counts(items):
             continue
         q = str(it.get("project") or "").strip().upper()
         cur = sp.get("current")
-        if q and cur and cur != "closed":
+        if q and cur and cur != "closed" and not sp.get("queued"):
             counts.setdefault(q, {})
             counts[q][cur] = counts[q].get(cur, 0) + 1
     return counts
