@@ -1,0 +1,1 @@
+- The sidebar no longer sits empty for 20-30 seconds after the CCC server restarts: the saved conversation list now loads once and every early request waits for it instead of rebuilding the archive from scratch.

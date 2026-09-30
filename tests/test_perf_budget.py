@@ -1670,6 +1670,39 @@ def test_archive_response_cache_restores_signature_stat_map(
             server._ARCHIVE_STATMAP_BY_SIG.pop(new_sig, None)
 
 
+def test_archive_cache_load_is_single_flight(isolated_archive_cache, monkeypatch):
+    """CCC-1244: a caller racing the boot-time load must wait for it, not see
+    an empty cache and fall through to a synchronous full archive rebuild."""
+    import threading
+    server._archive_response_cache_put(_ALL_KEY, [{"session_id": "persisted"}])
+    server._save_archive_response_cache(force=True)
+    server._ARCHIVE_RESPONSE_CACHE.clear()
+    server._ARCHIVE_RESPONSE_CACHE_LOADED = False
+
+    real_read = server._read_archive_response_cache_file
+    reading = threading.Event()
+    release = threading.Event()
+
+    def slow_read():
+        reading.set()
+        release.wait(5)
+        real_read()
+
+    monkeypatch.setattr(server, "_read_archive_response_cache_file", slow_read)
+    first = threading.Thread(target=server._load_archive_response_cache)
+    first.start()
+    assert reading.wait(5)
+    seen = {}
+    second = threading.Thread(target=lambda: seen.update(entry=server._archive_response_cache_get(_ALL_KEY)))
+    second.start()
+    second.join(0.2)
+    assert second.is_alive(), "second caller returned before the persisted cache was loaded"
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert [r.get("session_id") for r in seen["entry"]["conversations"]] == ["persisted"]
+
+
 def test_archive_build_cache_invalidates_on_change(big_projects, isolated_archive_cache, monkeypatch, tmp_path):
     """Touching a transcript must bust the signature and force exactly one rebuild
     (the build cache must never serve a stale payload after a real change)."""

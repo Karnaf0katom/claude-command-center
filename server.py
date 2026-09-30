@@ -13920,12 +13920,32 @@ def _archive_response_cache_key(
     )
 
 
+_ARCHIVE_RESPONSE_CACHE_LOAD_LOCK = threading.Lock()
+
+
 def _load_archive_response_cache():
+    """Load the persisted archive payload once, single-flight.
+
+    The loaded flag flips only after the file is in memory, and concurrent
+    first callers wait on the load instead of returning early (CCC-1244).
+    Setting it before the read let a boot-time census/live-activity poll
+    and the first sidebar list race: the loser saw an empty cache, so the
+    list fell through to a synchronous full rebuild (18-35s after every
+    restart) and census kicked a GIL-heavy background build on top.
+    """
     global _ARCHIVE_RESPONSE_CACHE_LOADED
-    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+    if _ARCHIVE_RESPONSE_CACHE_LOADED:
+        return
+    with _ARCHIVE_RESPONSE_CACHE_LOAD_LOCK:
         if _ARCHIVE_RESPONSE_CACHE_LOADED:
             return
-        _ARCHIVE_RESPONSE_CACHE_LOADED = True
+        try:
+            _read_archive_response_cache_file()
+        finally:
+            _ARCHIVE_RESPONSE_CACHE_LOADED = True
+
+
+def _read_archive_response_cache_file():
     try:
         with _ARCHIVE_RESPONSE_CACHE_FILE.open("r") as f:
             data = json.load(f)
