@@ -46861,7 +46861,9 @@
       const session = String(w.session_id || '').trim();
       const id = String(w.worker_id || '').trim();
       const claims = items.filter(it => {
-        if (!it || it.status === 'closed' || it.closed_at) return false;
+        // Only live claims: an in_review ticket was already closed by the
+        // worker and now waits on a verifier, so it is not being worked.
+        if (!it || it.status !== 'in_progress' || it.closed_at) return false;
         const claimedSession = String((it && it.claimed_session_id) || '').trim();
         const claimedBy = String((it && it.claimed_by) || '').trim();
         return (claimedSession && claimedSession === session)
