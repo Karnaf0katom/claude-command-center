@@ -5820,10 +5820,48 @@ def _claude_desktop_workspace_for_summary(summary, existing_path=None, metadata_
     return dirs[0]
 
 
+def _warm_session_jsonl_path_cache(force=False):
+    """Populate _session_jsonl_path_cache across all PROJECTS_ROOT in one fast pass."""
+    global _session_jsonl_path_cache
+    if not _core.PROJECTS_ROOT.is_dir():
+        return
+    try:
+        for project_dir in _core.PROJECTS_ROOT.iterdir():
+            if not project_dir.is_dir():
+                continue
+            try:
+                for path in project_dir.glob("*.jsonl"):
+                    sid = path.stem
+                    if force or sid not in _session_jsonl_path_cache:
+                        _session_jsonl_path_cache[sid] = path
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def _claude_session_jsonl_path(session_id):
     sid = str(session_id or "").strip()
     if not sid or not _core.PROJECTS_ROOT.is_dir():
         return None
+    cached = _session_jsonl_path_cache.get(sid)
+    if cached is not None:
+        if cached.is_file():
+            return cached
+        _session_jsonl_path_cache.pop(sid, None)
+    now = time.time()
+    neg = _session_jsonl_negative_cache.get(sid)
+    if neg and (now - neg) < 10.0:
+        return None
+    meta_cache = getattr(_core, "_conv_meta_cache", None)
+    if meta_cache:
+        suffix = "/" + sid + ".jsonl"
+        for p_str in meta_cache:
+            if p_str.endswith(suffix):
+                p = Path(p_str)
+                if p.is_file():
+                    _session_jsonl_path_cache[sid] = p
+                    return p
     matches = []
     try:
         for path in _core.PROJECTS_ROOT.glob(f"*/{sid}.jsonl"):
@@ -5835,9 +5873,12 @@ def _claude_session_jsonl_path(session_id):
     except (OSError, RuntimeError, ValueError):
         return None
     if not matches:
+        _session_jsonl_negative_cache[sid] = now
         return None
     matches.sort(key=lambda item: item[0], reverse=True)
-    return matches[0][1]
+    best = matches[0][1]
+    _session_jsonl_path_cache[sid] = best
+    return best
 
 
 def _claude_desktop_title_from_text(text, max_len=120):
@@ -6141,6 +6182,7 @@ def _is_claude_desktop_transcript_unavailable_placeholder(path, data):
 
 def prune_unresumable_claude_desktop_metadata(dry_run=False):
     """Remove CCC-synthetic Desktop rows whose CLI transcript is unavailable."""
+    _warm_session_jsonl_path_cache()
     pruned = []
     for path in _core._claude_desktop_metadata_files():
         data = _read_json_object(path)

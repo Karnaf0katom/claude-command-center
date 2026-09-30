@@ -1,0 +1,1 @@
+- Optimized Claude Desktop session lookup by pre-warming project paths and caching jsonl locations, reducing metadata pruning and backfill CPU cost by up to 36x. (CCC-1248)

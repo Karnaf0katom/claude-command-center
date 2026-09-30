@@ -52,3 +52,29 @@ def test_corrupt_or_future_marker_counts_as_due(monkeypatch, tmp_path):
     assert codex._claude_desktop_startup_backfill_due()
     codex._claude_desktop_note_backfill_ran(now=time.time() + 86400)
     assert codex._claude_desktop_startup_backfill_due()
+
+
+def test_session_jsonl_path_cache_warming_and_lookup(monkeypatch, tmp_path):
+    projects_dir = tmp_path / "projects"
+    proj_a = projects_dir / "-Users-alice-repo1"
+    proj_a.mkdir(parents=True)
+    sid1 = "session-12345"
+    f1 = proj_a / f"{sid1}.jsonl"
+    f1.write_text("{}")
+
+    from ccc_server import session_graph
+    monkeypatch.setattr(session_graph._core, "PROJECTS_ROOT", projects_dir)
+    session_graph._session_jsonl_path_cache.clear()
+    session_graph._session_jsonl_negative_cache.clear()
+
+    session_graph._warm_session_jsonl_path_cache(force=True)
+    assert sid1 in session_graph._session_jsonl_path_cache
+    assert session_graph._session_jsonl_path_cache[sid1] == f1
+
+    # Look up via _claude_session_jsonl_path
+    assert session_graph._claude_session_jsonl_path(sid1) == f1
+
+    # Non-existent session hits negative cache
+    assert session_graph._claude_session_jsonl_path("missing-sid") is None
+    assert "missing-sid" in session_graph._session_jsonl_negative_cache
+
