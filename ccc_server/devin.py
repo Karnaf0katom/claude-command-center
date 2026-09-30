@@ -2057,16 +2057,35 @@ def find_devin_cli_conversations(
                 f"rows=0 repo_only={repo_only} stale-ok-busy",
             )
             return []
+        # Cold miss (fresh process, nothing cached): build in the background
+        # and return [] now. Built inline, this was the first sidebar list
+        # after every restart paying the ~28s cold sessions.db scan
+        # (CCC-1244); the archive snapshot already carries Devin rows, and
+        # the next poll reads the rows this thread caches.
+        def _rebuild():
+            try:
+                _find_devin_cli_conversations_locked(
+                    repo_path=repo_path,
+                    include_old=include_old,
+                    repo_only=repo_only,
+                    progress=progress,
+                    limit=limit,
+                )
+            except Exception:
+                pass
+            finally:
+                _DEVIN_CLI_LIST_REBUILD_LOCK.release()
         try:
-            return _find_devin_cli_conversations_locked(
-                repo_path=repo_path,
-                include_old=include_old,
-                repo_only=repo_only,
-                progress=progress,
-                limit=limit,
-            )
-        finally:
+            threading.Thread(target=_rebuild, name="devin-cli-list-rebuild", daemon=True).start()
+        except Exception:
             _DEVIN_CLI_LIST_REBUILD_LOCK.release()
+            raise
+        _devin_cli_profile_log(
+            "find_devin_cli_conversations",
+            time.perf_counter() - start,
+            f"rows=0 repo_only={repo_only} stale-ok-cold-bg",
+        )
+        return []
     with _DEVIN_CLI_LIST_REBUILD_LOCK:
         return _find_devin_cli_conversations_locked(
             repo_path=repo_path,

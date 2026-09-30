@@ -1,1 +1,1 @@
-- The sidebar no longer sits empty for 20-30 seconds after the CCC server restarts: the saved conversation list now loads once and every early request waits for it instead of rebuilding the archive from scratch.
+- The sidebar no longer sits empty for 20-30 seconds after the CCC server restarts: the saved conversation list loads once for every early request, and the Devin CLI overlay no longer scans its multi-GB database inline on the first list request.

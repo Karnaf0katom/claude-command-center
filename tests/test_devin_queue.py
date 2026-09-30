@@ -701,6 +701,12 @@ class DevinListPerfTests(unittest.TestCase):
         server = importlib.import_module("server")
         import ccc_server.devin as devin_mod
 
+        # A cold /list overlay miss rebuilds on a background thread (CCC-1244);
+        # never let one from an earlier test run into this test's DB and spies.
+        deadline = time.monotonic() + 5
+        while devin_mod._DEVIN_CLI_LIST_REBUILD_LOCK.locked() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
         tmpdir = tempfile.mkdtemp()
         db_path = os.path.join(tmpdir, "sessions.db")
         memo_path = os.path.join(tmpdir, "row_memo.json")
@@ -1061,7 +1067,7 @@ class DevinListPerfTests(unittest.TestCase):
         )
         con.commit()
         con.close()
-        rows = server._archive_overlay_devin_cli_sessions([])
+        rows = _overlay_after_cold_build(server, devin_mod)
         ids = sorted(r["id"] for r in rows)
         self.assertEqual(ids, ["devincli-alpha-one", "devincli-beta-two"])
         self.assertTrue(all(r["source"] == "devin-cli" for r in rows))
@@ -1113,7 +1119,7 @@ class DevinListPerfTests(unittest.TestCase):
         with mock.patch.object(devin_mod, "_DEVIN_CLI_LIST_TTL_SEC", 3600), \
              mock.patch.object(devin_mod, "_devin_cli_row_fields_for_session", spy):
             # Warm the overlay's own cache variant (repo_path=None).
-            server._archive_overlay_devin_cli_sessions([])
+            _overlay_after_cold_build(server, devin_mod)
             self.assertEqual(sorted(calls), ["alpha-one", "beta-two"])
             for entry in devin_mod._DEVIN_CLI_LIST_CACHE.values():
                 entry["ts"] = 0.0
@@ -1150,6 +1156,17 @@ class DevinListPerfTests(unittest.TestCase):
         finally:
             release.set()
             worker.join(timeout=2)
+
+def _overlay_after_cold_build(server, devin_mod):
+    """A cold overlay miss returns [] and builds in the background (CCC-1244);
+    wait for that build, then read the overlay the next /list poll sees."""
+    first = server._archive_overlay_devin_cli_sessions([])
+    assert first == []
+    deadline = time.monotonic() + 5
+    while devin_mod._DEVIN_CLI_LIST_REBUILD_LOCK.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return server._archive_overlay_devin_cli_sessions([])
+
 
 class DevinSpawnIdentityTests(unittest.TestCase):
     """Two Devin spawns with the same prompt must resolve to two sessions.

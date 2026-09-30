@@ -1703,6 +1703,35 @@ def test_archive_cache_load_is_single_flight(isolated_archive_cache, monkeypatch
     assert [r.get("session_id") for r in seen["entry"]["conversations"]] == ["persisted"]
 
 
+def test_devin_overlay_cold_miss_does_not_block_list(monkeypatch):
+    """CCC-1244: with nothing cached (fresh process) the /list overlay must not
+    run the multi-second sessions.db scan inline; it builds in the background."""
+    import threading
+    from ccc_server import devin
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_build(**kwargs):
+        started.set()
+        release.wait(5)
+        return [{"session_id": "devincli-x"}]
+
+    monkeypatch.setattr(devin, "_devin_cli_cached_rows", lambda key, ttl_only=True: None)
+    monkeypatch.setattr(devin, "_find_devin_cli_conversations_locked", slow_build)
+    t0 = time.monotonic()
+    rows = devin.find_devin_cli_conversations(include_old=True, stale_ok=True)
+    assert rows == []
+    assert time.monotonic() - t0 < 1.0
+    assert started.wait(5), "cold miss should start a background rebuild"
+    # A second poll while it runs does not start another build.
+    assert devin.find_devin_cli_conversations(include_old=True, stale_ok=True) == []
+    release.set()
+    deadline = time.monotonic() + 5
+    while devin._DEVIN_CLI_LIST_REBUILD_LOCK.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not devin._DEVIN_CLI_LIST_REBUILD_LOCK.locked()
+
+
 def test_archive_build_cache_invalidates_on_change(big_projects, isolated_archive_cache, monkeypatch, tmp_path):
     """Touching a transcript must bust the signature and force exactly one rebuild
     (the build cache must never serve a stale payload after a real change)."""
