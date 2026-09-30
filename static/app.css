@@ -22921,6 +22921,42 @@ body.has-gc-reader .pwa-install-banner {
 .uxq-check-evidence { flex-basis: 100%; }
 .uxq-check-evidence pre { max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 12px; margin: 4px 0 0; }
 .fq-row.is-in_review .fq-status { background: #a371f7; box-shadow: 0 0 0 3px rgba(163,113,247,0.18); }
+/* Stage tones (CCC-1243): what WatchTower is doing with an open ticket, read
+   from its `stages` model. Cyan = planning, pink = checks/verify, orange =
+   stuck (same stage past the queue's stuck window, or a dead worker's claim),
+   green with a check = closed after its verify passed. A live claim keeps
+   pulsing, in the stage's own color. Needs input (red) is never toned. */
+.fq-row.is-stage-planning { --fq-tone: #39c5cf; }
+.fq-row.is-stage-verifying { --fq-tone: #db61a2; }
+.fq-row.is-stage-stuck { --fq-tone: #f0883e; }
+.fq-row.is-stage-planning .fq-status,
+.fq-row.is-stage-verifying .fq-status,
+.fq-row.is-stage-stuck .fq-status {
+  box-sizing: border-box; border: 0;
+  background: var(--fq-tone);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fq-tone) 22%, transparent);
+  animation: none;
+}
+.fq-row.is-in_progress.is-stage-planning .fq-status,
+.fq-row.is-in_progress.is-stage-verifying .fq-status {
+  animation: fq-stage-glow 1.5s ease-in-out infinite;
+}
+@keyframes fq-stage-glow {
+  0%, 100% { opacity: 0.82; box-shadow: 0 0 0 3px color-mix(in srgb, var(--fq-tone) 28%, transparent); }
+  50% { opacity: 1; box-shadow: 0 0 0 5px color-mix(in srgb, var(--fq-tone) 45%, transparent), 0 0 18px var(--fq-tone); }
+}
+.fq-row.is-stage-stuck .fq-note { color: color-mix(in srgb, #f0883e 70%, var(--text)); }
+.fq-row.is-closed.is-stage-verified .fq-status {
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 3px rgba(63,185,80,0.24);
+}
+.fq-row.is-closed.is-stage-verified .fq-status::after {
+  content: '\2713'; font-size: 10px; font-weight: 700; line-height: 1; color: var(--bg, #0d1117);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fq-row.is-in_progress.is-stage-planning .fq-status,
+  .fq-row.is-in_progress.is-stage-verifying .fq-status { animation: none; }
+}
 /* Blocked panel inside the ticket detail modal. */
 /* ── Ticket Detail Modal (world-class redesign CCC-387/388) ── */
 .uxq-td-overlay {

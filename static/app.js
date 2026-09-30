@@ -48874,6 +48874,34 @@
         return rawStatus;
       };
       const _isLiveWip = it => _effectiveStatus(it) === 'in_progress' && _hasLiveClaim(it);
+      // Stage tone for the status dot (CCC-1243). Open/in-progress used to be
+      // one grey or blue dot whatever WatchTower was doing with the ticket;
+      // the server's `stages` model (ccc_server/ticket_stages.py) already says
+      // which stage it is in and since when, so name the ones a human scans
+      // for: planning, verifying, stuck, and closed-after-a-passed-verify.
+      // Needs input keeps its own red and wins over all of these.
+      const _uxqStageStuckMs = it => {
+        const k = _uxqProjectKey(it && it.project);
+        const q = ((_uxqHealthCache && _uxqHealthCache.queues) || []).find(row => _uxqProjectKey(row && row.queue) === k);
+        return ((q && Number(q.stage_stuck_s)) || 600) * 1000;
+      };
+      const _uxqStageTone = it => {
+        const sp = it && it.stages;
+        const stages = (sp && Array.isArray(sp.stages)) ? sp.stages : [];
+        const status = _effectiveStatus(it);
+        if (status === 'blocked') return '';
+        if (status === 'closed') {
+          return (sp && sp.current === 'closed' && stages.some(s => s && s.key === 'verify' && s.state === 'done')) ? 'verified' : '';
+        }
+        if (String((it && it.status) || '') === 'in_progress' && _isStaleClaim(it)) return 'stuck';
+        if (!sp || sp.queued || !sp.current) return '';
+        const since = Date.parse(sp.since || '');
+        if (since && Date.now() - since > _uxqStageStuckMs(it)) return 'stuck';
+        if (sp.current === 'plan' || sp.current === 'plan_review') return 'planning';
+        if (sp.current === 'checks' || sp.current === 'verify') return 'verifying';
+        return '';
+      };
+      const _UXQ_STAGE_TONE_WORD = { planning: 'planning', verifying: 'verifying', stuck: 'stuck', verified: 'closed - verified' };
       const _unready = it => (it && (it.readiness === 'needs-shaping' || it.readiness === 'needs-spec') ? 1 : 0);
       const _prioRank = it => (it && _PR[it.priority] != null) ? _PR[it.priority] : (it && it.lane === 'express' ? 0 : 2);
       // A close with unresolved work is not a clean green close. Put it with
@@ -49026,10 +49054,18 @@
         // input / closed. Pressing ▶ again while still queued cancels.
         const queuedToRun = status === 'open' && !!it.run_requested;
         const runBusy = _uxqRunBusyRefs.has(ref);
+        const stageTone = _uxqStageTone(it);
+        const stageSince = stageTone && stageTone !== 'verified' && it.stages && Date.parse(it.stages.since || '');
+        const stageToneTitle = !stageTone ? ''
+          : (stageTone === 'stuck' && it.stages && it.stages.current && !(rawStatus === 'in_progress' && staleClaim)
+            ? 'stuck in ' + String(it.stages.current).replace('_', ' ')
+            : _UXQ_STAGE_TONE_WORD[stageTone])
+            + (stageSince ? ' for ' + timeAgo(stageSince).replace(/\s+ago$/, '') : '');
         const runTitle = queuedToRun
           ? 'Queued to run - click to cancel'
-          : 'Run this ticket';
+          : (stageToneTitle ? stageToneTitle + ' - ' : '') + 'Run this ticket';
         const statusTitle = blocked ? 'needs input' : hasUnresolved ? 'closed - unresolved follow-up'
+          : (stageTone && !queuedToRun) ? stageToneTitle
           : unverifiedClaim ? 'claimed by ' + String(it.claimed_by || '') + ', liveness unverified'
           : staleClaim ? 'stale claim - no current live worker'
           : queuedToRun ? 'queued to run'
@@ -49050,7 +49086,7 @@
           + (ageStr ? '<span class="fq-age" title="' + escapeAttr(ageSrc) + '">' + escapeHtml(ageStr) + '</span>' : '')
           + statusAction
           + '</span>';
-        return '<div class="fq-row is-' + escapeAttr(status) + (blocked ? ' is-blocked' : '') + (staleClaim ? ' is-stale-claim' : '') + (unverifiedClaim ? ' is-unverified-claim' : '') + (isNew ? ' fq-new-item' : '') + (hasUnresolved ? ' has-unresolved' : '') + (queuedToRun ? ' is-queued-run' : '') + '" data-ref="' + escapeAttr(ref)
+        return '<div class="fq-row is-' + escapeAttr(status) + (blocked ? ' is-blocked' : '') + (staleClaim ? ' is-stale-claim' : '') + (unverifiedClaim ? ' is-unverified-claim' : '') + (isNew ? ' fq-new-item' : '') + (hasUnresolved ? ' has-unresolved' : '') + (queuedToRun ? ' is-queued-run' : '') + (stageTone ? ' is-stage-' + stageTone : '') + '" data-ref="' + escapeAttr(ref)
           + '" title="' + escapeAttr(tip) + '">'
           + '<span class="fq-ref" title="' + escapeAttr(ref) + '">' + escapeHtml(compactRef) + '</span>'
           + queueLabelHtml
