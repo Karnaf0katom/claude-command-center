@@ -15686,6 +15686,23 @@
     display: flex; flex-direction: column; align-items: flex-start; gap: 3px; flex: 0 0 auto;
   }
   .fq-working-row.is-mobile .fq-working-dot { align-self: center; }
+  /* The ticket ref is the row's identity, the engine glyph a detail: ref
+     reads brighter, glyph steps back (CCC-1242). */
+  .fq-working-row .fq-working-id { color: #c9d1d9; font-weight: 600; }
+  .fq-working-row.is-mobile .fq-working-engine { opacity: .7; transform: scale(.85); transform-origin: left center; }
+  .fq-working-role {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; line-height: 1;
+    padding: 2px 4px; border-radius: 3px; white-space: nowrap; flex: 0 0 auto;
+    color: #a371f7; border: 1px solid rgba(163,113,247,0.45); text-transform: lowercase;
+  }
+  .fq-working-idle { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 2px 0; }
+  .fq-working-idle-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; color: #565e68; margin-right: 2px;
+  }
+  .fq-working-idle-chip {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; line-height: 1;
+    padding: 2px 5px; border-radius: 4px; color: #7d8590; border: 1px solid #2d3540;
+  }
   /* The session/kill buttons take no layout space: they float over the
      title's top-right corner on hover. Hidden, they must not eat taps meant
      for the row, so pointer-events follow visibility (CCC-1229 lesson:

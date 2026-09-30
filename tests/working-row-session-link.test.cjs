@@ -69,7 +69,10 @@ test('CCC-1242: one row per worker, other claims as chips, aged from the claim',
   assert.doesNotMatch(body, /const on = items\.find\(/);
   assert.match(body, /it\.status !== 'in_progress'/, 'in_review tickets are not working rows');
   assert.match(body, /a\.needs_input \? 1 : 0/, 'needs_input claims sort after live work');
-  assert.match(body, /on \? ageOf\(on\.claimed_at\) : workerAge/, 'ticket age from claimed_at');
+  assert.match(body, /on && !stage \? ageOf\(on\.claimed_at\) : workerAge/, 'ticket age from claimed_at');
+  assert.match(body, /if \(!stage && !claims\.length && _uxqItemsCache\.ts\) \{ idleQueues\.push/, 'idle workers drop to chips');
+  assert.match(body, /class="fq-working-idle-chip"/, 'idle queue chips rendered under the rows');
+  assert.match(body, /class="fq-working-role"/, 'stage sessions carry a role label');
   assert.match(body, /class="fq-working-worker-age"/, 'worker age rendered separately');
   assert.match(body, /const rows = workers\.map\(/, 'one row per worker');
   assert.match(body, /claims\.find\(it => !it\.needs_input\)/, 'row leads with a live claim');

@@ -46859,7 +46859,9 @@
     _uxqRenderWorkersQueueHealth(health, workers);
     const items = Array.isArray(_uxqItemsCache.items) ? _uxqItemsCache.items : [];
     const queues = Array.isArray(health.queues) ? health.queues : [];
-    const queueNames = [...new Set(workers.map(w => _uxqProjectKey(w.queue)).filter(Boolean))];
+    // Stage sessions (planner/verifier/...) run under a per-ticket queue name
+    // like PLAN-WT-28-R3-D1; count them under the ticket's own queue.
+    const queueNames = [...new Set(workers.map(w => _uxqProjectKey(w.ticket_queue || w.queue)).filter(Boolean))];
     const summary = _uxqPicker.isMobile
       ? (workers.length ? String(workers.length) : '0')
       : (workers.length + ' agent' + (workers.length === 1 ? '' : 's') + ' · '
@@ -46869,8 +46871,13 @@
     // the parked one and hid the live one. The row now leads with the newest
     // actively worked claim and carries every other claim as a chip, so
     // parked tickets stay visible without reading as current work (CCC-1242).
+    // Stage workers never claim their ticket, so they carry it on the record
+    // (stage, ref, ticket_queue). A regular worker with no claim is idle; it
+    // is transient, so it only shows as a queue chip under the rows.
+    const idleQueues = [];
     const rows = workers.map(w => {
-      const qKey = _uxqProjectKey(w && w.queue);
+      const stage = String((w && w.stage) || '').trim();
+      const qKey = _uxqProjectKey(w && (stage && w.ticket_queue ? w.ticket_queue : w.queue));
       const session = String(w.session_id || '').trim();
       const id = String(w.worker_id || '').trim();
       const claims = items.filter(it => {
@@ -46904,7 +46911,12 @@
         state: Number.isFinite(idleS) && idleS < 60 ? 'working' : 'idle',
       };
       const icon = '<span class="fq-working-engine">' + sessionEngineIconHtml(iconRow) + '</span>';
-      const on = claims.find(it => !it.needs_input) || null;
+      const stageRef = stage ? String(w.ref || '').trim() : '';
+      const stageItem = stageRef ? items.find(it => it && _uxqItemRef(it) === stageRef) : null;
+      // Until the ticket list lands every worker looks claim-less; keep them
+      // as rows then rather than folding the whole fleet into idle chips.
+      if (!stage && !claims.length && _uxqItemsCache.ts) { idleQueues.push(qKey || String(w.queue || '')); return null; }
+      const on = stageItem || claims.find(it => !it.needs_input) || null;
       const chips = claims.filter(it => it !== on).map(it => {
         const cRef = _uxqItemRef(it);
         // Same-queue refs shrink to their number so chips fit the narrow
@@ -46918,20 +46930,21 @@
             + String(it.title || it.note || it.text || '').split('\n')[0],
         };
       });
-      const ref = on ? _uxqItemRef(on) : '';
+      const ref = on ? _uxqItemRef(on) : stageRef;
       const title = on ? String(on.note || on.title || on.text || '').split('\n')[0]
-        : (chips.length ? 'waiting on input' : 'idle');
-      // Ticket age from its own claim; without a live claim only the worker's.
-      const elapsed = on ? ageOf(on.claimed_at) : workerAge;
-      const elapsedTip = [on && elapsed ? 'Claimed ' + elapsed + ' ago' : '',
-        workerAge ? 'worker running ' + workerAge : ''].filter(Boolean).join(' · ');
+        : (stage || !_uxqItemsCache.ts ? 'loading ticket…' : (chips.length ? 'waiting on input' : 'idle'));
+      // Ticket age from its own claim; a stage session is as old as itself,
+      // and without a live claim only the worker's age is left.
+      const elapsed = on && !stage ? ageOf(on.claimed_at) : workerAge;
+      const elapsedTip = [on && !stage && elapsed ? 'Claimed ' + elapsed + ' ago' : '',
+        workerAge ? (stage ? stage + ' running ' : 'worker running ') + workerAge : ''].filter(Boolean).join(' · ');
       // CCC-1148: the row itself must link to the CCC session the claim runs
       // in — the ticket's claimed_session_id can still be empty here (reconciler
       // backfill lag, worker-id claims), which left no path to the session.
       return { ref, title, queue: qKey, worker: String(w.worker_id || 'worker'), elapsed, icon,
-        elapsedTip, workerAge, chips,
+        elapsedTip, workerAge, chips, stage,
         pid: parseInt(w.pid, 10) || 0, workerId: String(w.worker_id || ''), sid: sid };
-    });
+    }).filter(Boolean);
     const rowsHtml = rows.map(r => {
         // CCC-1050: one-click kill — releases the worker from queue staffing
         // and terminates its process (server route does both, release first).
@@ -46949,6 +46962,9 @@
             + (c.needsInput ? ' is-needs-input' : '') + '" data-uxq-chip-ref="' + escapeAttr(c.ref)
             + '" title="' + escapeAttr(c.tip) + '">' + escapeHtml(c.label) + '</button>').join('') + '</span>'
           : '';
+        const roleHtml = r.stage
+          ? '<span class="fq-working-role" title="' + escapeAttr('WatchTower ' + r.stage + ' session for ' + (r.ref || 'this ticket')) + '">' + escapeHtml(r.stage) + '</span>'
+          : '';
         const elapsedAttr = r.elapsedTip ? ' title="' + escapeAttr(r.elapsedTip) + '"' : '';
         // Worker age only on claim rows; an idle row's elapsed already is it.
         const workerAgeHtml = r.ref && r.workerAge
@@ -46962,6 +46978,7 @@
             + '<span class="fq-working-lead">'
             + '<span class="fq-working-id">' + escapeHtml(r.ref || '-') + '</span>'
             + r.icon
+            + roleHtml
             + '</span>'
             + '<span class="fq-working-body">'
             + '<span class="fq-working-title">' + escapeHtml(r.title) + '</span>'
@@ -46977,6 +46994,7 @@
         return '<div class="fq-working-row' + (r.ref ? ' has-ref' : '') + '" data-uxq-working-ref="' + escapeAttr(r.ref) + '">'
           + '<span class="fq-working-id">' + escapeHtml(r.ref || '-') + '</span>'
           + r.icon
+          + roleHtml
           + '<span class="fq-working-title">' + escapeHtml(r.title) + '</span>'
           + chipsHtml
           + '<span class="fq-working-right">'
@@ -46988,6 +47006,18 @@
           + killBtn
           + '</span></div>';
     }).join('');
+    // Idle workers: one quiet chip per queue at the bottom, just enough to see
+    // how many are standing by (CCC-1242).
+    const idleCounts = new Map();
+    idleQueues.forEach(q => idleCounts.set(q || '?', (idleCounts.get(q || '?') || 0) + 1));
+    const idleHtml = idleCounts.size
+      ? '<div class="fq-working-idle" title="Idle workers: alive, holding no ticket">'
+        + '<span class="fq-working-idle-label">idle</span>'
+        + [...idleCounts].map(([q, n]) => '<span class="fq-working-idle-chip">' + escapeHtml(q)
+          + (n > 1 ? ' &times;' + n : '') + '</span>').join('')
+        + '</div>'
+      : '';
+    const listHtml = rowsHtml + idleHtml;
     const collapsed = _uxqPicker.isMobile && _uxqPicker.workingCollapsed;
     hosts.forEach($el => {
       _uxqBindWorkingStrip($el);
@@ -47001,7 +47031,7 @@
       // head expands them (CCC-1019).
       $el.classList.toggle('is-collapsed', collapsed);
       if ($head) $head.setAttribute('aria-expanded', String(!collapsed));
-      if ($rows && $rows.innerHTML !== rowsHtml) $rows.innerHTML = rowsHtml;
+      if ($rows && $rows.innerHTML !== listHtml) $rows.innerHTML = listHtml;
     });
   }
   // Tickets are fetched for the Queues panel, so a user who lands straight on
