@@ -1,0 +1,1 @@
+- Opening a Codex (or other non-Claude) conversation no longer stalls on "Loading..." for seconds: CCC stopped scanning every Claude project folder on each request for a session it already knows is not a Claude one.

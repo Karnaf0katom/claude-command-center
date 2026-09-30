@@ -6279,6 +6279,13 @@ def _detect_session_engine(session_id):
     return engine
 
 
+def _engine_known_non_claude(session_id):
+    """True when the engine memo already holds a non-Claude verdict. No detection."""
+    with _engine_detect_lock:
+        hit = _ENGINE_DETECT_CACHE.get(session_id)
+    return bool(hit) and hit[0] != "claude"
+
+
 def _resolve_local_spawn_session_prefix(session_id):
     """Expand an unambiguous displayed spawn-id prefix to its native ID.
 
@@ -22648,6 +22655,15 @@ def _resolve_conversation_path(conversation_id, repo_path=None):
                 with _CONV_PATH_CACHE_LOCK:
                     _CONV_PATH_CACHE[conversation_id] = str(cand)
                 return cand
+    # A session already detected as another engine (Codex, Gemini, ...) has no
+    # Claude transcript, and the walk below never caches a miss: each call cost
+    # ~2 stats per project dir (~9,500 on a 2,300-dir store), several times per
+    # conversation request. Under GIL contention that made a Codex open take
+    # 2-40 s (CCC-1247). Peek at the memo only; never run detection from here.
+    if _engine_known_non_claude(conversation_id):
+        if repo_path:
+            return _canonical_conversation_path(repo_path, conversation_id)
+        return PROJECTS_ROOT / "_missing" / name
     if PROJECTS_ROOT.is_dir():
         try:
             for project_dir in PROJECTS_ROOT.iterdir():

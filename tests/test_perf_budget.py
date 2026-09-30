@@ -4569,3 +4569,34 @@ def test_sandbox_harvest_warm_tick_copies_nothing(monkeypatch, tmp_path):
     assert copy_calls == [], f"warm harvest tick re-copied {len(copy_calls)} unchanged files"
 
 
+
+
+def test_conversation_path_skips_projects_walk_for_known_non_claude(monkeypatch, tmp_path):
+    """CCC-1247: a Codex open walked every ~/.claude/projects dir (2 stats each,
+    misses never cached) several times per request. A memoized non-Claude
+    verdict must skip the walk; an unknown or Claude sid still walks."""
+    root = tmp_path / "projects"
+    for i in range(50):
+        (root / f"-proj-{i}").mkdir(parents=True)
+    claude_sid = "11111111-2222-3333-4444-555555555555"
+    (root / "-proj-49" / f"{claude_sid}.jsonl").write_text("{}\n")
+    monkeypatch.setattr(server, "PROJECTS_ROOT", root)
+    codex_sid = "01a0f2a9-0000-7000-8000-000000000000"
+    monkeypatch.setitem(server._ENGINE_DETECT_CACHE, codex_sid, ("codex", None))
+
+    iterdirs = []
+    real_iterdir = type(root).iterdir
+
+    def counting_iterdir(self):
+        if self == root:
+            iterdirs.append(self)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(type(root), "iterdir", counting_iterdir)
+    for _ in range(3):
+        path = server._resolve_conversation_path(codex_sid)
+        assert not path.is_file()
+    assert iterdirs == [], "known Codex sid walked ~/.claude/projects"
+
+    assert server._resolve_conversation_path(claude_sid).is_file()
+    assert len(iterdirs) == 1
