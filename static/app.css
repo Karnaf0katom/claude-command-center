@@ -9191,6 +9191,19 @@
     .conv-input-context.is-new-session .spawn-worktree-row {
       justify-self: start;
     }
+    /* CCC-1231: with the keyboard up the pane is ~half height, and the
+       folder + model rows above the composer can't shrink, so the composer's
+       bottom row (send) was pushed under the keyboard. Let those rows scroll
+       in whatever room is left; the composer keeps its full height. */
+    .conv-pane > .conv-input-context.is-new-session,
+    .conv-pane:has(> .conv-input-context.is-new-session) > .conv-model-picker-strip {
+      flex-shrink: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .conv-pane:has(> .conv-input-context.is-new-session) > .conv-input-bar {
+      flex-shrink: 0;
+    }
   }
 
   /* ── Goal #5: tighten message + status row vertical rhythm ────────────────
