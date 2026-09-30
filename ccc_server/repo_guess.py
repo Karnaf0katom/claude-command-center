@@ -30,7 +30,16 @@ from ccc_server import core as _core
 
 _RG_JEV_URL = "https://api.typesafe.ai/v1/systemone"
 _RG_JEV_TIMEOUT_S = 3
-_RG_MAX_CANDIDATES = 20
+_RG_MAX_CANDIDATES = 15
+_RG_ENOUGH_SCORED = 5
+# Folders pasted images, transcripts and attachments live in: a path there is
+# not where the work happens.
+_RG_IGNORED_ROOTS = ("~/Desktop", "~/Downloads", "~/Documents", "~/Movies", "~/Pictures",
+                     "/tmp", "/private", "/var")
+_RG_NAME_STOPLIST = frozenset((
+    "test", "tests", "apps", "app", "dev", "src", "docs", "tools", "web", "api", "work",
+    "scratch", "tmp", "data", "notes", "projects", "code", "repo", "repos",
+))
 _RG_MAX_PROMPT_CHARS = 3000
 _RG_DESC_MAX = 300
 _RG_OVERRIDE_MAX = 500
@@ -44,6 +53,11 @@ _RG_INSTRUCTIONS = (
     "even if the message never names it. last_used_workspace is where their "
     "previous session ran: a weak hint, prefer it only when the message fits "
     "it or is ambiguous."
+)
+_RG_MENTION_NOTE = (
+    " workspaces_mentioned lists workspaces whose name or a file path appears in "
+    "the message; a mention is evidence, but the message may only be referencing "
+    "a file there while the work belongs elsewhere."
 )
 
 # ---------------------------------------------------------------------------
@@ -103,47 +117,84 @@ def _rg_norm(path):
         return ""
 
 
-def _rg_candidates(current_repo):
-    """(candidates, collapse_map).
+def _rg_scores(paths):
+    """{path: usage score} from the same memoised ranking /api/repo/list uses.
 
-    candidates: up to 20 existing repo dirs, recent first, worktrees folded
-    into their main repo when that is itself known. collapse_map: every
-    known path (uncapped) -> the path it is represented by, so a path typed
-    inside a worktree still resolves to the main repo."""
-    ordered = []
+    Never triggers a scan on the request path: a cold cache (nothing computed
+    yet) yields {} and starts one background computation for next time;
+    a stale cache is used as-is."""
     try:
-        ordered.extend(_core._load_recent_repos())
+        cache = _core._REPO_SIGNALS_CACHE
+        data = cache.get("data")
+        if data is None:
+            threading.Thread(target=_core._compute_repo_usage_signals,
+                             args=(list(paths),), daemon=True).start()
+            return {}
+        return {p: float((data.get(p) or {}).get("score") or 0.0) for p in paths}
+    except Exception:
+        return {}
+
+
+def _rg_candidates_scored(current_repo):
+    """(candidates, collapse_map, scores).
+
+    candidates: up to 15 existing repo dirs: usage-ranked first, then recents,
+    then the rest (score-0 leftovers dropped once enough are scored);
+    worktrees fold into their main repo when it is known; container folders
+    (strict ancestors of other known repos) never appear. collapse_map: every
+    known non-container path -> the path representing it, so a path typed
+    inside a worktree still resolves to the main repo."""
+    recents = []
+    try:
+        recents = [_rg_norm(p) for p in _core._load_recent_repos()]
     except Exception:
         pass
+    others = []
     try:
-        ordered.extend(_core._known_repo_paths())
+        others = list(_core._known_repo_paths())
     except Exception:
         pass
     cur = _rg_norm(current_repo) if current_repo else ""
-    if cur and os.path.isdir(cur):
-        ordered.insert(0, cur)
     seen = set()
     known = []
-    for p in ordered:
-        s = _rg_norm(p)
-        if s and s not in seen and os.path.isdir(s):
-            seen.add(s)
-            known.append(s)
+    for p in recents + [_rg_norm(x) for x in others] + ([cur] if cur else []):
+        if p and p not in seen and os.path.isdir(p):
+            seen.add(p)
+            known.append(p)
+    pref = {p + os.sep for p in known}
+    containers = {p for p in known
+                  if any(q != p and q.startswith(p.rstrip(os.sep) + os.sep) for q in known)}
+    known = [p for p in known if p not in containers]
+    kset = set(known)
     collapse = {}
-    cands = []
-    cand_seen = set()
-    for s in known:
-        main = _rg_main_repo_of(s)
-        rep = main if (main and main in seen) else s
-        collapse[s] = rep
-        if rep not in cand_seen:
-            cand_seen.add(rep)
-            cands.append(rep)
-    cands = cands[:_RG_MAX_CANDIDATES]
-    if cur and cur in collapse:
-        rep = collapse[cur]
-        if rep not in cands:
-            cands = cands[:_RG_MAX_CANDIDATES - 1] + [rep]
+    for p in known:
+        main = _rg_main_repo_of(p)
+        collapse[p] = main if (main and main in kset) else p
+    reps = []
+    for p in known:
+        if collapse[p] not in reps:
+            reps.append(collapse[p])
+    raw_scores = _rg_scores(known)
+    scores = {}
+    for p in known:
+        rep = collapse[p]
+        scores[rep] = max(scores.get(rep, 0.0), raw_scores.get(p, 0.0))
+    scored = sorted((r for r in reps if scores.get(r, 0.0) > 0), key=lambda r: -scores[r])
+    rec = [r for r in dict.fromkeys(collapse.get(p, p) for p in recents) if r in set(reps)]
+    ordered = list(scored)
+    ordered += [r for r in rec if r not in ordered]
+    rest = [r for r in reps if r not in ordered]
+    if len(scored) < _RG_ENOUGH_SCORED:
+        ordered += rest
+    cands = ordered[:_RG_MAX_CANDIDATES]
+    cur_rep = collapse.get(cur) if cur else None
+    if cur_rep and cur_rep not in cands:
+        cands = cands[:_RG_MAX_CANDIDATES - 1] + [cur_rep]
+    return cands, collapse, scores
+
+
+def _rg_candidates(current_repo):
+    cands, collapse, _ = _rg_candidates_scored(current_repo)
     return cands, collapse
 
 
@@ -154,12 +205,27 @@ def _rg_candidates(current_repo):
 _RG_PATH_TOKEN = re.compile(r"(?:(?<=[\s\"'`(\[=,:])|^)(~(?:/[^\s\"'`)\]>,;]*)?|/[^\s\"'`)\]>,;]+)")
 
 
+def _rg_ignored_path(tok):
+    """True for tokens that are attachments/config, not the work location."""
+    home = str(Path.home())
+    full = home + tok[1:] if tok.startswith("~") else tok
+    if any(part.startswith(".") and part not in (".", "..") for part in full.split("/")):
+        return True
+    for root in _RG_IGNORED_ROOTS:
+        r = home + root[1:] if root.startswith("~") else root
+        if full == r or full.startswith(r + "/"):
+            return True
+    return False
+
+
 def _rg_match_path(prompt, collapse):
     best = None
     best_len = -1
     home = str(Path.home())
     for m in _RG_PATH_TOKEN.finditer(prompt or ""):
         tok = m.group(1).rstrip(".:!?")
+        if _rg_ignored_path(tok):
+            continue
         if tok.startswith("~"):
             tok = home + tok[1:]
         tok = os.path.normpath(tok)
@@ -170,14 +236,38 @@ def _rg_match_path(prompt, collapse):
     return best
 
 
+def _rg_acronym(base):
+    parts = [x for x in base.split("-") if x]
+    if len(parts) >= 3:
+        return "".join(x[0] for x in parts).lower()
+    return ""
+
+
+def _rg_word_in(prompt, word):
+    # Not inside a path token (neighbouring "/"), a hyphenated slug, or a
+    # filename ("billing.py").
+    pat = r"(?<![\w/.\-])" + re.escape(word) + r"(?![\w/\-]|\.\w)"
+    return re.search(pat, prompt, re.IGNORECASE) is not None
+
+
 def _rg_match_names(prompt, cands):
+    bases = {p: os.path.basename(p.rstrip(os.sep)) for p in cands}
+    lower = [b.lower() for b in bases.values()]
+    acr = {}
+    for p, b in bases.items():
+        a = _rg_acronym(b)
+        if a and lower.count(a) == 0:
+            acr.setdefault(a, []).append(p)
     hits = []
-    for p in cands:
-        base = os.path.basename(p.rstrip(os.sep))
-        if len(base) < 3:
+    for p, base in bases.items():
+        if len(base) < 3 or base.lower() in _RG_NAME_STOPLIST:
             continue
-        if re.search(r"(?<![\w-])" + re.escape(base) + r"(?![\w-])", prompt, re.IGNORECASE):
+        if _rg_word_in(prompt, base):
             hits.append(p)
+    for a, owners in acr.items():
+        if len(owners) == 1 and a not in _RG_NAME_STOPLIST and owners[0] not in hits \
+                and _rg_word_in(prompt, a):
+            hits.append(owners[0])
     return hits
 
 
@@ -334,7 +424,7 @@ def _rg_jev_key():
     return ""
 
 
-def _rg_ask_jev(key, prompt, cands, current_repo):
+def _rg_ask_jev(key, prompt, cands, current_rep, mentioned=()):
     """-> (choice_path, confidence, [(path, prob)]) or None on any failure."""
     labels = {f"R{i + 1}": p for i, p in enumerate(cands)}
     by_path = {p: lab for lab, p in labels.items()}
@@ -342,15 +432,17 @@ def _rg_ask_jev(key, prompt, cands, current_repo):
     for lab, p in labels.items():
         base = os.path.basename(p.rstrip(os.sep))
         criteria[lab] = f"{base}: {repo_guess_describe(p)}"
-    cur_label = by_path.get(_rg_norm(current_repo)) if current_repo else None
+    cur_label = by_path.get(current_rep) if current_rep else None
+    ment = [by_path[p] for p in dict.fromkeys(mentioned) if p in by_path]
     body = {
         "model": "jev-latest",
         "state": {
             "first_message": repo_guess_scrub(prompt)[:_RG_MAX_PROMPT_CHARS],
             "last_used_workspace": cur_label,
+            "workspaces_mentioned": ment,
         },
         "questions": {
-            "repo": {"type": "choice", "instructions": _RG_INSTRUCTIONS, "criteria": criteria}
+            "repo": {"type": "choice", "instructions": _RG_INSTRUCTIONS + _RG_MENTION_NOTE, "criteria": criteria}
         },
     }
     try:
@@ -413,19 +505,29 @@ def repo_guess_request(body):
         cands, collapse = _rg_candidates(current)
         if not prompt.strip() or not cands:
             return done(None, 0.0, "none", [])
-        hit = _rg_match_path(prompt, collapse)
-        if hit:
-            return done(hit, 1.0, "path", [_rg_cand_row(hit, 1.0)])
-        names = _rg_match_names(prompt, cands)
-        if len(names) == 1:
-            return done(names[0], 0.95, "name", [_rg_cand_row(names[0], 0.95)])
-        fallback_rows = [_rg_cand_row(p, 0.0) for p in names]
-        key = _rg_jev_key() if len(cands) >= 2 else ""
+        path_hit = _rg_match_path(prompt, collapse)
+        name_hits = _rg_match_names(prompt, cands)
+        local = None
+        if path_hit:
+            local = done(path_hit, 1.0, "path", [_rg_cand_row(path_hit, 1.0)])
+        elif len(name_hits) == 1:
+            local = done(name_hits[0], 0.95, "name", [_rg_cand_row(name_hits[0], 0.95)])
+        key = _rg_jev_key()
         if key:
-            res = _rg_ask_jev(key, prompt, cands, current)
-            if res:
-                choice, conf, probs = res
-                return done(choice, conf, "jev", [_rg_cand_row(p, pr) for p, pr in probs[:5]])
-        return done(None, 0.0, "none", fallback_rows)
+            # Local matches are evidence, not decisions, once Jev can weigh
+            # them: a prompt may only reference a file in another repo.
+            jc = list(cands)
+            if path_hit and path_hit not in jc:
+                jc.append(path_hit)
+            if len(jc) >= 2:
+                cur_rep = collapse.get(_rg_norm(current)) if current else None
+                res = _rg_ask_jev(key, prompt, jc, cur_rep,
+                                  ([path_hit] if path_hit else []) + name_hits)
+                if res:
+                    choice, conf, probs = res
+                    return done(choice, conf, "jev", [_rg_cand_row(p, pr) for p, pr in probs[:5]])
+        if local:
+            return local
+        return done(None, 0.0, "none", [_rg_cand_row(p, 0.0) for p in name_hits])
     except Exception:
         return done(None, 0.0, "none", [])

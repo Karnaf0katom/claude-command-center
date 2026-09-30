@@ -23,6 +23,9 @@ def rg(tmp_path, monkeypatch):
     repo_guess._RG_DESC_CACHE.clear()
     repo_guess._RG_DESC_LOADED_FROM[0] = None
     monkeypatch.setattr(repo_guess, "_rg_jev_key", lambda: "")
+    # tmp_path lives under /private/var on macOS, which the path rule ignores.
+    monkeypatch.setattr(repo_guess, "_RG_IGNORED_ROOTS", ())
+    monkeypatch.setattr(repo_guess, "_rg_scores", lambda paths: {})
     return repo_guess
 
 
@@ -31,7 +34,7 @@ def _repos(tmp_path, monkeypatch, *names):
     paths = []
     for n in names:
         d = tmp_path / "work" / n
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)
         paths.append(str(d.resolve()))
     monkeypatch.setattr(server, "_load_recent_repos", lambda: list(paths))
     monkeypatch.setattr(server, "_known_repo_paths", lambda: list(paths))
@@ -142,7 +145,7 @@ def test_worktree_collapses_into_main_repo(rg, tmp_path, monkeypatch):
 def test_candidates_capped_and_current_repo_included(rg, tmp_path, monkeypatch):
     paths = _repos(tmp_path, monkeypatch, *[f"repo{i:02d}" for i in range(30)])
     cands, _ = rg._rg_candidates(paths[29])
-    assert len(cands) == 20 and paths[29] in cands
+    assert len(cands) == 15 and paths[29] in cands
 
 
 # ---- Jev -------------------------------------------------------------------
@@ -314,3 +317,118 @@ def test_handler_survives_garbage_body(rg, tmp_path, monkeypatch):
     _repos(tmp_path, monkeypatch, "alpha")
     out = _post_json(server, "/api/repo/guess", {"prompt": 5})
     assert out["ok"] is True and out["repo_path"] is None and out["source"] == "none"
+
+
+# ---- ranking, containers, path/name rules, hints ---------------------------
+
+def test_higher_usage_score_ranks_first_and_unscored_dropped(rg, tmp_path, monkeypatch):
+    names = [f"proj{i}" for i in range(8)]
+    paths = _repos(tmp_path, monkeypatch, *names)
+    server = _server()
+    monkeypatch.setattr(server, "_load_recent_repos", lambda: [paths[7]])  # recent but unscored
+    scores = {paths[i]: float(i + 1) for i in range(6)}  # proj5 highest of the six scored
+    monkeypatch.setattr(rg, "_rg_scores", lambda ps: {p: scores.get(p, 0.0) for p in ps})
+    cands, _, sc = rg._rg_candidates_scored("")
+    assert cands[:6] == [paths[i] for i in (5, 4, 3, 2, 1, 0)]
+    assert cands[6] == paths[7]          # recents follow the scored ones
+    assert paths[6] not in cands         # score-0, non-recent leftovers dropped
+    assert sc[paths[5]] == 6.0
+
+
+def test_cold_signal_cache_falls_back_without_scanning(tmp_path, monkeypatch):
+    server = _server()
+    from ccc_server import repo_guess
+    started = []
+    monkeypatch.setitem(server._REPO_SIGNALS_CACHE, "data", None)
+    monkeypatch.setattr(repo_guess.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda self: started.append(1)})())
+    monkeypatch.setattr(server, "_compute_repo_usage_signals",
+                        lambda ps: (_ for _ in ()).throw(AssertionError("scan on request path")))
+    assert repo_guess._rg_scores(["/x"]) == {}
+    assert started == [1]
+
+
+def test_container_dirs_are_excluded_everywhere(rg, tmp_path, monkeypatch):
+    a, b = _repos(tmp_path, monkeypatch, "alpha", "beta")
+    container = str((tmp_path / "work").resolve())
+    server = _server()
+    monkeypatch.setattr(server, "_known_repo_paths", lambda: [container, a, b])
+    monkeypatch.setattr(server, "_load_recent_repos", lambda: [container, a, b])
+    cands, collapse = rg._rg_candidates(container)
+    assert container not in cands and container not in collapse
+    _no_network(monkeypatch)
+    out = rg.repo_guess_request({"prompt": f"check {container}/somefile.txt for me", "current_repo": container})
+    assert out["repo_path"] is None and out["source"] == "none"
+
+
+def test_hidden_and_attachment_paths_are_ignored(rg, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "proj").mkdir(parents=True)
+    server = _server()
+    monkeypatch.setattr(rg.Path, "home", classmethod(lambda cls: home))
+    proj = str((home / "proj").resolve())
+    monkeypatch.setattr(server, "_load_recent_repos", lambda: [proj])
+    monkeypatch.setattr(server, "_known_repo_paths", lambda: [proj])
+    monkeypatch.setattr(rg, "_RG_IGNORED_ROOTS", ("~/Desktop", "~/Downloads", "/tmp"))
+    for text in (f"see {proj}/.claude/plans/x.md", "see ~/.claude/plans/x.md", f"see {home}/Desktop/shot.png",
+                 "see ~/Downloads/a.png", "see /tmp/x.log"):
+        assert rg._rg_match_path(text, {proj: proj}) is None, text
+    assert rg._rg_match_path(f"see {proj}/src/x.py", {proj: proj}) == proj
+
+
+def test_name_rule_skips_paths_stoplist_and_filenames(rg, tmp_path, monkeypatch):
+    _repos(tmp_path, monkeypatch, "bookyourmat", "test", "apps")
+    cands, _ = rg._rg_candidates("")
+    for text in ("read apps/bookyourmat/notes", "run the test suite", "go to the apps",
+                 "open bookyourmat.py", "see bookyourmat/src"):
+        assert rg._rg_match_names(text, cands) == [], text
+    assert [p.rsplit("/", 1)[1] for p in rg._rg_match_names("fix bookyourmat checkout", cands)] == ["bookyourmat"]
+
+
+def test_acronym_alias_only_when_unique(rg, tmp_path, monkeypatch):
+    ccc, other = _repos(tmp_path, monkeypatch, "claude-command-center", "billing")
+    cands, _ = rg._rg_candidates("")
+    assert rg._rg_match_names("fix the CCC sidebar", cands) == [ccc]
+    _repos(tmp_path, monkeypatch, "claude-command-center", "ccc")
+    cands, _ = rg._rg_candidates("")
+    assert [p.rsplit("/", 1)[1] for p in rg._rg_match_names("fix the ccc sidebar", cands)] == ["ccc"]
+
+
+def test_with_key_path_hit_is_a_hint_and_jev_decides(rg, tmp_path, monkeypatch):
+    a, b = _repos(tmp_path, monkeypatch, "alpha", "beta")
+    monkeypatch.setattr(rg, "_rg_jev_key", lambda: "jev-test-key")
+    seen = {}
+
+    def fake(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return _Resp({"answers": {"repo": {"choice": "R1", "probabilities": {"R1": 0.9, "R2": 0.1},
+                                           "confidence": 0.9}}})
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    out = rg.repo_guess_request({"prompt": f"read {b}/runbook.md then fix the alpha parser"})
+    assert out["source"] == "jev"
+    body = seen["body"]
+    labels = {v: k for k, v in zip(("R1", "R2"), rg._rg_candidates("")[0])}
+    assert set(body["state"]["workspaces_mentioned"]) == {labels[a], labels[b]}
+    assert "workspaces_mentioned" in body["questions"]["repo"]["instructions"]
+
+
+def test_with_key_jev_failure_falls_back_to_local_decision(rg, tmp_path, monkeypatch):
+    a, b = _repos(tmp_path, monkeypatch, "alpha", "beta")
+    monkeypatch.setattr(rg, "_rg_jev_key", lambda: "jev-test-key")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    out = rg.repo_guess_request({"prompt": f"read {b}/runbook.md"})
+    assert (out["repo_path"], out["source"], out["confidence"]) == (b, "path", 1.0)
+
+
+def test_container_current_repo_not_sent_as_hint(rg, tmp_path, monkeypatch):
+    a, b = _repos(tmp_path, monkeypatch, "alpha", "beta")
+    container = str((tmp_path / "work").resolve())
+    monkeypatch.setattr(rg, "_rg_jev_key", lambda: "jev-test-key")
+    seen = {}
+
+    def fake(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return _Resp({"answers": {"repo": {"choice": "R1", "probabilities": {"R1": 0.9}, "confidence": 0.9}}})
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    rg.repo_guess_request({"prompt": "something vague about pricing", "current_repo": container})
+    assert seen["body"]["state"]["last_used_workspace"] is None
