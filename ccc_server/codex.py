@@ -2673,6 +2673,7 @@ def _codex_app_server_handle_notification(method, params):
             )
     if pump_after_notification:
         _core._schedule_codex_queue_pump(thread_id)
+        _core._schedule_codex_idle_unsubscribe(thread_id)
 
 
 def _codex_app_server_handle_message(payload):
@@ -5275,12 +5276,13 @@ def _codex_app_server_thread_is_active(session_id, *, start_if_needed=False):
             return False
     try:
         resumed = _core._codex_app_server_request(
-            "thread/resume",
-            {"threadId": session_id, "excludeTurns": False},
+            "thread/read",
+            {"threadId": session_id, "includeTurns": True},
             timeout=5,
         )
     except Exception:
-        return False
+        state = _core._codex_app_server_thread_state(session_id)
+        return bool(state.get("active_turn_id") or str(state.get("status") or "").lower() == "active")
     if not _core._codex_response_succeeded(resumed):
         state = _core._codex_app_server_thread_state(session_id)
         return bool(state.get("active_turn_id") or str(state.get("status") or "").lower() == "active")
@@ -5288,14 +5290,99 @@ def _codex_app_server_thread_is_active(session_id, *, start_if_needed=False):
     status = ((thread.get("status") or {}).get("type") or "").lower()
     if status == "active" or bool(_codex_latest_active_turn(thread)):
         return True
+    if status != "idle":
+        # notLoaded is local to this app-server, not proof that another
+        # writer ended. Keep any known ownership until idle is confirmed.
+        state = _core._codex_app_server_thread_state(session_id)
+        return bool(state.get("active_turn_id") or str(state.get("status") or "").lower() == "active")
 
-    # `thread/resume` is an authoritative re-read from Codex. If it says the
+    # `thread/read` observes Codex without loading/subscribing to the thread
+    # or acquiring its writer lock. If it says the
     # thread is idle, discard any volatile active/unknown writer left behind by
     # a lost notification, server restart, or ended app-server client. Keeping
     # the stale local marker here made FIFO input wait forever until somebody
     # opened the thread in a CLI and caused a fresh status transition.
     _codex_reconcile_thread_idle(session_id)
     return False
+
+
+_CODEX_IDLE_UNSUBSCRIBE_PENDING = set()
+_CODEX_IDLE_UNSUBSCRIBE_UNSUPPORTED_TRANSPORT = None
+
+
+def _codex_unsubscribe_idle_thread(session_id):
+    """Drop an unused local subscription; Codex controls its unload grace."""
+    global _CODEX_IDLE_UNSUBSCRIBE_UNSUPPORTED_TRANSPORT
+    if not _core._codex_app_server_is_live():
+        return False
+    lock = _core._codex_thread_turn_lock(session_id)
+    if not lock.acquire(blocking=False):
+        return False
+    def needs_subscription():
+        state = _core._codex_app_server_thread_state(session_id)
+        if (str(state.get("status") or "").lower() != "idle"
+                or state.get("active_turn_id") or state.get("ccc_turn_start_pending")
+                or state.get("thread_needs_approval")):
+            return True
+        with _core._pending_resume_lock:
+            if _core._pending_resume_queue.get(session_id):
+                return True
+        goal = _core._codex_goals_snapshot().get(session_id) or {}
+        return bool(goal and str(goal.get("status") or "active").lower() == "active")
+
+    try:
+        if needs_subscription():
+            return False
+        # Recheck on the wire, under the same mutex as resume -> turn/start.
+        # Do not start a replacement transport solely to release an old one.
+        transport = _core._CODEX_APP_SERVER_TRANSPORT
+        if transport is None or transport is _CODEX_IDLE_UNSUBSCRIBE_UNSUPPORTED_TRANSPORT:
+            return False
+        response = _core._codex_app_server_request_to_transport(
+            transport, "thread/read", {"threadId": session_id, "includeTurns": False},
+            timeout=5,
+        )
+        thread = (response.get("result") or {}).get("thread") or {}
+        if (not _core._codex_response_succeeded(response)
+                or (thread.get("status") or {}).get("type") != "idle"
+                or transport is not _core._CODEX_APP_SERVER_TRANSPORT
+                or not _core._codex_app_server_is_live()):
+            return False
+        if needs_subscription():
+            return False
+        response = _core._codex_app_server_request_to_transport(
+            transport, "thread/unsubscribe", {"threadId": session_id}, timeout=5,
+        )
+        if not _core._codex_response_succeeded(response):
+            error = response.get("error")
+            if isinstance(error, dict) and error.get("code") == -32601:
+                _CODEX_IDLE_UNSUBSCRIBE_UNSUPPORTED_TRANSPORT = transport
+            _core._log_activity("codex", "WARN", f"Idle unsubscribe failed for {session_id}: {_codex_error_text(response)}")
+            return False
+        return True
+    except Exception as exc:
+        _core._log_activity("codex", "WARN", f"Idle unsubscribe failed for {session_id}: {exc}")
+        return False
+    finally:
+        lock.release()
+
+
+def _schedule_codex_idle_unsubscribe(session_id):
+    """Run outside the notification reader, which must receive RPC replies."""
+    with _core._CODEX_APP_SERVER_LOCK:
+        if session_id in _CODEX_IDLE_UNSUBSCRIBE_PENDING:
+            return
+        _CODEX_IDLE_UNSUBSCRIBE_PENDING.add(session_id)
+
+    def release():
+        try:
+            _core._codex_unsubscribe_idle_thread(session_id)
+        finally:
+            with _core._CODEX_APP_SERVER_LOCK:
+                _CODEX_IDLE_UNSUBSCRIBE_PENDING.discard(session_id)
+
+    threading.Thread(target=release, daemon=True,
+                     name=f"codex-idle-unsubscribe-{session_id[:8]}").start()
 
 
 # ── Codex desktop ↔ CCC single-writer coordination ──────────────────────────

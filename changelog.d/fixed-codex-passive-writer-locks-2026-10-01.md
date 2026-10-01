@@ -1,0 +1,1 @@
+Codex background status checks no longer load conversations or acquire their writer locks. CCC unsubscribes idle conversations after work finishes, while preserving subscriptions for active goals and queued input; Codex releases them after its inactivity grace period.

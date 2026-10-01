@@ -13013,7 +13013,8 @@ class TestRepoContextHelpers(unittest.TestCase):
         sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
 
         def fake_request(method, params=None, timeout=20):
-            self.assertEqual(method, "thread/resume")
+            self.assertEqual(method, "thread/read")
+            self.assertEqual(params, {"threadId": sid, "includeTurns": True})
             return {
                 "result": {
                     "thread": {

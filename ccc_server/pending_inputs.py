@@ -3732,8 +3732,7 @@ def _resume_queue_engine_busy(sid):
         return True
     if _core._is_codex_session(sid):
         # Preserve proven external writers on the cheap stat/lsof path. Only an
-        # ownership-unknown turn needs the authoritative reattachment that
-        # opening a CLI would otherwise trigger for the user.
+        # ownership-unknown turn needs an authoritative passive read.
         snap = {}
         try:
             snap = _core._codex_thread_writer_snapshot(sid)
@@ -4387,7 +4386,7 @@ def _codex_reconcile_recovery_goal_threads(goals, now):
     """Rediscover active goal turns after a CCC server restart.
 
     Volatile writer/turn status is intentionally not restored from disk. A
-    bounded thread/resume read reconnects those goal threads to the app-server;
+    bounded thread/read observes those goal threads without acquiring a writer;
     the saved activity timestamp remains authoritative for the same turn.
     """
     if not isinstance(goals, dict):
