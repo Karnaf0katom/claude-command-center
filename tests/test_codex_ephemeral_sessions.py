@@ -87,3 +87,16 @@ class EphemeralSessionTests(unittest.TestCase):
     def test_removed_capture_does_not_abort_list_metadata(self):
         self.log.unlink()
         self.assertEqual(server._codex_capture_tail('capture-thread', self.log), {})
+
+    def test_capture_append_invalidates_archive_codex_rows(self):
+        first = server._codex_capture_corpus_signature()
+        with self.log.open('a') as sink:
+            sink.write('new output\n')
+        second = server._codex_capture_corpus_signature()
+        self.assertNotEqual(first, second)
+        old, new = 'capture-old', 'capture-new'
+        key = 'ccc-codex-captures'
+        with mock.patch.dict(server._ARCHIVE_STATMAP_BY_SIG, {
+            old: ({}, {key: first}), new: ({}, {key: second}),
+        }):
+            self.assertEqual(server._archive_signature_delta(old, new), ([], [], {'codex'}))

@@ -14472,7 +14472,7 @@ def _archive_codex_extra_keys():
     Must stay in lockstep with what _archive_corpus_signature_parts folds in
     for Codex, or a codex-only delta silently falls back to a full rebuild.
     """
-    keys = {str(Path.home() / ".codex" / "sessions")}
+    keys = {str(Path.home() / ".codex" / "sessions"), "ccc-codex-captures"}
     keys.update(str(p) for p in _codex_rollout_day_dirs())
     return keys
 
@@ -14637,6 +14637,9 @@ def _archive_corpus_signature_parts():
             continue
         parts.append(f"{extra}|{mt}")
         extras_map[str(extra)] = mt
+    capture_signature = _codex_capture_corpus_signature()
+    parts.append(f"ccc-codex-captures|{capture_signature}")
+    extras_map["ccc-codex-captures"] = capture_signature
     # VS Code Copilot Chat stores: one chatSessions dir per workspace plus
     # each app's empty-window store. Dir mtimes flip on session add/remove,
     # which is exactly the granularity the archive needs.

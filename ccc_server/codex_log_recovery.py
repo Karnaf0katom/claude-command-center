@@ -6,6 +6,7 @@ precedence; neither the rollout nor Codex's databases are rewritten.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 
@@ -16,6 +17,19 @@ _CAPTURE_PATHS = {}
 _CAPTURE_ROWS = {}
 _CAPTURE_TAILS = {}
 _CAPTURE_HEADERS = {}
+
+
+def _codex_capture_corpus_signature():
+    """Stat-only archive invalidation for CLI runs without native files."""
+    stats = []
+    logs = _core._recent_codex_ccc_log_paths(repo_paths=_core._known_repo_paths(), max_logs=200)
+    for log in logs:
+        try:
+            st = Path(log).stat()
+            stats.append((str(log), st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return hashlib.sha256(repr(stats).encode()).hexdigest()
 
 
 def _codex_capture_header_id(log_path):
