@@ -18646,6 +18646,107 @@ body.status-pos-right .conv-pane.has-status-rail > .status-rail {
 .status-rail-tokens {
   margin-top: 8px;
 }
+
+/* Codex diagnostics panel (Metadata rail): how a codex session is driven,
+   fallback reasons, ephemeral storage, desktop competition, live verdict. */
+.codex-diag {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.codex-diag-head {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.codex-diag-verdict {
+  border-left: 3px solid var(--border);
+  padding: 5px 8px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  background: var(--surface);
+}
+.codex-diag-sev-ok { border-left-color: var(--green); }
+.codex-diag-sev-info { border-left-color: var(--accent); }
+.codex-diag-sev-warn { border-left-color: var(--orange); background: rgba(210, 153, 34, 0.08); }
+.codex-diag-sev-error { border-left-color: var(--red); background: rgba(248, 81, 73, 0.08); }
+.codex-diag-headline { font-weight: 600; color: var(--text); }
+.codex-diag-detail { color: var(--text-muted); margin-top: 2px; }
+.codex-diag-group {
+  border-top: 1px solid var(--border);
+  padding: 5px 0 4px;
+}
+.codex-diag-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.codex-diag-row {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
+}
+.codex-diag-key {
+  flex: 0 0 108px;
+  color: var(--text-muted);
+}
+.codex-diag-val { flex: 1; min-width: 0; word-break: break-word; }
+.codex-diag-muted { color: var(--text-muted); }
+.codex-diag-path {
+  color: var(--accent);
+  cursor: pointer;
+  word-break: break-all;
+}
+.codex-diag-path:hover { text-decoration: underline; }
+.codex-diag-code {
+  display: inline-block;
+  font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  word-break: break-all;
+}
+.codex-diag-note {
+  margin-top: 4px;
+  padding: 4px 6px;
+  border-left: 3px solid var(--orange);
+  background: rgba(210, 153, 34, 0.08);
+  border-radius: 3px;
+  color: var(--text);
+}
+.codex-diag-proc .ccc-proc-dot { display: inline-block; }
+.codex-diag-events {
+  border-top: 1px solid var(--border);
+  padding: 5px 0 4px;
+}
+.codex-diag-events summary {
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.codex-diag-event {
+  padding: 1px 0;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+.codex-diag-event-ts {
+  font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.codex-diag-more summary { color: var(--text-muted); cursor: pointer; }
 .status-rail-tokens .rail-api-price {
   margin-top: 5px;
 }

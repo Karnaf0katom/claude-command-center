@@ -43964,6 +43964,7 @@
     try { _perfConvOpen = { id: id, paneId: paneId, t0: performance.now() }; } catch (_) {}
     const pane = paneByPaneId(paneId);
     if (!pane) return;
+      if (typeof fetchCodexDiagnostics === 'function') fetchCodexDiagnostics(sid, pid);
     window.dispatchEvent(new CustomEvent('ccc:conversation-selected', { detail: {
       threadId: sessionIdByConv[id] || id, paneId, paneEl: convPaneElById(paneId),
     } }));
@@ -53562,6 +53563,256 @@
     if (wsSlot) wsSlot.innerHTML = '';
     if (slot) {
       if (slot.classList.contains('is-new-session')) syncInputContextVisibility(slot);
+
+  // ── Codex diagnostics panel (Metadata rail) ──────────────────────────
+  // Explains, in plain language, how a Codex session is being driven:
+  // managed/private app-server vs one-shot `codex exec` fallback (and why
+  // it fell back), whether the run is ephemeral (invisible to Codex
+  // desktop, non-resumable), whether Codex desktop is competing for the
+  // shared state DB or the rollout, process liveness, and recent
+  // coordination/telemetry events. Rendered lazily after #railActions;
+  // refreshed on a 5s timer only while the Metadata tab is active.
+  const _codexDiagSessionIdByPane = Object.create(null);
+  const _codexDiagTimerByPane = Object.create(null);
+
+  function codexDiagPanelEl() {
+    let el = document.getElementById('codexDiagPanel');
+    if (el) return el;
+    const railActions = document.getElementById('railActions');
+    if (!railActions || !railActions.parentNode) return null;
+    el = document.createElement('div');
+    el.className = 'codex-diag';
+    el.id = 'codexDiagPanel';
+    el.hidden = true;
+    const subagents = document.getElementById('subagentsPanel');
+    railActions.parentNode.insertBefore(el, subagents || railActions.nextSibling);
+    return el;
+  }
+
+  function _codexDiagAge(ageS) {
+    if (ageS === null || ageS === undefined) return '';
+    const s = Number(ageS);
+    if (!Number.isFinite(s)) return '';
+    if (s < 1) return 'just now';
+    if (s < 60) return Math.floor(s) + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+
+  function _codexDiagTilde(p) {
+    return String(p || '').replace(/^\/Users\/[^/]+/, '~');
+  }
+
+  function _codexDiagRow(label, valueHtml) {
+    if (!valueHtml) return '';
+    return '<div class="codex-diag-row"><span class="codex-diag-key">' + escapeHtml(label)
+      + '</span><span class="codex-diag-val">' + valueHtml + '</span></div>';
+  }
+
+  function _codexDiagPathHtml(p) {
+    if (!p) return '';
+    return '<span class="codex-diag-path" data-action="reveal-path" data-path="'
+      + escapeAttr(String(p)) + '" role="button" tabindex="0" title="' + escapeAttr(String(p))
+      + ' — click to reveal in Finder">' + escapeHtml(_codexDiagTilde(p)) + '</span>';
+  }
+
+  function _codexDiagClock(ts) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || !t) return '';
+    return new Date(t * 1000).toLocaleTimeString([], { hour12: false });
+  }
+
+  function renderCodexDiagnostics(data) {
+    const el = codexDiagPanelEl();
+    if (!el) return;
+    if (!data || !data.ok) {
+      // Not a Codex session CCC knows about (or the probe failed): the
+      // panel is Codex-only, so stay out of the way rather than show noise.
+      el.innerHTML = '';
+      el.hidden = true;
+      return;
+    }
+    const v = data.verdict || {};
+    const tr = data.transport || {};
+    const pr = data.process || {};
+    const st = data.storage || {};
+    const cp = data.competition || {};
+    const ap = data.app_server || {};
+    const sev = ['ok', 'info', 'warn', 'error'].includes(v.severity) ? v.severity : 'info';
+    const rows = [];
+
+    rows.push('<div class="codex-diag-verdict codex-diag-sev-' + sev + '">'
+      + '<div class="codex-diag-headline">' + escapeHtml(v.headline || '') + '</div>'
+      + (v.detail ? '<div class="codex-diag-detail">' + escapeHtml(v.detail) + '</div>' : '')
+      + '</div>');
+
+    // Transport
+    let transportHtml = _codexDiagRow('How', escapeHtml(tr.label || ''));
+    if (tr.detail) transportHtml += _codexDiagRow('', escapeHtml(tr.detail));
+    if (tr.fallback_reason || tr.fallback_error) {
+      const errText = String(tr.fallback_error || '');
+      const reason = escapeHtml(tr.fallback_reason || '');
+      let errHtml = '';
+      if (errText) {
+        const esc = escapeHtml(errText);
+        errHtml = errText.length > 160
+          ? '<details class="codex-diag-more"><summary>error</summary><code class="codex-diag-code">' + esc + '</code></details>'
+          : '<code class="codex-diag-code">' + esc + '</code>';
+      }
+      transportHtml += _codexDiagRow('Why fallback', reason + (errHtml ? ' ' + errHtml : ''));
+    }
+    const modelBits = [tr.model, tr.reasoning_effort].filter(Boolean).map(x => escapeHtml(x)).join(' · ');
+    transportHtml += _codexDiagRow('Model', modelBits);
+    const spawnBits = [tr.spawned_via, tr.spawned_at].filter(Boolean).map(x => escapeHtml(x)).join(' · ');
+    transportHtml += _codexDiagRow('Spawned', spawnBits);
+    transportHtml += _codexDiagRow('cwd', _codexDiagPathHtml(tr.cwd));
+    if (transportHtml) rows.push('<div class="codex-diag-group"><div class="codex-diag-label">Transport</div>' + transportHtml + '</div>');
+
+    // Process
+    let procHtml = '';
+    if (pr.pid !== null && pr.pid !== undefined && pr.pid !== '') {
+      procHtml += _codexDiagRow('Process', '<span class="conv-pane-proc codex-diag-proc'
+        + (pr.alive ? ' is-live' : '') + '"><span class="ccc-proc-dot"></span>'
+        + escapeHtml('pid ' + pr.pid + (pr.alive ? ' (alive)' : ' (exited)')) + '</span>');
+    }
+    if (pr.log_path) {
+      let logBits = _codexDiagPathHtml(pr.log_path);
+      const logAge = _codexDiagAge(pr.log_mtime_age_s);
+      if (logAge) logBits += ' <span class="codex-diag-muted">updated ' + escapeHtml(logAge) + '</span>';
+      procHtml += _codexDiagRow('Log', logBits);
+    }
+    procHtml += _codexDiagRow('Turn', escapeHtml(pr.turn_outcome || ''));
+    if (procHtml) rows.push('<div class="codex-diag-group"><div class="codex-diag-label">Process</div>' + procHtml + '</div>');
+
+    // Storage
+    const yesNo = (b) => b ? '✓' : '✗';
+    let storageHtml = '';
+    const nr = st.native_rollout || {};
+    const nrAge = _codexDiagAge(nr.mtime_age_s);
+    storageHtml += _codexDiagRow('Native rollout', nr.present
+      ? '✓ ' + _codexDiagPathHtml(nr.path) + (nrAge ? ' <span class="codex-diag-muted">' + escapeHtml(nrAge) + '</span>' : '')
+      : '✗ <span class="codex-diag-muted">none</span>');
+    storageHtml += _codexDiagRow('State DB row', yesNo(!!st.sqlite_row));
+    storageHtml += _codexDiagRow('CCC capture log', (st.capture_log || {}).present
+      ? '✓ ' + _codexDiagPathHtml(st.capture_log.path) : '✗');
+    if (st.ephemeral && st.note) {
+      storageHtml += '<div class="codex-diag-note">' + escapeHtml(st.note) + '</div>';
+    }
+    rows.push('<div class="codex-diag-group"><div class="codex-diag-label">Storage</div>' + storageHtml + '</div>');
+
+    // Competition
+    let compHtml = '';
+    const pids = Array.isArray(cp.desktop_app_server_pids) ? cp.desktop_app_server_pids : [];
+    compHtml += _codexDiagRow('Codex desktop', cp.desktop_running
+      ? 'running' + (pids.length ? ' <span class="codex-diag-muted">(app-server pids ' + escapeHtml(pids.join(', ')) + ')</span>' : '')
+      : 'not running');
+    const holders = Array.isArray(cp.shared_state_holders) ? cp.shared_state_holders : [];
+    compHtml += _codexDiagRow('Shared state DB held by', holders.length
+      ? escapeHtml(holders.map(h => (h.command || '?') + ' (pid ' + h.pid + ')').join(', '))
+      : '<span class="codex-diag-muted">nobody else</span>');
+    compHtml += _codexDiagRow('Desktop attached to rollout', yesNo(!!cp.desktop_attached_to_rollout));
+    const writer = cp.writer || (cp.external_writer_active ? 'external' : 'quiet');
+    const rollAge = _codexDiagAge(cp.rollout_mtime_age_s);
+    compHtml += _codexDiagRow('Active writer', escapeHtml(String(writer))
+      + (rollAge ? ' <span class="codex-diag-muted">rollout updated ' + escapeHtml(rollAge) + '</span>' : ''));
+    if (cp.conflict_message) {
+      compHtml += '<div class="codex-diag-note">' + escapeHtml(cp.conflict_message) + '</div>';
+    }
+    rows.push('<div class="codex-diag-group"><div class="codex-diag-label">Competition</div>' + compHtml + '</div>');
+
+    // App-server thread
+    let appHtml = '';
+    if (ap.thread_known) {
+      appHtml += _codexDiagRow('App-server', (ap.live ? 'live' : 'not live')
+        + (ap.transport_kind ? ' <span class="codex-diag-muted">(' + escapeHtml(String(ap.transport_kind)) + ')</span>' : ''));
+      appHtml += _codexDiagRow('Thread status', escapeHtml(ap.status || ''));
+      appHtml += _codexDiagRow('Active turn', escapeHtml(ap.active_turn_id || ''));
+      appHtml += _codexDiagRow('Active writer', escapeHtml(ap.active_writer || ''));
+      appHtml += _codexDiagRow('Last activity', escapeHtml(_codexDiagAge(ap.last_activity_age_s)));
+      if (ap.needs_approval && ap.approval_message) {
+        appHtml += '<div class="codex-diag-note">' + escapeHtml(ap.approval_message) + '</div>';
+      }
+      rows.push('<div class="codex-diag-group"><div class="codex-diag-label">App-server thread</div>' + appHtml + '</div>');
+    } else {
+      rows.push('<div class="codex-diag-group"><div class="codex-diag-label">App-server thread</div>'
+        + '<div class="codex-diag-muted">No app-server state for this thread</div></div>');
+    }
+
+    // Recent events (coordination + telemetry, newest first)
+    const evs = [];
+    (Array.isArray(data.coordination_events) ? data.coordination_events : []).forEach(e => {
+      evs.push({ ts: Number(e && e.ts) || 0, text: (e && (e.text || e.kind)) || '' });
+    });
+    (Array.isArray(data.telemetry) ? data.telemetry : []).forEach(e => {
+      if (!e) return;
+      const bits = [e.event, e.via, e.stage, e.fallback, e.fallback_reason, e.error]
+        .filter(Boolean).map(String);
+      evs.push({ ts: Number(e.ts) || 0, text: bits.join(' · ') });
+    });
+    if (evs.length) {
+      evs.sort((a, b) => b.ts - a.ts);
+      const items = evs.slice(0, 12).map(e =>
+        '<div class="codex-diag-event"><span class="codex-diag-event-ts">'
+        + escapeHtml(_codexDiagClock(e.ts)) + '</span> ' + escapeHtml(e.text) + '</div>');
+      rows.push('<details class="codex-diag-events"><summary>Recent events (' + evs.length + ')</summary>'
+        + items.join('') + '</details>');
+    }
+
+    el.innerHTML = '<div class="codex-diag-head">Codex diagnostics</div>' + rows.join('');
+    el.hidden = false;
+  }
+
+  function _codexDiagMetadataTabActive() {
+    const pane = document.getElementById('statusRailMetadataPane');
+    return !!(pane && pane.classList.contains('is-active'));
+  }
+
+  function _codexDiagPaneIsCodex(pid) {
+    const pane = (typeof paneByPaneId === 'function') ? paneByPaneId(pid) : null;
+    const sess = pane && pane.currentSession;
+    return !!(sess && sess.source === 'codex');
+  }
+
+  function _codexDiagStop(pid) {
+    if (_codexDiagTimerByPane[pid]) {
+      clearInterval(_codexDiagTimerByPane[pid]);
+      delete _codexDiagTimerByPane[pid];
+    }
+    const el = document.getElementById('codexDiagPanel');
+    if (el) { el.hidden = true; el.innerHTML = ''; }
+  }
+
+  async function fetchCodexDiagnostics(sid, paneId) {
+    const pid = paneId || paneIdForSessionId(sid);
+    _codexDiagSessionIdByPane[pid] = sid;
+    if (!sid) { _codexDiagStop(pid); return; }
+    const pane = (typeof paneByPaneId === 'function') ? paneByPaneId(pid) : null;
+    const sess = pane && pane.currentSession;
+    if (sess && sess.source !== 'codex') { _codexDiagStop(pid); return; }
+    // Arm the 5s auto-refresh once per pane. Each tick re-checks that the
+    // session is still codex and the Metadata tab is active; a session or
+    // engine switch stops it for good.
+    if (!_codexDiagTimerByPane[pid]) {
+      _codexDiagTimerByPane[pid] = setInterval(() => {
+        const expected = _codexDiagSessionIdByPane[pid];
+        if (!expected || !_codexDiagPaneIsCodex(pid)) {
+          _codexDiagStop(pid);
+          return;
+        }
+        if (!_codexDiagMetadataTabActive()) return;
+        fetchCodexDiagnostics(expected, pid);
+      }, 5000);
+    }
+    try {
+      const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/codex-diagnostics');
+      const data = await res.json();
+      if (_codexDiagSessionIdByPane[pid] !== sid) return;
+      if (pane && pane.currentSession && pane.currentSession.source !== 'codex') { _codexDiagStop(pid); return; }
+      renderCodexDiagnostics(data);
+    } catch (_) {}
+  }
+
       else {
         slot.classList.remove('visible');
         slot.classList.remove('hide-cotenants');
