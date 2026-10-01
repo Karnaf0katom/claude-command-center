@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const puppeteer = require('puppeteer');
 
 const app = fs.readFileSync('static/app.js', 'utf8');
-const sourceStart = app.indexOf('  function f2ModelsForEngine(');
+const sourceStart = app.indexOf('  function f2AllLaunchEngines(');
 const sourceEnd = app.indexOf('\n  // CCC-823:', sourceStart);
 const pickerSource = app.slice(sourceStart, sourceEnd);
 const handlerStart = app.indexOf("  document.addEventListener('click', (ev) => {", app.indexOf('  function f2InterceptEnterSend('));

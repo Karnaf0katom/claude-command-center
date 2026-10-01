@@ -4166,12 +4166,22 @@
     return el ? String(el.value || '') : '';
   }
 
+  // Share the New session launch catalog. Read it lazily because it is
+  // initialized below this composer; the early-render fallback stays usable.
+  function f2AllLaunchEngines() {
+    try {
+      return SPAWN_DEFAULT_ENGINES.map(id => {
+        const fallback = F2_LAUNCH_ENGINES.find(e => e.id === id);
+        return { id, label: spawnEngineLabel(id), fallback: fallback ? fallback.fallback : [] };
+      });
+    } catch (_) { return F2_LAUNCH_ENGINES; }
+  }
   // Model list for a launch engine. MODEL_OPTIONS_BY_ENGINE is a `const`
   // declared ~36k lines below this block, so a bare read during module eval
   // would hit the temporal dead zone — and for let/const even `typeof` throws
   // there. Hence the try/catch plus a per-engine inline fallback.
   function f2ModelsForEngine(engineId) {
-    const spec = F2_LAUNCH_ENGINES.find(e => e.id === engineId) || F2_LAUNCH_ENGINES[0];
+    const spec = f2AllLaunchEngines().find(e => e.id === engineId) || f2AllLaunchEngines()[0];
     try {
       const byEngine = MODEL_OPTIONS_BY_ENGINE;
       const list = byEngine && byEngine[spec.id];
@@ -4203,11 +4213,11 @@
           && Array.isArray(spawnDefaultsState.disabled_engines))
         ? new Set(spawnDefaultsState.disabled_engines) : null;
       if (off && off.size) {
-        const list = F2_LAUNCH_ENGINES.filter(e => !off.has(e.id));
+        const list = f2AllLaunchEngines().filter(e => !off.has(e.id));
         if (list.length) return list;
       }
     } catch (_) {}
-    return F2_LAUNCH_ENGINES;
+    return f2AllLaunchEngines();
   }
   // One alternative, one pill. Send stays the ordinary submit (full resume,
   // priced by the verdict line); the pill offers the cheap continuation. The
@@ -4273,7 +4283,7 @@
     return m ? m.label : String(launch.model || '');
   }
   function f2EngineLabel(launch) {
-    const e = F2_LAUNCH_ENGINES.find(x => x.id === launch.engine);
+    const e = f2AllLaunchEngines().find(x => x.id === launch.engine);
     return e ? e.label : String(launch.engine || '');
   }
   // The persistent picker history retains the complete launch triple. Unlike
@@ -4327,7 +4337,7 @@
     // currently showing, which is never pulled out from under it (the same
     // rule applyDisabledEnginesToPickers uses for the spawn pickers).
     const enabled = f2LaunchEngines();
-    const engines = F2_LAUNCH_ENGINES
+    const engines = f2AllLaunchEngines()
       .filter(e => enabled.some(x => x.id === e.id) || e.id === launch.engine)
       .map(e => ({ id: e.id, label: e.label }));
     const efforts = f2EffortsForEngine(launch.engine);
