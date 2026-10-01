@@ -820,6 +820,9 @@ def _compact_session_context_impl(session_id, *, terminal_app=None, _from_termin
         # Codex compaction goes through the app-server `thread/compact/start`
         # RPC — no interactive TUI needed (unlike Claude). Back up the rollout
         # first because compaction is lossy.
+        refusal = _core._codex_headless_exec_refusal(sid, "compacted")
+        if refusal is not None:
+            return refusal
         backup_path = _core._backup_codex_rollout_before_compact(sid)
         result = _core._codex_compact_via_app_server(sid)
         result = _compact_result(result, backup_path=backup_path)

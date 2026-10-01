@@ -2583,6 +2583,196 @@ def find_live_codex_processes():
     return procs
 
 
+def _codex_command_subcommand(command):
+    """Return the Codex CLI subcommand (``exec``, ``app-server``, ...) of a
+    command line, skipping global flags and their values; None if unparsable."""
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        tokens = (command or "").split()
+    value_flags = {"-c", "--config", "-m", "--model", "-p", "--profile",
+                   "-C", "--cd", "-s", "--sandbox"}
+    skip = False
+    for tok in tokens[1:]:
+        if tok == "--":
+            return None
+        if skip:
+            skip = False
+            continue
+        if tok in value_flags:
+            skip = True
+            continue
+        if tok.startswith("-"):
+            continue
+        return tok
+    return None
+
+
+def _codex_exec_resumes_other_session(command, session_id):
+    """True for `codex exec resume <other-uuid>`: that process is bound to a
+    different thread, so it can never be this session's owner."""
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        tokens = (command or "").split()
+    head = tokens[:tokens.index("--")] if "--" in tokens else tokens
+    if "resume" not in head:
+        return False
+    after = head[head.index("resume") + 1:]
+    return any(
+        re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", t, re.I)
+        and t != session_id for t in after
+    )
+
+
+def codex_command_is_headless_exec(command):
+    """True for a `codex exec ...` command line (one-shot, no stdin channel)."""
+    return _codex_command_subcommand(command) == "exec"
+
+
+_CODEX_EXEC_META_CACHE = {}
+_CODEX_EXEC_META_RE_ORIGINATOR = re.compile(r'"originator"\s*:\s*"([^"]*)"')
+_CODEX_EXEC_META_RE_TS = re.compile(r'"timestamp"\s*:\s*"([^"]*)"')
+
+
+def codex_rollout_exec_meta(path):
+    """Cheap, cached read of a rollout's session_meta header.
+
+    Returns {"originator": str, "started_at": epoch|None}. The header is
+    immutable, so the result is cached per path. Reads only the first 4 KB."""
+    key = str(path)
+    cached = _CODEX_EXEC_META_CACHE.get(key)
+    if cached is not None:
+        return cached
+    meta = {"originator": "", "started_at": None}
+    try:
+        with open(key, "rb") as f:
+            head = f.read(4096).decode("utf-8", "replace")
+    except OSError:
+        return meta  # not cached: file may appear later
+    m = _CODEX_EXEC_META_RE_ORIGINATOR.search(head)
+    if m:
+        meta["originator"] = m.group(1)
+    # payload.timestamp (session start) is the second "timestamp" key.
+    stamps = _CODEX_EXEC_META_RE_TS.findall(head)
+    raw = stamps[1] if len(stamps) > 1 else (stamps[0] if stamps else "")
+    if raw:
+        try:
+            from datetime import datetime
+            meta["started_at"] = datetime.fromisoformat(
+                raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    if len(_CODEX_EXEC_META_CACHE) > 2000:
+        _CODEX_EXEC_META_CACHE.clear()
+    _CODEX_EXEC_META_CACHE[key] = meta
+    return meta
+
+
+def _parse_ps_etime(raw):
+    """Parse ps ``etime`` ([[dd-]hh:]mm:ss) into seconds, or None."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        d, raw = raw.split("-", 1)
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+    try:
+        parts = [int(x) for x in raw.split(":")]
+    except ValueError:
+        return None
+    if not 1 <= len(parts) <= 3:
+        return None
+    secs = 0
+    for x in parts:
+        secs = secs * 60 + x
+    return days * 86400 + secs
+
+
+def pick_headless_exec_owner(candidates, session_started_at, etimes, now,
+                             tolerance_s=90.0):
+    """Choose the single `codex exec` process that owns a rollout.
+
+    candidates: process dicts already filtered to exec commands in the
+    session's cwd. A lone candidate is the owner; several are separated by
+    process start time vs the rollout's session start (exec creates the
+    rollout moments after launch). Returns a dict or None when ambiguous."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    if session_started_at is None:
+        return None
+    close = []
+    for p in candidates:
+        elapsed = (etimes or {}).get(p.get("pid"))
+        if elapsed is None:
+            continue
+        if abs((now - elapsed) - session_started_at) <= tolerance_s:
+            close.append(p)
+    return close[0] if len(close) == 1 else None
+
+
+def _ps_etimes(pids):
+    try:
+        out = subprocess.run(
+            ["ps", "-p", ",".join(str(p) for p in pids), "-o", "pid=,etime="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
+    result = {}
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit():
+            secs = _parse_ps_etime(parts[1])
+            if secs is not None:
+                result[int(parts[0])] = secs
+    return result
+
+
+def find_headless_codex_exec_owner(session_id, session_cwd=None):
+    """Identity-verified live headless `codex exec` process for a Codex thread.
+
+    Only rollouts whose session_meta originator is ``codex_exec`` qualify, so
+    the cost for every other session is one cached 4 KB header read. Process
+    discovery then reuses the memoised ps scan. Returns the process dict
+    ({pid, cwd, command, ...}) or None."""
+    if not session_id:
+        return None
+    try:
+        path = _core._resolve_codex_rollout_path(session_id)
+    except Exception:
+        path = None
+    if not path:
+        return None
+    meta = codex_rollout_exec_meta(path)
+    if meta.get("originator") != "codex_exec":
+        return None
+    if not session_cwd:
+        session_cwd = _core.find_session_cwd(session_id)
+    candidates = []
+    for p in find_live_codex_processes():
+        cmd = p.get("command") or ""
+        if not codex_command_is_headless_exec(cmd):
+            continue
+        if _command_targets_engine_session(cmd, session_id, "codex"):
+            return p
+        if _codex_exec_resumes_other_session(cmd, session_id):
+            continue
+        if session_cwd and p.get("cwd") == session_cwd:
+            candidates.append(p)
+    etimes = {}
+    if len(candidates) > 1:
+        etimes = _ps_etimes([p["pid"] for p in candidates])
+    return pick_headless_exec_owner(
+        candidates, meta.get("started_at"), etimes, time.time())
+
+
 @_ttl_memo(3.0)
 def find_live_gemini_processes():
     """Return running Gemini CLI processes with pid, tty, cwd, terminal app, command."""
@@ -3113,10 +3303,24 @@ def session_live_status(session_id, session_cwd):
             return result
         if not session_cwd:
             session_cwd = _core.find_session_cwd(session_id)
+        exec_owner = find_headless_codex_exec_owner(session_id, session_cwd)
+        if exec_owner:
+            # A `codex exec` worker CCC did not spawn: no stdin channel, so it
+            # can be stopped (SIGINT) but not steered or compacted.
+            pid = exec_owner["pid"]
+            result["pid"] = pid
+            result["tty"] = exec_owner.get("tty")
+            result["cwd"] = exec_owner.get("cwd") or session_cwd
+            result["live"] = True
+            result["match_count"] = 1
+            result["headless_exec"] = True
+            return result
         exact_matches = []
         cwd_matches = []
         for p in _core.find_live_codex_processes():
             cmd = p.get("command") or ""
+            if _codex_command_subcommand(cmd) in ("app-server", "exec-server"):
+                continue
             if _core._command_targets_engine_session(cmd, session_id, "codex"):
                 exact_matches.append(p)
             elif not registry_known and session_cwd and p.get("cwd") == session_cwd:

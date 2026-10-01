@@ -2627,6 +2627,22 @@ def _interrupt_claude_headless_local(session_id):
     }
 
 
+def _codex_interrupt_route(status):
+    """Decide how Stop reaches a Codex session: "sigint-exec" for a live,
+    identity-verified headless `codex exec` process, else "app-server"."""
+    if status and status.get("live") and status.get("headless_exec") and status.get("pid"):
+        return "sigint-exec"
+    return "app-server"
+
+
+def _sigint_codex_pid(pid, via, note):
+    try:
+        os.kill(pid, signal.SIGINT)
+    except (ProcessLookupError, PermissionError, OSError) as e:
+        return {"ok": False, "via": via, "pid": pid, "error": str(e)}
+    return {"ok": True, "via": via, "pid": pid, "note": note}
+
+
 def _interrupt_session(session_id):
     """Send an interrupt to a session using the same fall-through as
     `_inject_text_into_session`:
@@ -2649,6 +2665,13 @@ def _interrupt_session(session_id):
     cwd = _core.find_session_cwd(session_id)
     status = _core.session_live_status(session_id, cwd)
     if _core._is_codex_session(session_id):
+        decision = _codex_interrupt_route(status)
+        if decision == "sigint-exec":
+            # Headless `codex exec` we do not own: no app-server involvement
+            # (thread/resume would load it into the app-server as a second
+            # writer), so signal the identity-verified process directly.
+            return _sigint_codex_pid(status["pid"], "exec-sigint",
+                                     "headless codex exec interrupted")
         app_interrupt = _core._codex_interrupt_via_app_server(session_id, cwd=cwd)
         if app_interrupt.get("ok"):
             return app_interrupt
@@ -2668,6 +2691,9 @@ def _interrupt_session(session_id):
                 "pid": pid,
                 "note": "Codex process interrupted",
             }
+        if app_interrupt.get("code") == "codex_no_active_turn":
+            return {"ok": False, "code": "codex_no_active_turn",
+                    "error": "Codex is idle - no running turn to interrupt"}
         return {"ok": False, "error": "Codex session is not live — nothing to interrupt"}
     acp_harness = _core._session_acp_harness(session_id)
     if acp_harness:

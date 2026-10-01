@@ -1,0 +1,101 @@
+"""Routing decisions for Stop/steer/compact on Codex threads.
+
+Covers the 2026-09-30 incident: Stop reported "not live" for threads hosted
+by the worker's app-server, and headless `codex exec` workers were neither
+interruptible nor refused. No codex binary is mocked; only decision logic and
+real file/command-line parsing are exercised.
+"""
+import json
+import sys
+from pathlib import Path
+
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+import server  # noqa: E402
+from ccc_server import session_graph as sg  # noqa: E402
+from ccc_server import watchtower_msg as wm  # noqa: E402
+from ccc_server import codex as codex_mod  # noqa: E402
+
+EXEC_CMD = ("/vendor/bin/codex -c model_context_window=1000000 exec "
+            "--dangerously-bypass-approvals-and-sandbox --json -- do the thing exec")
+APP_CMD = "/vendor/bin/codex -c model_context_window=1000000 app-server --listen stdio://"
+
+
+def test_subcommand_detection():
+    assert sg.codex_command_is_headless_exec(EXEC_CMD)
+    assert not sg.codex_command_is_headless_exec(APP_CMD)
+    assert not sg.codex_command_is_headless_exec("/x/codex exec-server --remote u")
+    assert not sg.codex_command_is_headless_exec("/x/codex")
+    # "exec" inside the prompt (after --) must not count for a TUI process
+    assert not sg.codex_command_is_headless_exec("/x/codex -- exec")
+
+
+def test_exec_resume_of_other_session():
+    cmd = "/x/codex exec resume --json 11111111-1111-1111-1111-111111111111 hi"
+    assert sg._codex_exec_resumes_other_session(cmd, "22222222-2222-2222-2222-222222222222")
+    assert not sg._codex_exec_resumes_other_session(cmd, "11111111-1111-1111-1111-111111111111")
+    assert not sg._codex_exec_resumes_other_session(EXEC_CMD, "x")
+
+
+def test_etime_parse():
+    assert sg._parse_ps_etime("05:09") == 309
+    assert sg._parse_ps_etime("01:02:03") == 3723
+    assert sg._parse_ps_etime("2-00:00:10") == 172810
+    assert sg._parse_ps_etime("junk") is None
+
+
+def test_pick_owner_single_and_ambiguous():
+    a, b, c = ({"pid": n} for n in (1, 2, 3))
+    assert sg.pick_headless_exec_owner([a], None, {}, 1000) is a
+    assert sg.pick_headless_exec_owner([a, b], None, {}, 1000) is None
+    # a started 100s ago, b 5000s ago; session started 120s before "now"
+    now = 10000.0
+    assert sg.pick_headless_exec_owner([a, b], now - 110, {1: 100, 2: 5000}, now) is a
+    # two processes equally close: refuse to guess
+    assert sg.pick_headless_exec_owner([a, b], now - 100, {1: 100, 2: 110}, now) is None
+    assert sg.pick_headless_exec_owner([a, b, c], now - 100, {1: 4000, 2: 5000}, now) is None
+
+
+def test_rollout_meta_reads_originator_and_start(tmp_path):
+    f = tmp_path / "rollout.jsonl"
+    f.write_text(json.dumps({
+        "timestamp": "2026-09-30T14:13:00.273Z", "type": "session_meta",
+        "payload": {"id": "s", "timestamp": "2026-09-30T14:12:59.535Z",
+                    "originator": "codex_exec", "source": "exec"},
+    }) + "\n")
+    meta = sg.codex_rollout_exec_meta(f)
+    assert meta["originator"] == "codex_exec"
+    assert abs(meta["started_at"] - 1790777579.535) < 1
+    g = tmp_path / "tui.jsonl"
+    g.write_text(json.dumps({"timestamp": "2026-09-30T14:13:00Z", "payload": {
+        "timestamp": "2026-09-30T14:12:59Z", "originator": "codex_cli_rs"}}) + "\n")
+    assert sg.codex_rollout_exec_meta(g)["originator"] == "codex_cli_rs"
+
+
+def test_interrupt_route_prefers_sigint_for_headless_exec():
+    live_exec = {"live": True, "headless_exec": True, "pid": 123}
+    assert wm._codex_interrupt_route(live_exec) == "sigint-exec"
+    assert wm._codex_interrupt_route({"live": True, "pid": 123}) == "app-server"
+    assert wm._codex_interrupt_route({"live": False, "headless_exec": True, "pid": 1}) == "app-server"
+    assert wm._codex_interrupt_route({}) == "app-server"
+
+
+def test_interrupt_does_not_require_local_transport_when_routed(monkeypatch):
+    # Dashboard: engine calls route to the worker, which hosts the app-server.
+    monkeypatch.setattr(server, "_control_plane_routes_engines", lambda: True)
+    assert codex_mod._codex_interrupt_needs_local_transport() is False
+    # Worker / routing disabled: the local transport is the only path.
+    monkeypatch.setattr(server, "_control_plane_routes_engines", lambda: False)
+    assert codex_mod._codex_interrupt_needs_local_transport() is True
+
+
+def test_headless_exec_refusal_message(monkeypatch):
+    monkeypatch.setattr(server, "find_headless_codex_exec_owner",
+                        lambda sid, cwd=None: {"pid": 42})
+    res = codex_mod._codex_headless_exec_refusal("sid", "steered")
+    assert res["ok"] is False and res["code"] == "codex_headless_exec"
+    assert "can't be steered" in res["error"] and "Stop" in res["error"]
+    monkeypatch.setattr(server, "find_headless_codex_exec_owner", lambda sid, cwd=None: None)
+    assert codex_mod._codex_headless_exec_refusal("sid", "steered") is None

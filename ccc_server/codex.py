@@ -7484,6 +7484,42 @@ def _codex_grab_back_via_app_server(
     return result
 
 
+def _codex_headless_exec_refusal(session_id, action):
+    """Fail-fast result when a Codex thread is owned by a live headless
+    `codex exec` process CCC did not spawn.
+
+    `codex exec` has no stdin channel and the thread must not be loaded into
+    the app-server as a second writer (an active goal would auto-continue it),
+    so steer/compact cannot be delivered. Returns None when not applicable."""
+    try:
+        owner = _core.find_headless_codex_exec_owner(session_id)
+    except Exception:
+        owner = None
+    if not owner:
+        return None
+    return {
+        "ok": False,
+        "code": "codex_headless_exec",
+        "via": "codex-headless-exec",
+        "pid": owner.get("pid"),
+        "error": (
+            f"Headless codex exec worker (pid {owner.get('pid')}) - it can't "
+            f"be {action}. Use Stop to interrupt it."
+        ),
+    }
+
+
+def _codex_interrupt_needs_local_transport():
+    """Whether this process must hold the app-server transport itself.
+
+    The dashboard does not host the app-server: the worker does, and the RPCs
+    below reach it through the control plane. Gating on the dashboard's own
+    (always absent) transport reported every worker-hosted thread as "not
+    live" and Stop did nothing. Only a process that talks to the app-server
+    directly (the worker, or routing disabled) needs the local check."""
+    return not _core._control_plane_routes_engines()
+
+
 def _codex_interrupt_via_app_server(session_id, cwd=None):
     if os.environ.get("CCC_CODEX_APP_SERVER", "1").lower() in ("0", "false", "no"):
         return {
@@ -7492,7 +7528,7 @@ def _codex_interrupt_via_app_server(session_id, cwd=None):
             "code": "codex_interrupt_unavailable",
             "error": "Codex app-server disabled",
         }
-    if not _core._codex_app_server_is_live() and not (
+    if _codex_interrupt_needs_local_transport() and not _core._codex_app_server_is_live() and not (
         _core._codex_managed_app_server_enabled() and _core._codex_managed_app_server_socket_path().exists()
     ):
         return {

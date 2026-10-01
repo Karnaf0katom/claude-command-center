@@ -7270,6 +7270,10 @@
     if (!data.ok && (data.error || data.message)) {
       const reason = data.error || data.message;
       const where = [via, stage].filter(Boolean).join(' / ');
+      if (data.code === 'codex_headless_exec') {
+        renderInlineWakeError($view, '⚠ ' + reason);
+        return true;
+      }
       renderInlineWakeError($view, '⚠ Resume failed: ' + reason + (where ? ' (' + where + ')' : ''));
       return true;
     }

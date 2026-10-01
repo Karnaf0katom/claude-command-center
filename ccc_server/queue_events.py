@@ -2153,6 +2153,10 @@ def resume_session_codex(
         )
     if not text:
         return {"ok": False, "error": "missing text"}
+    if steer:
+        refusal = _core._codex_headless_exec_refusal(session_id, "steered")
+        if refusal is not None:
+            return refusal
     if steer and not _native_delivery:
         if transaction_protocol >= _CODEX_QUEUED_STEER_TRANSACTION_PROTOCOL:
             return _codex_queued_steer_transaction(
