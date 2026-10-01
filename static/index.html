@@ -2769,6 +2769,23 @@
                   </div>
               </div>
             </div>
+            <div class="eng-card model-routing-card" id="workerFallbackSettings" data-keywords="fallback quota exhausted models worker watchtower managed">
+              <div class="eng-card-head"><div class="eng-card-title">Worker and managed model fallback</div><div class="eng-card-sub">Try the next configured provider when a model runs out of quota.</div></div>
+              <div class="settings-row">
+                <div class="settings-row-main"><div class="settings-row-label">Enable fallback by default</div><div class="settings-row-desc">Applies to new worker launches and apps using WatchTower managed model runs. Queue On/Off overrides this default. Active runs finish with their current model.</div></div>
+                <div class="settings-row-control"><input type="checkbox" id="workerFallbackEnabled" aria-label="Enable worker and managed model fallback"></div>
+              </div>
+              <div id="workerFallbackModels" style="padding:0 16px;"></div>
+              <div style="padding:12px 16px;"><button type="button" class="settings-action-btn" id="workerFallbackAdd">Add fallback model</button></div>
+              <p class="settings-row-desc" style="padding:0 16px 16px;">Models are tried from top to bottom, once per provider. Queue model pins stay stored; explicit queue effort takes precedence over fallback effort. Exhausting every provider parks work until quota recovers. Uses existing signed-in engines.</p>
+            </div>
+            <div class="eng-card model-routing-card" id="modelProfilesSettings" data-keywords="capability profile fast standard deep model routing fallback">
+              <div class="eng-card-head"><div class="eng-card-title">Managed model profiles</div><div class="eng-card-sub">Apps request a capability; WatchTower selects its configured provider and model.</div></div>
+              <div class="settings-row"><div class="settings-row-main"><label class="settings-row-label" for="modelProfileSelect">Capability profile</label></div><div class="settings-row-control"><select id="modelProfileSelect" class="bug-input"><option value="fast">Fast</option><option value="standard" selected>Standard</option><option value="deep">Deep</option></select></div></div>
+              <div id="modelProfileModels" style="padding:0 16px;"></div>
+              <div style="padding:12px 16px;"><button type="button" class="settings-action-btn" id="modelProfileAdd">Add profile model</button></div>
+              <p class="settings-row-desc" style="padding:0 16px 16px;">The first model is the primary route. Later providers are used only when fallback is enabled above and quota is exhausted. An empty profile has no route. Profile names describe your intended capability; choose models accordingly. The managed runtime currently supports Claude with schema and no-tools guarantees. Unsupported providers fail visibly; Codex is supported for queue worker fallback above.</p>
+            </div>
             <div class="settings-row-note" id="spawnDefaultsError" hidden></div>
 
             <div class="eng-list-head">

@@ -30294,3 +30294,14 @@ body.has-mobile-bottom-nav .jobs-add-actions button { min-height: 40px; padding:
 }
 .ccc-worker-origin.is-linked { cursor: pointer; }
 .ccc-worker-origin.is-linked:hover { background: rgba(210,153,34,0.30); }
+
+/* Ordered model routing controls in Settings > Engines. */
+.model-routing-card { display: block; padding: 16px 14px; }
+.model-routing-card .eng-card-head { margin-bottom: 12px; }
+.model-routing-card .eng-card-sub { display: block; margin-top: 4px; color: var(--text-muted); font-size: 12px; }
+.model-routing-entry { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+.model-routing-entry select { max-width: 100%; }
+.model-routing-card .settings-row { gap: 16px; }
+@media (max-width: 600px) {
+  .model-routing-entry select { flex: 1 1 140px; min-width: 0; }
+}

@@ -2368,7 +2368,9 @@ def _queue_config_from_payload(payload):
     # fallback_to_default_worker on a full-replace save (CCC-1161).
     if "fallback_to_default_worker" in payload:
         raw_fallback = payload.get("fallback_to_default_worker")
-        if isinstance(raw_fallback, str):
+        if raw_fallback is None:
+            config["fallback_to_default_worker"] = None
+        elif isinstance(raw_fallback, str):
             config["fallback_to_default_worker"] = raw_fallback.strip().lower() in (
                 "1", "true", "yes", "on",
             )
@@ -8865,6 +8867,82 @@ def _validate_codex_model(model, *, require_available=False, confirm_blocked=Fal
     return model, None
 
 
+_WORKER_FALLBACK_ENGINES = ("claude", "codex", "kimi", "grok")
+_MODEL_PROFILE_ENGINES = ("claude",)
+
+
+def _worker_fallback_catalog_models(engine):
+    """Use the catalog's local records; a settings save never probes providers."""
+    cached = (_MODEL_CATALOG_CACHE.get("data") or {}).get("catalog", {}).get(engine, {}).get("models")
+    if cached is not None:
+        return cached
+    rows = list(_ENGINE_CURATED_MODELS.get(engine, ()))
+    if engine == "codex":
+        rows += _codex_model_catalog_records()
+        rows += [{"id": item} for item in _codex_cli_visible_model_ids()]
+    elif engine == "claude":
+        rows += _claude_model_catalog_records()
+    return rows
+
+
+def _validate_worker_fallback(value, *, strict=False):
+    """Ordered provider alternatives for workers and managed model runs."""
+    def invalid(message):
+        if strict:
+            raise ValueError(message)
+        return {"enabled": False, "models": []}
+    if not isinstance(value, dict) or not isinstance(value.get("enabled"), bool):
+        return invalid("worker_fallback requires a boolean enabled")
+    rows = value.get("models")
+    if not isinstance(rows, list) or len(rows) > len(_WORKER_FALLBACK_ENGINES):
+        return invalid("worker_fallback.models must be a list of at most four providers")
+    models, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return invalid("worker_fallback model entries must be objects")
+        engine = str(row.get("engine") or "").strip()
+        model = _clean_spawn_default_model(row.get("model"))
+        if engine not in _WORKER_FALLBACK_ENGINES or engine in seen:
+            return invalid("Each fallback engine must be supported and appear only once")
+        if not model or len(model) > 200:
+            return invalid("Each fallback entry needs an explicit model")
+        effort = _validate_reasoning_effort(row.get("effort"), engine, strict=True)
+        if effort is None:
+            return invalid(_reasoning_effort_error("fallback effort", engine))
+        if strict:
+            catalog = _worker_fallback_catalog_models(engine)
+            if not any(item.get("id") == model for item in catalog):
+                return invalid(f"Choose a catalog model for {engine}")
+            if _model_policy_blocks(model):
+                return invalid(f"Fallback model {model} is blocked by model policy")
+        models.append({"engine": engine, "model": model, "effort": effort})
+        seen.add(engine)
+    if value["enabled"] and not models:
+        return invalid("Add at least one fallback model before enabling fallback")
+    return {"enabled": value["enabled"], "models": models}
+
+
+def _validate_model_profiles(value, *, strict=False):
+    if not isinstance(value, dict) or any(key not in ("fast", "standard", "deep") for key in value):
+        if strict:
+            raise ValueError("model_profiles must map fast, standard, or deep to model lists")
+        return {}
+    result = {}
+    for name, profile in value.items():
+        if not isinstance(profile, dict):
+            if strict:
+                raise ValueError(f"Profile {name} must contain a models list")
+            continue
+        rows = profile.get("models")
+        if isinstance(rows, list) and any(not isinstance(row, dict) or row.get("engine") not in _MODEL_PROFILE_ENGINES for row in rows):
+            if strict:
+                raise ValueError("Managed model profiles currently require Claude for schema and no-tools guarantees; Codex remains supported for worker fallback")
+        result[name] = {"models": _validate_worker_fallback(
+            {"enabled": False, "models": profile.get("models")}, strict=strict,
+        )["models"]}
+    return result
+
+
 def _factory_spawn_defaults():
     """The one place factory literals live: seeds a brand-new defaults file,
 
@@ -8880,6 +8958,8 @@ def _factory_spawn_defaults():
         "worker_model": "",
         "worker_reasoning_effort": "",
         "worker_auto_compact_k": 250,
+        "worker_fallback": {"enabled": False, "models": []},
+        "model_profiles": {},
         "disabled_engines": [],
         "models": {
             engine: _spawn_fallback_model_for_engine(engine)
@@ -8989,6 +9069,8 @@ def _load_spawn_defaults():
         "worker_model": worker_model,
         "worker_reasoning_effort": worker_reasoning_effort,
         "worker_auto_compact_k": worker_auto_compact_k,
+        "worker_fallback": _validate_worker_fallback(raw.get("worker_fallback", {"enabled": False, "models": []})),
+        "model_profiles": _validate_model_profiles(raw.get("model_profiles", {})),
         "disabled_engines": _clean_disabled_engines(
             raw.get("disabled_engines"), (engine, worker_engine),
         ),
@@ -8997,7 +9079,12 @@ def _load_spawn_defaults():
         # A new engine was added to _ORCHESTRATION_SPAWN_ENGINES after this
         # file was written. Backfill it once and persist so every future
         # read is complete without re-touching the literals in this function.
-        _write_spawn_defaults_file(result)
+        migrated = dict(result)
+        if "worker_fallback" not in raw:
+            migrated.pop("worker_fallback", None)
+        if "model_profiles" not in raw:
+            migrated.pop("model_profiles", None)
+        _write_spawn_defaults_file(migrated)
     return result
 
 
@@ -9005,6 +9092,12 @@ def _save_spawn_defaults(config):
     if not isinstance(config, dict):
         return {"ok": False, "error": "expected JSON object"}
     current = _load_spawn_defaults()
+    try:
+        stored_keys = json.loads(SPAWN_DEFAULTS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        stored_keys = {}
+    if not isinstance(stored_keys, dict):
+        stored_keys = {}
     if "engine" in config:
         engine = _normalize_orchestration_spawn_engine(config.get("engine"))
         if engine not in _ORCHESTRATION_SPAWN_ENGINES:
@@ -9071,6 +9164,18 @@ def _save_spawn_defaults(config):
     if "worker_auto_compact_k" in config:
         current["worker_auto_compact_k"] = _validate_auto_compact_k(config.get("worker_auto_compact_k"))
 
+    if "worker_fallback" in config:
+        try:
+            current["worker_fallback"] = _validate_worker_fallback(config["worker_fallback"], strict=True)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if "model_profiles" in config:
+        try:
+            current["model_profiles"] = _validate_model_profiles(config["model_profiles"], strict=True)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
     raw_models = config.get("models")
     if raw_models is not None and not isinstance(raw_models, dict):
         return {"ok": False, "error": "models must be an object"}
@@ -9104,6 +9209,8 @@ def _save_spawn_defaults(config):
         "auto_compact_k": current.get("auto_compact_k", 250),
         "worker_engine": current.get("worker_engine", ""),
         "worker_model": current.get("worker_model", ""),
+        "worker_fallback": current["worker_fallback"],
+        "model_profiles": current["model_profiles"],
         "worker_reasoning_effort": current.get("worker_reasoning_effort", ""),
         "worker_auto_compact_k": current.get("worker_auto_compact_k", 250),
         "models": {
@@ -9111,6 +9218,9 @@ def _save_spawn_defaults(config):
             for engine in _ORCHESTRATION_SPAWN_ENGINES
         },
     }
+    for routing_key in ("worker_fallback", "model_profiles"):
+        if routing_key not in config and routing_key not in stored_keys:
+            payload.pop(routing_key, None)
     _write_spawn_defaults_file(payload)
     return {"ok": True, **payload}
 
@@ -28969,6 +29079,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 **defaults,
                 "stored": SPAWN_DEFAULTS_FILE.exists(),
                 "supported_engines": list(_ORCHESTRATION_SPAWN_ENGINES),
+                "worker_fallback_engines": list(_WORKER_FALLBACK_ENGINES),
+                "model_profile_engines": list(_MODEL_PROFILE_ENGINES),
                 # Ladder per engine so the dialog can build its effort select
                 # for whichever engine is selected. The flat reasoning_effort /
                 # worker_reasoning_effort keys spread in above stay the stored
@@ -32058,11 +32170,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     if "grace_s" in payload and hasattr(_wt_config, "set_grace_s"):
                         _wt_config.set_grace_s(queue_name, conf.get("grace_s"))
                     if ("fallback_to_default_worker" in payload
+                            and payload["fallback_to_default_worker"] is not None
                             and hasattr(_wt_config, "set_fallback_to_default_worker")):
                         # Older watchtower installs predate the fallback toggle
                         # (WATCHTOWER-30); they just keep it off.
                         _wt_config.set_fallback_to_default_worker(
-                            queue_name, conf.get("fallback_to_default_worker", False)
+                            queue_name, conf.get("fallback_to_default_worker")
                         )
                     _wt_config.set_repo_path(queue_name, conf.get("repo_path", ""))
                     # Blank means "CCC spawn default" (the payload normalizer
@@ -32098,6 +32211,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                  "session_id", "offer_workers"):
                         if kept not in payload and before_conf.get(kept) is not None:
                             normalized["config"][kept] = before_conf[kept]
+                    if normalized["config"].get("fallback_to_default_worker") is None:
+                        normalized["config"].pop("fallback_to_default_worker", None)
                     cfg[queue_name] = normalized["config"]
                     tmp = cfg_path.with_suffix(".json.tmp")
                     with open(tmp, "w") as f:
@@ -32106,6 +32221,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # Session -> queue link (CCC-1225): present-only, like
                 # queue_label, so a plain re-save never clears it.
                 link = {}
+                if "fallback_to_default_worker" in payload and payload["fallback_to_default_worker"] is None:
+                    link["fallback_to_default_worker"] = None
                 if "session_id" in payload:
                     link["session_id"] = session_link or None
                 if "offer_workers" in payload:
