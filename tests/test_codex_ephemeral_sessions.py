@@ -100,3 +100,8 @@ class EphemeralSessionTests(unittest.TestCase):
             old: ({}, {key: first}), new: ({}, {key: second}),
         }):
             self.assertEqual(server._archive_signature_delta(old, new), ([], [], {'codex'}))
+
+    def test_discovery_replaces_cached_unknown_engine(self):
+        with mock.patch.dict(server._ENGINE_DETECT_CACHE, {'capture-thread': ('claude', float('inf'))}):
+            server.find_codex_conversations(repo_path=str(self.repo), resolve_pr_states=False, resolve_worktree_dirty=False)
+            self.assertEqual(server._detect_session_engine('capture-thread'), 'codex')

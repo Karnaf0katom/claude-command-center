@@ -81,6 +81,9 @@ def _codex_capture_rows(native_rows, spawn_by_sid, repo_path=None):
                "first_user_message": spawn.get("prompt") or "",
                "model": spawn.get("model") or "", "_ccc_capture": str(log)}
         _CAPTURE_ROWS[sid] = row
+        # A deep link may have been opened before the capture was discovered.
+        with _core._engine_detect_lock:
+            _core._ENGINE_DETECT_CACHE[sid] = ("codex", None)
         out.append(row)
         native_ids.add(sid)
     return out
