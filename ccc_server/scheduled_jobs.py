@@ -6,7 +6,7 @@ Reads job state read-only from:
 1. macOS launchd (local host / laptop): inspecting ~/Library/LaunchAgents/*.plist
    and querying `launchctl list`.
 2. Linux systemd (hermes VM): querying `systemctl list-timers --output=json` and
-   `systemctl show` via ssh.
+   `systemctl show` locally on Linux or via ssh elsewhere.
 
 CCC surfaces scheduling state, it does NOT own execution.
 """
@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
+import platform
 import plistlib
 import re
 import shlex
@@ -27,6 +28,14 @@ import time
 _CACHE_LOCK = threading.Lock()
 _CACHE = {"ts": 0.0, "payload": None}
 _CACHE_TTL_S = 15.0
+
+
+def _systemd_command(argv, timeout_s=4):
+    """Read local systemd on Linux; use the configured SSH host elsewhere."""
+    if platform.system() == "Linux":
+        return list(argv)
+    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout_s}",
+            "hermes", shlex.join(argv)]
 
 
 def _parse_iso(ts_val):
@@ -202,20 +211,14 @@ def _collect_local_launchd_jobs():
 
 
 def _collect_hermes_systemd_jobs(timeout_s=4):
-    """Queries systemd timers and services on hermes via ssh."""
+    """Queries systemd timers locally on Linux or on the SSH host elsewhere."""
     jobs = []
     host_info = {"status": "offline", "error": None}
 
     # Step 1: list-timers JSON
     try:
         res = subprocess.run(
-            [
-                "ssh",
-                "-o", "BatchMode=yes",
-                "-o", f"ConnectTimeout={timeout_s}",
-                "hermes",
-                "systemctl list-timers --output=json",
-            ],
+            _systemd_command(["systemctl", "list-timers", "--output=json"], timeout_s),
             capture_output=True,
             text=True,
             timeout=timeout_s + 2,
@@ -250,7 +253,7 @@ def _collect_hermes_systemd_jobs(timeout_s=4):
                 "--property=Id,ActiveState,SubState,Result,ExecMainStatus,ExecMainExitTimestamp"
             )
             res2 = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout_s}", "hermes", cmd],
+                _systemd_command(shlex.split(cmd), timeout_s),
                 capture_output=True,
                 text=True,
                 timeout=timeout_s + 2,
@@ -389,7 +392,7 @@ def get_scheduled_job_log_live(job_id, cursor="", max_lines=200):
 
     Returns {ok, id, log, cursor, running}. `log` holds only lines after
     `cursor` (whole tail when no cursor); pass the returned `cursor` back to
-    get the next slice. One ssh per call. Hermes units only.
+    get the next slice. One local subprocess or ssh per call. Systemd units only.
     """
     if not job_id or not job_id.startswith("hermes:"):
         return {"ok": False, "id": job_id, "error": "Live log is for hermes jobs", "log": "", "cursor": "", "running": False}
@@ -402,8 +405,7 @@ def get_scheduled_job_log_live(job_id, cursor="", max_lines=200):
     n = max(1, min(500, int(max_lines)))
     try:
         res = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "hermes",
-             "bash -s -- " + shlex.quote(unit) + " " + str(n) + " " + shlex.quote(cursor or "-")],
+            _systemd_command(["bash", "-s", "--", unit, str(n), cursor or "-"]),
             input=_LIVE_SCRIPT, capture_output=True, text=True, timeout=8, check=False,
         )
     except Exception as e:
@@ -433,13 +435,7 @@ def get_scheduled_job_log(job_id, max_lines=50):
             return {"ok": False, "id": job_id, "error": "Invalid unit name", "log": ""}
         try:
             res = subprocess.run(
-                [
-                    "ssh",
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=4",
-                    "hermes",
-                    f"journalctl -u {unit} -n {max_lines} --no-pager",
-                ],
+                _systemd_command(["journalctl", "-u", unit, "-n", str(max_lines), "--no-pager"]),
                 capture_output=True,
                 text=True,
                 timeout=6,

@@ -196,7 +196,8 @@ class PerfBudget(unittest.TestCase):
             calls.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout=CANNED, stderr="")
 
-        with mock.patch.object(f.subprocess, "run", fake_run):
+        with mock.patch("platform.system", return_value="Darwin"), \
+                mock.patch.object(f.subprocess, "run", fake_run):
             jobs, err = f.collect_hermes()
         self.assertIsNone(err)
         self.assertEqual(len(jobs), 3)

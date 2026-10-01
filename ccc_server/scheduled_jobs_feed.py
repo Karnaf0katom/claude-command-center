@@ -5,7 +5,7 @@
 Sources (read-only; CCC surfaces scheduling, it does not own execution):
 1. Hermes VM systemd timers whose ``.timer`` file lives in /etc/systemd/system
    (vendor timers live in /lib or /usr/lib and are ignored). Everything is
-   collected with ONE ssh round-trip per refresh; per-unit loops run remotely.
+   collected with one local subprocess on Linux or one ssh round-trip elsewhere.
 2. Laptop launchd agents that are actually scheduled (StartInterval or
    StartCalendarInterval). Always-on daemons (RunAtLoad/KeepAlive only) are
    dropped.
@@ -441,11 +441,10 @@ def parse_hermes_output(text, now=None):
 
 
 def collect_hermes(timeout_s=SSH_CONNECT_TIMEOUT_S):
-    """ONE ssh round-trip. Returns (jobs, error_or_None)."""
+    """One local Linux subprocess or SSH round-trip. Returns (jobs, error)."""
     try:
         res = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout_s}",
-             "hermes", "bash -s"],
+            _sj._systemd_command(["bash", "-s"], timeout_s),
             input=REMOTE_SCRIPT, capture_output=True, text=True,
             timeout=SSH_TOTAL_TIMEOUT_S, check=False,
         )

@@ -126,7 +126,8 @@ class TestScheduledJobLive(unittest.TestCase):
     def _run(self, stdout, rc=0, **kw):
         from ccc_server.scheduled_jobs import get_scheduled_job_log_live
         proc = MagicMock(returncode=rc, stdout=stdout, stderr="boom")
-        with patch("ccc_server.scheduled_jobs.subprocess.run", return_value=proc) as run:
+        with patch("platform.system", return_value="Darwin"), \
+                patch("ccc_server.scheduled_jobs.subprocess.run", return_value=proc) as run:
             return get_scheduled_job_log_live("hermes:bym-ship.service", **kw), run
 
     def test_parses_state_cursor_and_lines(self):
