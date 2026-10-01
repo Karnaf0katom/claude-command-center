@@ -3403,6 +3403,13 @@ def session_live_status(session_id, session_cwd):
         # is still running) and the lock file in the CLI's session_locks
         # dir. No TTY — the CLI runs headless.
         raw_id = _core._devin_cli_raw_id(session_id)
+        # Rehydrate the persisted ACP registry once per process — the
+        # model/current-config snapshot paths below need it (sessions.model
+        # is often blank for ACP-spawned sessions).
+        try:
+            _core._acp_load_state("devin")
+        except Exception:
+            pass
         # "Could a live steer/send be attempted over the shared `devin acp`
         # conn" — the same signal the conversation row carries as
         # devin_acp_ready, exposed here so the open session doesn't depend
@@ -3420,7 +3427,9 @@ def session_live_status(session_id, session_cwd):
             result["live"] = True
             result["kind"] = "headless"
             result["match_count"] = 1
-            result["model"] = _core._devin_cli_session_model(raw_id)
+            result["model"] = (
+                entry.get("model") or _core._devin_cli_session_model(raw_id)
+            )
             return result
         # No live spawn entry — check the lock file (CLI may have been
         # started outside CCC).
@@ -3452,7 +3461,14 @@ def session_live_status(session_id, session_cwd):
                 # sibling CCC) owns the writer slot — a send can only queue
                 # until that client lets go, so the UI should say why.
                 result["external_devin_owner"] = True
-                result["model"] = _core._devin_cli_session_model(raw_id)
+                # The writer slot belongs to another host, but CCC's ACP
+                # state still remembers the model this session was last
+                # configured with (sessions.model is often blank for
+                # ACP-spawned sessions).
+                snap = _core._acp_session_snapshot("devin", raw_id) or {}
+                result["model"] = (
+                    snap.get("model") or _core._devin_cli_session_model(raw_id)
+                )
             return result
         # Dormant session — no live process anywhere. Same ACP contract as
         # kimi/grok: "live" means the shared `devin acp` conn can attach and
