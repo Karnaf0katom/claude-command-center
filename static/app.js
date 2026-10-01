@@ -62035,7 +62035,9 @@
     if (_agentReplied) {
       clearOptimisticAgentIndicator($view);
       if (!opts.provisionalOverlay) {
-        clearLiveGeneratingIndicator($view);
+        // A reply chunk proves the send started, not that the turn ended.
+        // updateLiveToolStrip owns the live indicator; removing it here
+        // makes active turns flicker between transcript and status ticks.
         if (currentSession.id) clearSessionSending(currentSession.id);
       }
     } else {

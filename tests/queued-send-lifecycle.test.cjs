@@ -293,7 +293,7 @@ test('provisional agent output does not reorder pending input or clear sending s
   });
 });
 
-test('durable agent output still clears live indicators and reconciles pending placement', async () => {
+test('durable agent output clears sending state without clearing the live turn indicator', async () => {
   const result = await fixture(() => {
     const pending = appendPendingSendEcho('Injected fixture', 'session', 'main');
     const sentinel = document.createElement('div');
@@ -311,7 +311,7 @@ test('durable agent output still clears live indicators and reconciles pending p
     pendingAtTail: true,
     tracked: 1,
     cleared: 1,
-    generatingClears: 1,
+    generatingClears: 0,
   });
 });
 
@@ -374,4 +374,24 @@ test('a restored server queue card remains cancellable without resurrecting save
     return { tracked, cards: document.querySelectorAll('.event.user_text').length };
   });
   assert.deepEqual(result, { tracked: true, cards: 0 });
+});
+
+test('Devin reply chunks preserve the generating row until live status settles the turn', async () => {
+  const result = await fixture(() => {
+    window.clearLiveGeneratingIndicator = view => {
+      view.querySelectorAll('.conv-live-tool-inline.is-generating').forEach(node => node.remove());
+    };
+    currentSession.source = 'devin-cli';
+    const indicator = document.createElement('div');
+    indicator.className = 'conv-live-tool-inline is-generating';
+    indicator.textContent = 'Generating…';
+    getConvView().append(indicator);
+    const connected = [];
+    for (const type of ['assistant', 'tool_result', 'assistant']) {
+      runRenderTail(getConvView(), 'main', {}, [{ type }]);
+      connected.push(indicator.isConnected);
+    }
+    return connected;
+  });
+  assert.deepEqual(result, [true, true, true]);
 });
