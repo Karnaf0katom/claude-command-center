@@ -59858,6 +59858,13 @@
         if (!inc) continue;
         let absorbed = false;
         for (const ex of turn.querySelectorAll(sel)) {
+          // A replay of one streamed item owns this block even if markdown
+          // rendering changed its visible prefix since the previous snapshot.
+          if (el.dataset.liveKey && ex.dataset.liveKey === el.dataset.liveKey) {
+            if (ex.innerHTML !== el.innerHTML) ex.innerHTML = el.innerHTML;
+            absorbed = true;
+            break;
+          }
           const prev = _kimiNormBlockText(ex.textContent);
           if (!prev) continue;
           if (prev === inc
@@ -59914,26 +59921,35 @@
   // the msg_id stream hand-off, and other .event lookups keep working.
   function _kimiAppendAssistantEvent($view, marker, blockEls, existingMarker) {
     // The merged renderer returns before the generic event reconciliation.
-    // Match both arrival orders here, using the answer payload rather than
-    // DOM text (which also contains timestamps and action labels).
+    // Match both arrival orders by native item identity when available, then
+    // by answer payload for older transcripts (DOM text includes actions).
     const answer = _kimiNormBlockText(marker._agentAnswerText);
     if (marker.dataset.turnId && answer) {
       for (const candidate of $view.querySelectorAll('.kimi-marker.assistant')) {
-        if (candidate.dataset.turnId !== marker.dataset.turnId
-            || !!candidate.dataset.liveKey === !!marker.dataset.liveKey) continue;
+        if (candidate.dataset.turnId !== marker.dataset.turnId) continue;
+        const itemId = marker.dataset.codexItemId;
+        const sameItem = !!itemId && (candidate.dataset.codexItemId === itemId
+          || candidate.dataset.liveKey === marker.dataset.turnId + ':' + itemId);
+        if (!sameItem && !!candidate.dataset.liveKey === !!marker.dataset.liveKey) continue;
         const previousAnswer = _kimiNormBlockText(candidate._agentAnswerText);
         const liveAnswer = marker.dataset.liveKey ? answer : previousAnswer;
         const savedAnswer = marker.dataset.liveKey ? previousAnswer : answer;
-        if (savedAnswer !== liveAnswer
+        if (!sameItem && savedAnswer !== liveAnswer
             && !(liveAnswer.length >= 24 && savedAnswer.startsWith(liveAnswer))) continue;
-        if (marker.dataset.liveKey) return candidate.closest('.kimi-turn');
+        if (marker.dataset.liveKey) {
+          if (!candidate.dataset.liveKey) return candidate.closest('.kimi-turn');
+          continue;
+        }
         existingMarker = candidate;
         const liveKey = candidate.dataset.liveKey;
         const oldTurn = candidate.closest('.kimi-turn');
         if (oldTurn) {
-          for (const block of oldTurn.querySelectorAll('[data-live-key]')) {
-            if (block.dataset.liveKey !== liveKey || block === candidate) continue;
-            if (block.classList.contains('kimi-answer-meta')) block.remove();
+          for (const block of oldTurn.querySelectorAll('[data-live-key], [data-codex-item-id]')) {
+            const owned = (liveKey && block.dataset.liveKey === liveKey)
+              || (sameItem && block.dataset.codexItemId === itemId);
+            if (block === candidate || !owned) continue;
+            if (block.classList.contains('kimi-answer-meta')
+                || (sameItem && answer !== previousAnswer)) block.remove();
             else delete block.dataset.liveKey;
           }
         }
@@ -59967,6 +59983,9 @@
     else turn.appendChild(marker);
     if (marker.dataset.liveKey) {
       for (const el of blockEls) el.dataset.liveKey = marker.dataset.liveKey;
+    }
+    if (marker.dataset.codexItemId) {
+      for (const el of blockEls) el.dataset.codexItemId = marker.dataset.codexItemId;
     }
     for (const el of _kimiTurnCoveredBlocks(turn, blockEls)) turn.appendChild(el);
     _kimiRegroupTools(turn);
@@ -60416,6 +60435,7 @@
       }
       if (ev.line != null) div.dataset.jsonlLine = String(ev.line);
       if (ev.turn_id != null) div.dataset.turnId = String(ev.turn_id);
+      if (ev.codex_item_id != null) div.dataset.codexItemId = String(ev.codex_item_id);
       if (ev.live_key != null) {
         div.dataset.liveKey = String(ev.live_key);
         div.dataset.provisional = 'true';

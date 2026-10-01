@@ -1,0 +1,1 @@
+Codex replies now update in place when live snapshots revise rendered text, and saved replies reconcile by native item identity. This prevents repeated reply text and speak/copy controls during streaming and transcript handoff.

@@ -205,3 +205,40 @@ test('saved tools adopt live rows before obsolete overlay cleanup', async () => 
     assert.equal(result, 1);
   });
 });
+
+for (const saved of [false, true]) {
+  test(`one native reply replaces revised live text (${saved ? 'saved' : 'live'} update)`, async () => {
+    await withPage(async page => {
+      await page.setContent('<div class="conversations-view"></div>');
+      await loadHelpers(page);
+      const result = await page.evaluate(saved => {
+        const view = document.querySelector('.conversations-view');
+        function append(textValue, live) {
+          const marker = document.createElement('div');
+          marker.className = 'event assistant kimi-marker';
+          marker.dataset.turnId = 'turn-1';
+          marker.dataset.codexItemId = 'message-1';
+          marker._agentAnswerText = textValue;
+          if (live) marker.dataset.liveKey = 'turn-1:message-1';
+          else marker.dataset.jsonlLine = '16';
+          const text = document.createElement('div');
+          text.className = 'assistant-text';
+          text.textContent = textValue;
+          const meta = document.createElement('div');
+          meta.className = 'kimi-answer-meta';
+          meta._agentAnswerText = textValue;
+          meta.innerHTML = '<button>Copy</button>';
+          window.__fns._kimiAppendAssistantEvent(view, marker, [text, meta],
+            live ? view.querySelector('.kimi-marker[data-live-key]') : null);
+        }
+        append('**Draft', true);
+        append('Draft complete.', !saved);
+        append('Draft complete.', !saved);
+        return {texts: Array.from(view.querySelectorAll('.assistant-text'), x => x.textContent),
+          metas: view.querySelectorAll('.kimi-answer-meta').length,
+          live: view.querySelectorAll('.kimi-marker[data-live-key]').length};
+      }, saved);
+      assert.deepEqual(result, {texts: ['Draft complete.'], metas: 1, live: saved ? 0 : 1});
+    });
+  });
+}

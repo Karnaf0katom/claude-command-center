@@ -684,6 +684,8 @@ def _parse_codex_event(ev, line_num, token_usage=None, codex_turn_meta=None):
                     "message_id": f"codex-{line_num}",
                     "blocks": ([{"kind": "text", "text": text}] if text else []),
                 }
+                if item.get("id"):
+                    result["codex_item_id"] = str(item["id"])
                 if artifact is not None:
                     result["presentation_artifact"] = artifact
                 if artifact_error:
