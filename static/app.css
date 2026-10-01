@@ -8318,6 +8318,18 @@
     will-change: transform, opacity;
     pointer-events: none;
   }
+  /* Status changes must not steal title width or move its wrap point.
+     Paint both mutually exclusive markers in the existing left gutter. */
+  #convList:not(.workers-dense) .conv-item .conv-main-row > .conv-working-dot,
+  #convList:not(.workers-dense) .conv-item .conv-main-row > .conv-needs-you {
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 6px;
+    height: 6px;
+    margin: 0;
+  }
   @keyframes ccc-working-dot-pulse {
     0%, 100% { transform: scale(1);   opacity: 0.55; }
     50%      { transform: scale(2.2); opacity: 0.15; }
