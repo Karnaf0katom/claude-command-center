@@ -25628,6 +25628,7 @@ _adopt_ccc_module("kimi_store")
 
 _adopt_ccc_module("codex_parse")
 _adopt_ccc_module("codex_log_recovery")
+_adopt_ccc_module("codex_diagnostics")
 # Test-patched globals kept here; ccc_server/pending_inputs.py reads them via _core.
 _pending_terminal_input_queue: dict = {}   # session_id → [text, ...]
 
@@ -25635,7 +25636,6 @@ _adopt_ccc_module("pending_inputs")
 
 _adopt_ccc_module("queue_events")
 # WatchTower error alerts (launch failures, activity.log ERRORs, daemon down)
-_adopt_ccc_module("codex_diagnostics")
 # with server-side acks — the strip above the Queue panel.
 _adopt_ccc_module("wt_alerts")
 # Test-patched globals kept here; ccc_server/gemini.py reads them via _core.
@@ -27447,6 +27447,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Workspace info — cwd, branch, worktree?, ahead/behind, co-tenants.
             sid = path.rsplit("/", 2)[-2]
             self.send_json(extract_session_workspace(sid))
+        elif re.match(r"^/api/session/[a-zA-Z0-9_-]+/codex-diagnostics$", path):
+            sid = path.split("/")[-2]
+            self.send_json(build_codex_session_diagnostics(sid))
         elif re.match(r"^/api/session/[a-zA-Z0-9_-]+/queued-inputs$", path):
             # Durable CCC-queued input for one session, shaped as the same
             # synthetic `pending` user_text events the transcript endpoint
@@ -27454,9 +27457,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # so it polls this in-memory read to keep queued messages visible.
             sid = path.rsplit("/", 2)[-2]
             self.send_json({
-        elif re.match(r"^/api/session/[a-zA-Z0-9_-]+/codex-diagnostics$", path):
-            sid = path.split("/")[-2]
-            self.send_json(build_codex_session_diagnostics(sid))
                 "ok": True,
                 "session_id": sid,
                 "events": _get_queued_events_for_session(sid),

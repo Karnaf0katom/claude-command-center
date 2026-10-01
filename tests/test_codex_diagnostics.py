@@ -142,6 +142,82 @@ class CodexDiagnosticsTests(unittest.TestCase):
         self.assertFalse(diag['ok'])
         self.assertEqual(diag['error'], 'missing session_id')
 
+    def test_own_exec_resume_holder_is_running_exec(self):
+        """A shared-state holder whose argv carries this sid through
+        `codex exec resume` is CCC's own run, not a competing app."""
+        capture = self.repo / f'resume-codex-{SID[:8]}-20261001T134350.log'
+        capture.write_text(json.dumps({'type': 'thread.started', 'thread_id': SID}) + '\n')
+        self._patch('_codex_capture_thread_row', return_value={'_ccc_capture': str(capture)})
+        self._patch('_codex_shared_state_db_holders', return_value=[{'pid': 6440, 'command': 'codex'}])
+        self._patch('_codex_classify_state_holders', return_value=[{
+            'pid': 6440, 'command': 'codex',
+            'argv': 'node /Users/x/.local/bin/codex exec resume --json ' + SID + ' hello',
+            'kind': 'ccc-exec-resume', 'this_thread': True,
+        }])
+        self._patch('_codex_shared_state_conflict', return_value={
+            'holders': [{'pid': 6440, 'command': 'codex'}],
+            'message': 'Another Codex process is already using the shared state database',
+        })
+        self._patch('_codex_thread_writer_snapshot', return_value={
+            'writer': 'unknown', 'desktop_attached': False,
+            'external_active': True, 'mtime_age_s': 2.0})
+        diag = server.build_codex_session_diagnostics(SID)
+        self.assertEqual(diag['verdict']['state'], 'running_exec')
+        self.assertIn('codex exec resume', diag['verdict']['headline'])
+        self.assertEqual(diag['transport']['kind'], 'exec-resume')
+        self.assertTrue(diag['process']['alive'])
+        self.assertEqual(diag['process']['pid'], 6440)
+        self.assertEqual(diag['competition']['own_exec_child']['pid'], 6440)
+        self.assertFalse(diag['competition']['external_writer_active'])
+
+    def test_foreign_holder_still_external_turn(self):
+        """Regression guard: a holder for a DIFFERENT sid must still read as
+        an external writer when the rollout is moving."""
+        rollout = self.repo / 'rollout-x.jsonl'
+        rollout.write_text('{}\n')
+        self._patch('_resolve_codex_rollout_path', return_value=rollout)
+        self._patch('_codex_thread_row', return_value={'id': SID})
+        self._patch('_codex_shared_state_db_holders', return_value=[{'pid': 999, 'command': 'codex'}])
+        self._patch('_codex_classify_state_holders', return_value=[{
+            'pid': 999, 'command': 'codex',
+            'argv': 'codex exec resume --json other-thread-id hi',
+            'kind': 'ccc-exec-resume', 'this_thread': False,
+        }])
+        self._patch('_codex_thread_writer_snapshot', return_value={
+            'writer': 'unknown', 'desktop_attached': False,
+            'external_active': True, 'mtime_age_s': 2.0})
+        diag = server.build_codex_session_diagnostics(SID)
+        self.assertEqual(diag['verdict']['state'], 'external_turn')
+        self.assertIsNone(diag['competition']['own_exec_child'])
+
+    def test_symbolic_codex_app_pid(self):
+        self._patch('_find_live_spawn_entry_for_session', return_value={
+            'pid': 'codex-app-01a0f877-x', 'engine': 'codex',
+            'app_server_spawn': True, 'model': 'example-model',
+            'spawned_via': 'ui', 'started': '20261001T101636',
+        })
+        self._patch('_codex_thread_row', return_value={'id': SID})
+        diag = server.build_codex_session_diagnostics(SID)
+        self.assertTrue(diag['process']['pid_symbolic'])
+        self.assertEqual(diag['process']['pid'], 'codex-app-01a0f877-x')
+
+    def test_pid_is_engine_process_node_wrapper(self):
+        """`codex` launched via its npm wrapper has argv[0]==node; the engine
+        check must look at the wrapped script path too."""
+        def fake_run(args, **kw):
+            r = mock.Mock()
+            r.returncode = 0
+            r.stdout = ''
+            if args[:3] == ['ps', '-p', '55555']:
+                r.stdout = 'node /Users/x/.local/bin/codex exec resume --json ' + SID + ' hi\n'
+            elif args[:3] == ['ps', '-p', '55556']:
+                r.stdout = 'node /Users/x/bin/gemini --output-format stream-json\n'
+            return r
+        with mock.patch.object(server, '_pid_is_zombie', return_value=False), \
+                mock.patch.object(server.subprocess, 'run', side_effect=fake_run):
+            self.assertTrue(server._pid_is_engine_process(55555, 'codex'))
+            self.assertFalse(server._pid_is_engine_process(55556, 'codex'))
+
 
 if __name__ == '__main__':
     unittest.main()

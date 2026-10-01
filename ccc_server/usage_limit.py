@@ -1409,6 +1409,8 @@ def _pid_is_engine_process(pid, engine):
         return True
     if engine == "gemini":
         return any(p.rsplit("/", 1)[-1] == "gemini" for p in parts[1:4])
+    if engine == "codex":
+        return any(p.rsplit("/", 1)[-1] == "codex" for p in parts[1:4])
     if engine == "cursor":
         return any(p.rsplit("/", 1)[-1] == "cursor-agent" for p in parts[1:4])
     if engine == "antigravity":

@@ -897,6 +897,84 @@ def _codex_filter_own_ccc_holders(holders):
     return [h for h in foreign if h["pid"] not in ours]
 
 
+_CODEX_HOLDER_ARGV_CACHE = {"pids": None, "at": 0.0, "argv": {}}
+_CODEX_HOLDER_ARGV_LOCK = threading.Lock()
+_CODEX_HOLDER_ARGV_TTL_S = 5.0
+
+
+def _codex_holder_argv_cached(pids):
+    """argv per holder pid from ONE batched /bin/ps, cached by (pid tuple, TTL)
+    so the per-row writer attribution never shells out per session."""
+    now = time.monotonic()
+    with _CODEX_HOLDER_ARGV_LOCK:
+        c = _CODEX_HOLDER_ARGV_CACHE
+        if c["pids"] == pids and now - c["at"] < _CODEX_HOLDER_ARGV_TTL_S:
+            return dict(c["argv"])
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-p", ",".join(str(p) for p in pids), "-o", "pid=,command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3.0,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    argv_by_pid = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        head, _, cmd = line.partition(" ")
+        try:
+            argv_by_pid[int(head)] = cmd
+        except ValueError:
+            continue
+    with _CODEX_HOLDER_ARGV_LOCK:
+        _CODEX_HOLDER_ARGV_CACHE.update(pids=pids, at=now, argv=dict(argv_by_pid))
+    return argv_by_pid
+
+
+def _codex_classify_state_holders(holders, session_id=None):
+    """Classify shared-state-DB holders so callers can tell CCC's own
+    `codex exec`/`exec resume` children (legitimate writers, not competitors)
+    from the desktop app or unrelated Codex processes.
+
+    One batched `/bin/ps` for all holder pids — never one subprocess per
+    holder. Returns [{pid, command, argv, kind, this_thread}] where kind is
+    "ccc-exec-resume" | "ccc-exec" | "app-server" | "desktop" | "other" and
+    this_thread is True when `session_id` literally appears in argv."""
+    holders = [h for h in (holders or []) if isinstance(h, dict) and h.get("pid")]
+    if not holders:
+        return []
+    pids = tuple(sorted({h["pid"] for h in holders}))
+    argv_by_pid = _codex_holder_argv_cached(pids)
+    sid = str(session_id or "")
+    classified = []
+    for h in holders:
+        pid = h["pid"]
+        argv = argv_by_pid.get(pid, str(h.get("command") or ""))
+        if " exec resume" in argv:
+            kind = "ccc-exec-resume"
+        elif " exec " in argv:
+            kind = "ccc-exec"
+        elif "app-server" in argv:
+            kind = "desktop" if ".app/Contents/" in argv else "app-server"
+        elif ".app/Contents/" in argv:
+            kind = "desktop"
+        else:
+            kind = "other"
+        classified.append({
+            "pid": pid,
+            "command": h.get("command"),
+            "argv": argv[:200],
+            "kind": kind,
+            "this_thread": bool(sid) and sid in argv,
+        })
+    return classified
+
+
 
 def _codex_shared_state_db_holders(now=None, force=False):
     """Processes other than CCC's own app-server that hold the shared state DBs.
@@ -5577,20 +5655,31 @@ def _codex_desktop_attached_rollouts(now=None):
 
 
 def _codex_ccc_exec_child_running(session_id):
-    """True when a CCC-spawned `codex exec resume` child owns this sid."""
+    """True when a CCC-spawned `codex exec resume` child owns this sid.
+
+    The in-process `_spawned_sessions` scan only sees children THIS process
+    launched. The control-plane worker spawns its own exec-resume children,
+    which surface to the dashboard only via the on-disk spawn registry —
+    check it too or a worker-owned child reads as an external writer."""
     try:
-        return any(
+        if any(
             s.get("resumed_sid") == session_id and _core._poll_spawn_entry(s) is None
             for s in _core._spawned_sessions
             if s.get("engine") == "codex"
-        )
+        ):
+            return True
+    except Exception:
+        return False
+    try:
+        entry = _core._disk_spawn_entry_for_session(session_id)
+        return bool(entry and entry.get("engine") == "codex")
     except Exception:
         return False
 
 
 def _codex_thread_writer_snapshot(session_id, now=None, *, rollout=None,
                                   app_state=None, attached=None,
-                                  exec_child=None):
+                                  exec_child=None, holders=None):
     """Attribute the current writer of one Codex thread.
 
     Returns {writer, desktop_attached, external_active, mtime_age_s}:
@@ -5619,6 +5708,21 @@ def _codex_thread_writer_snapshot(session_id, now=None, *, rollout=None,
             ccc_recent = False
     if exec_child is None:
         exec_child = _codex_ccc_exec_child_running(session_id)
+    if not ccc_turn_active and not exec_child:
+        # A worker-spawned `codex exec resume` can be invisible to both
+        # in-process and registry lookups (registry written late, or pid
+        # wiped by a stale reattach sweep) while still holding the shared
+        # state DB — its argv carries the thread id, so the holder scan is
+        # the last-resort ownership check before calling this external.
+        try:
+            if holders is None:
+                holders = _core._codex_shared_state_db_holders(now)
+            classified = _codex_classify_state_holders(holders, session_id)
+            if any(h.get("this_thread") and str(h.get("kind") or "").startswith("ccc-exec")
+                   for h in classified):
+                exec_child = True
+        except Exception:
+            pass
     if rollout is None:
         rollout = _core._codex_rollout_stat(session_id)
     path = (rollout or {}).get("path")

@@ -43953,6 +43953,7 @@
       fetchSessionTimeline(sid);
       fetchSessionWorkspace(sid, pid);
       fetchSessionUsage(sid, pid);
+      if (typeof fetchCodexDiagnostics === 'function') fetchCodexDiagnostics(sid, pid);
     }, 150);
   }
 
@@ -43964,7 +43965,6 @@
     try { _perfConvOpen = { id: id, paneId: paneId, t0: performance.now() }; } catch (_) {}
     const pane = paneByPaneId(paneId);
     if (!pane) return;
-      if (typeof fetchCodexDiagnostics === 'function') fetchCodexDiagnostics(sid, pid);
     window.dispatchEvent(new CustomEvent('ccc:conversation-selected', { detail: {
       threadId: sessionIdByConv[id] || id, paneId, paneEl: convPaneElById(paneId),
     } }));
@@ -53552,17 +53552,6 @@
     if (_inputContextFitRaf) return;
     _inputContextFitRaf = requestAnimationFrame(_fitInputContextStrip);
   }
-  async function fetchSessionWorkspace(sid, paneId) {
-    const pid = paneId || paneIdForSessionId(sid);
-    _workspaceSessionIdByPane[pid] = sid;
-    _workspaceDataByPane[pid] = null;
-    // Clear the strip immediately so a stale workspace from the previous
-    // session doesn't flash before the new fetch lands.
-    const slot = getInputContextSlot(pid);
-    const wsSlot = slot && slot.querySelector('[data-workspace]');
-    if (wsSlot) wsSlot.innerHTML = '';
-    if (slot) {
-      if (slot.classList.contains('is-new-session')) syncInputContextVisibility(slot);
 
   // ── Codex diagnostics panel (Metadata rail) ──────────────────────────
   // Explains, in plain language, how a Codex session is being driven:
@@ -53671,7 +53660,9 @@
 
     // Process
     let procHtml = '';
-    if (pr.pid !== null && pr.pid !== undefined && pr.pid !== '') {
+    if (pr.pid_symbolic) {
+      procHtml += _codexDiagRow('Process', '<span class="codex-diag-muted">App-server thread (no standalone process)</span>');
+    } else if (pr.pid !== null && pr.pid !== undefined && pr.pid !== '') {
       procHtml += _codexDiagRow('Process', '<span class="conv-pane-proc codex-diag-proc'
         + (pr.alive ? ' is-live' : '') + '"><span class="ccc-proc-dot"></span>'
         + escapeHtml('pid ' + pr.pid + (pr.alive ? ' (alive)' : ' (exited)')) + '</span>');
@@ -53708,9 +53699,27 @@
       ? 'running' + (pids.length ? ' <span class="codex-diag-muted">(app-server pids ' + escapeHtml(pids.join(', ')) + ')</span>' : '')
       : 'not running');
     const holders = Array.isArray(cp.shared_state_holders) ? cp.shared_state_holders : [];
+    const holderText = (h) => {
+      const pidSuffix = ' (pid ' + (h.pid || '?') + ')';
+      const kind = String(h.kind || '');
+      if (kind === 'ccc-exec-resume') {
+        return h.this_thread
+          ? "codex exec resume — this thread (CCC's own run" + pidSuffix + ')'
+          : "codex exec resume — another thread (CCC's own run" + pidSuffix + ')';
+      }
+      if (kind === 'ccc-exec') return "codex exec — CCC one-shot run" + pidSuffix;
+      if (kind === 'desktop') return 'Codex desktop' + pidSuffix;
+      if (kind === 'app-server') return 'codex app-server' + pidSuffix;
+      return (h.command || 'codex') + pidSuffix;
+    };
     compHtml += _codexDiagRow('Shared state DB held by', holders.length
-      ? escapeHtml(holders.map(h => (h.command || '?') + ' (pid ' + h.pid + ')').join(', '))
+      ? escapeHtml(holders.map(holderText).join(', '))
       : '<span class="codex-diag-muted">nobody else</span>');
+    if (cp.own_exec_child) {
+      compHtml += '<div class="codex-diag-muted" style="margin:2px 0 4px;">'
+        + escapeHtml("The shared state DB is held by CCC's own run of this thread — this is not a competing app.")
+        + '</div>';
+    }
     compHtml += _codexDiagRow('Desktop attached to rollout', yesNo(!!cp.desktop_attached_to_rollout));
     const writer = cp.writer || (cp.external_writer_active ? 'external' : 'quiet');
     const rollAge = _codexDiagAge(cp.rollout_mtime_age_s);
@@ -53813,6 +53822,17 @@
     } catch (_) {}
   }
 
+  async function fetchSessionWorkspace(sid, paneId) {
+    const pid = paneId || paneIdForSessionId(sid);
+    _workspaceSessionIdByPane[pid] = sid;
+    _workspaceDataByPane[pid] = null;
+    // Clear the strip immediately so a stale workspace from the previous
+    // session doesn't flash before the new fetch lands.
+    const slot = getInputContextSlot(pid);
+    const wsSlot = slot && slot.querySelector('[data-workspace]');
+    if (wsSlot) wsSlot.innerHTML = '';
+    if (slot) {
+      if (slot.classList.contains('is-new-session')) syncInputContextVisibility(slot);
       else {
         slot.classList.remove('visible');
         slot.classList.remove('hide-cotenants');

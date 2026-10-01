@@ -20,6 +20,7 @@ from pathlib import Path
 from ccc_server import core as _core
 
 _TELEMETRY_TAIL_BYTES = 512 * 1024
+_LEDGER_TAIL_BYTES = 256 * 1024
 _TELEMETRY_KEEP = 12
 _COORD_EVENTS_KEEP = 8
 
@@ -224,7 +225,7 @@ def _competition_facts(sid):
     facts = {"desktop_running": False, "desktop_app_server_pids": [],
              "shared_state_holders": [], "conflict_message": None,
              "desktop_attached_to_rollout": False, "external_writer_active": False,
-             "writer": None, "rollout_mtime_age_s": None}
+             "writer": None, "rollout_mtime_age_s": None, "own_exec_child": None}
     try:
         facts["desktop_running"] = bool(_core._codex_desktop_app_is_running())
     except Exception:
@@ -239,11 +240,22 @@ def _competition_facts(sid):
     try:
         conflict = _core._codex_shared_state_conflict()
         if isinstance(conflict, dict):
-            facts["shared_state_holders"] = [
-                {"pid": h.get("pid"), "command": h.get("command")}
-                for h in conflict.get("holders") or [] if isinstance(h, dict)
-            ]
             facts["conflict_message"] = conflict.get("message")
+    except Exception:
+        pass
+    try:
+        holders = _core._codex_shared_state_db_holders()
+        classified = _core._codex_classify_state_holders(holders, sid)
+        facts["shared_state_holders"] = [
+            {"pid": h.get("pid"), "command": h.get("command"),
+             "argv": h.get("argv"), "kind": h.get("kind"),
+             "this_thread": h.get("this_thread")}
+            for h in classified
+        ]
+        for h in classified:
+            if h.get("this_thread") and str(h.get("kind") or "").startswith("ccc-exec"):
+                facts["own_exec_child"] = h
+                break
     except Exception:
         pass
     try:
@@ -252,9 +264,70 @@ def _competition_facts(sid):
         facts["desktop_attached_to_rollout"] = bool(snap.get("desktop_attached"))
         facts["external_writer_active"] = bool(snap.get("external_active"))
         facts["rollout_mtime_age_s"] = snap.get("mtime_age_s")
+        if facts["own_exec_child"] and facts["external_writer_active"]:
+            # The "external writer" IS our own exec child — see
+            # _codex_thread_writer_snapshot's holder classification.
+            facts["external_writer_active"] = False
+            facts["writer"] = "ccc"
     except Exception:
         pass
     return facts
+
+
+def _resume_ledger_fallback(sid):
+    """Last app-server resume failure that preceded an exec fallback for
+    `sid` in the resume ledger, as (reason, error). The ledger is append-only
+    JSONL; read a bounded tail."""
+    try:
+        path = _core._RESUME_LEDGER_FILE
+        size = path.stat().st_size
+    except (OSError, AttributeError):
+        return None, None
+    rows = []
+    try:
+        with path.open("rb") as f:
+            f.seek(max(0, size - _LEDGER_TAIL_BYTES))
+            data = f.read().decode("utf-8", errors="replace")
+        lines = data.splitlines()
+        if size > _LEDGER_TAIL_BYTES and lines:
+            lines = lines[1:]
+        for line in lines:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    except OSError:
+        return None, None
+
+    def _ts(row):
+        try:
+            return float(row.get("epoch") or row.get("ts") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    exec_ts = None
+    for row in rows:
+        if row.get("event") == "codex_wake_exec" and row.get("sid") == sid:
+            exec_ts = _ts(row)
+    if exec_ts is None:
+        return None, None
+    fail = None
+    for row in rows:
+        if row.get("event") == "codex_wake_fail" and row.get("sid") == sid:
+            t = _ts(row)
+            if exec_ts - 60.0 <= t <= exec_ts:
+                fail = row
+    if not fail:
+        return None, None
+    stage = str(fail.get("stage") or "").strip()
+    reason = f"app-server {stage} failed" if stage else "app-server resume failed"
+    error = str(fail.get("error") or "")[:400] or None
+    return reason, error
 
 
 def _app_server_facts(sid, now):
@@ -412,14 +485,11 @@ def _verdict(payload):
         v = {"state": "needs_approval", "severity": "warn",
              "headline": "Waiting for your approval",
              "detail": app.get("approval_message") or "Codex is waiting for approval"}
-    elif comp.get("external_writer_active"):
-        writer = comp.get("writer")
-        headline = ("Codex desktop is driving this thread right now" if writer == "desktop"
-                    else "Another app is driving this thread right now")
-        v = {"state": "external_turn", "severity": "warn", "headline": headline,
-             "detail": "CCC will queue anything you send until that turn goes quiet."}
-    elif proc.get("alive") and str(transport.get("kind") or "").startswith("exec"):
-        pid = proc.get("pid")
+    elif comp.get("own_exec_child") or (
+            proc.get("alive") and str(transport.get("kind") or "").startswith("exec")):
+        own = comp.get("own_exec_child") or {}
+        pid = own.get("pid") if own else proc.get("pid")
+        resume = (own and str(own.get("kind") or "") == "ccc-exec-resume") or transport.get("kind") == "exec-resume"
         detail = "Output streams from CCC's capture log."
         if transport.get("fallback_reason"):
             why = "CCC could not use its app-server (" + str(transport["fallback_reason"]) + ") and fell back to a plain CLI run."
@@ -429,8 +499,15 @@ def _verdict(payload):
         if storage.get("ephemeral"):
             detail += " This run is ephemeral — see Storage."
         v = {"state": "running_exec", "severity": "info",
-             "headline": "Running as a one-shot `codex exec` process (pid %s)" % (pid if pid is not None else "?"),
+             "headline": ("CCC is running this turn as `codex exec resume` (pid %s)" if resume
+                          else "Running as a one-shot `codex exec` process (pid %s)") % (pid if pid is not None else "?"),
              "detail": detail}
+    elif comp.get("external_writer_active"):
+        writer = comp.get("writer")
+        headline = ("Codex desktop is driving this thread right now" if writer == "desktop"
+                    else "Another app is driving this thread right now")
+        v = {"state": "external_turn", "severity": "warn", "headline": headline,
+             "detail": "CCC will queue anything you send until that turn goes quiet."}
     elif app.get("active_turn_id") and (app.get("active_writer") == "ccc" or app.get("ccc_turn_start_pending")):
         v = {"state": "running_app_server", "severity": "info",
              "headline": "CCC is running a turn via the app-server",
@@ -477,24 +554,42 @@ def build_codex_session_diagnostics(session_id):
     except Exception:
         alive = False
 
-    # Storage first: transport classification needs has_native.
+    # Storage first: transport classification needs has_native. Competition
+    # comes before transport/process because a holder classified as CCC's own
+    # exec child overrides both (the spawn registry may have dropped it).
     storage = _storage_facts(sid, entry, now)
     payload["storage"] = storage
     has_native = storage["native_rollout"]["present"] or storage["sqlite_row"]
     entry_is_codex = str(entry.get("engine") or "codex") == "codex" and bool(entry)
-    if not entry_is_codex and not has_native and not storage["capture_log"]["present"]:
-        # No spawn record, no native thread, no capture: not a Codex session
-        # CCC knows anything about. Callers hide the panel on ok=False.
+
+    try:
+        payload["competition"] = _competition_facts(sid)
+    except Exception:
+        pass
+    own_exec = (payload.get("competition") or {}).get("own_exec_child")
+
+    if not entry_is_codex and not has_native and not storage["capture_log"]["present"] \
+            and not own_exec:
+        # No spawn record, no native thread, no capture, no live CCC exec
+        # child holding the state DB: not a Codex session CCC knows anything
+        # about. Callers hide the panel on ok=False.
         return {"ok": False, "error": "not a known Codex session", "session_id": sid}
 
     try:
-        kind = _transport_kind(entry, sid, has_native)
+        kind = "exec-resume" if own_exec else _transport_kind(entry, sid, has_native)
     except Exception:
-        kind = "unknown"
+        kind = "exec-resume" if own_exec else "unknown"
+    if own_exec:
+        label = "One-shot `codex exec resume` (fallback)"
+        detail = ("CCC's worker resumed this thread with a plain CLI run "
+                  "because its app-server could not start.")
+    else:
+        label = _TRANSPORT_LABELS.get(kind, "Unknown")
+        detail = _TRANSPORT_DETAILS.get(kind, "")
     payload["transport"] = {
         "kind": kind,
-        "label": _TRANSPORT_LABELS.get(kind, "Unknown"),
-        "detail": _TRANSPORT_DETAILS.get(kind, ""),
+        "label": label,
+        "detail": detail,
         "fallback_reason": None,
         "fallback_error": None,
         "spawned_via": str(entry.get("spawned_via") or ""),
@@ -512,12 +607,37 @@ def build_codex_session_diagnostics(session_id):
         proc = {"pid": entry.get("pid"), "alive": alive, "log_path": None,
                 "log_size": 0, "log_mtime_age_s": None,
                 "turn_outcome": None, "turn_failed_error": None}
+    proc["pid_symbolic"] = bool(
+        isinstance(proc.get("pid"), str) and _numeric_pid(proc.get("pid")) is None
+    )
+    if own_exec and not alive:
+        # The live exec child is invisible to the spawn registry; surface it
+        # as the process so the panel doesn't claim "(exited)".
+        proc["pid"] = own_exec.get("pid")
+        proc["pid_symbolic"] = False
+        proc["alive"] = True
+        capture = (storage.get("capture_log") or {}).get("path")
+        base = os.path.basename(str(capture or ""))
+        if capture and base.startswith(("resume-codex-", "spawn-codex-")) and sid[:8] in base:
+            proc["log_path"] = str(capture)
+            try:
+                st = Path(capture).stat()
+                proc["log_size"] = st.st_size
+                proc["log_mtime_age_s"] = _age_s(st.st_mtime, now)
+            except OSError:
+                pass
     payload["process"] = proc
 
-    try:
-        payload["competition"] = _competition_facts(sid)
-    except Exception:
-        pass
+    if str(payload["transport"].get("kind") or "").startswith("exec") \
+            and not payload["transport"].get("fallback_reason"):
+        try:
+            reason, error = _resume_ledger_fallback(sid)
+            if reason:
+                payload["transport"]["fallback_reason"] = reason
+            if error:
+                payload["transport"]["fallback_error"] = error
+        except Exception:
+            pass
     try:
         payload["app_server"] = _app_server_facts(sid, now)
     except Exception:
