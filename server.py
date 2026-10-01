@@ -7047,6 +7047,13 @@ def repo_from_session(session_id):
         except Exception:
             cwd = None
     if not cwd:
+        cap_fn = globals().get("_codex_capture_thread_row")
+        if cap_fn:
+            try:
+                cwd = (cap_fn(sid) or {}).get("cwd")
+            except Exception:
+                cwd = None
+    if not cwd:
         raise RepoContextError("repo_required", f"could not derive repo context for session {sid}")
     try:
         return _resolve_cwd_context(cwd)
@@ -36263,6 +36270,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # session UUID — that's the id users see in the TUI and commit
             # trailers now.
             sid = _resolve_bridge_session_alias(sid)
+            continuation_origin = sid
             # MEMO-FIX-lineage: once `sid` has a recorded continuation
             # successor (--continue-from, --new-if-large-and-stale, the F2
             # button, or usage-limit auto-resume — all embed the same "Origin
@@ -36357,6 +36365,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         inject_options["idempotency_key"] = payload.get(
                             "idempotency_key"
                         )
+                    if continuation_origin != sid:
+                        # Keep retries in the original request's dedupe bucket,
+                        # including while its worker-owned spawn is in flight.
+                        inject_options["_dedupe_session_id"] = continuation_origin
                     peer_sender_sid = (
                         payload.get("peer_sender_sid")
                         or payload.get("sender_session_id")
@@ -36397,6 +36409,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     # copy then survives a successful steer and the queue
                     # pump resends it later, delivering the message twice.
                     result = _finalize_queued_steer_result(sid, text, result)
+                if continuation_origin != sid and result.get("ok"):
+                    try:
+                        capture = _codex_capture_thread_row(continuation_origin) or {}
+                    except Exception:
+                        capture = {}
+                    if capture.get("_ccc_capture"):
+                        # A retry can be deduped after the first response was
+                        # lost. Still tell the stale pane where work continued.
+                        result = dict(result, via="codex-continuation",
+                                      continue_from=continuation_origin, new_session_id=sid)
                 # CCC-28: an "ok" result that is also "queued" reached CCC's
                 # durable queue, not the session. Open a receipt so a future
                 # triage session (or the additive inject-receipt API field)

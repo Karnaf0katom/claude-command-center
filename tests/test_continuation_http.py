@@ -182,3 +182,25 @@ def test_inject_input_lineage_forward_actually_redirects_delivery(monkeypatch):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_ephemeral_forward_retry_returns_pane_successor(httpd, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(server, '_resolve_bridge_session_alias', lambda sid: sid)
+    monkeypatch.setattr(continuation, 'forward_target', lambda sid: 'new-codex')
+    monkeypatch.setattr(server, '_codex_capture_thread_row', lambda sid: {'_ccc_capture': 'capture.log'})
+    monkeypatch.setattr(server, '_handoff_lease_guard', lambda sid: None)
+    monkeypatch.setattr(server, '_record_interaction', lambda sid: None)
+    def inject(sid, text, **kwargs):
+        seen.update(sid=sid, **kwargs)
+        return {'ok': True, 'via': 'duplicate-suppressed', 'deduped': True}
+    monkeypatch.setattr(server, '_inject_text_into_session', inject)
+    code, result = _request(httpd, '/api/inject-input', {
+        'session_id': 'old-codex', 'text': 'first task', 'idempotency_key': 'send-1',
+    })
+    assert code == 200
+    assert result['via'] == 'codex-continuation'
+    assert result['new_session_id'] == 'new-codex'
+    assert result['continue_from'] == 'old-codex'
+    assert result['deduped']
+    assert seen['_dedupe_session_id'] == 'old-codex'

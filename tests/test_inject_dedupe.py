@@ -65,6 +65,14 @@ def test_identical_unkeyed_inject_is_suppressed(window, router):
     assert second["landed"] == "already_delivered"
 
 
+def test_forwarded_retry_uses_original_dedupe_bucket(window, router):
+    server._inject_text_into_session('origin', 'first task', idempotency_key='send-1')
+    retry = server._inject_text_into_session('successor', 'first task',
+        idempotency_key='send-1', _dedupe_session_id='origin')
+    assert len(router) == 1
+    assert retry['deduped']
+
+
 def test_queued_delivery_is_remembered_too(window, router, monkeypatch):
     """CCC owns a queued message; the drain will deliver it exactly once."""
     monkeypatch.setattr(

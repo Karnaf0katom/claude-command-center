@@ -2098,6 +2098,111 @@ def _codex_queued_delivery_transaction(session_id, *, idempotency_key=None):
     return {"ok": False, "delivered": False, "result": result}
 
 
+_CODEX_EPHEMERAL_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def _codex_continue_ephemeral(
+    session_id, text, *, cwd, capture_row, idempotency_key=None,
+):
+    from ccc_server import continuation as _continuation
+    # Serialize the creation of a successor, including publication of the
+    # forward. A second send may already have resolved the old ID before the
+    # first request finished spawning, so recheck under the same lock.
+    with _CODEX_EPHEMERAL_LOCKS[hash(session_id) % len(_CODEX_EPHEMERAL_LOCKS)]:
+        successor = _continuation.manual_forward_target(session_id)
+        if successor != session_id:
+            result = _core._inject_duplicate_check(
+                successor, text, idempotency_key=idempotency_key,
+            )
+            if result is None:
+                result = _core.resume_session_codex(
+                    successor, text, idempotency_key=idempotency_key,
+                )
+            if result.get("ok"):
+                result = dict(result, via="codex-continuation",
+                              continue_from=session_id, new_session_id=successor)
+            return result
+        return _codex_spawn_ephemeral_continuation(
+            session_id, text, cwd=cwd, capture_row=capture_row,
+            idempotency_key=idempotency_key,
+        )
+
+
+def _codex_spawn_ephemeral_continuation(
+    session_id, text, *, cwd, capture_row, idempotency_key=None,
+):
+    """An --ephemeral `codex exec` run has no native thread to resume; start a
+    fresh Codex session in the same folder that continues it from a brief."""
+    from ccc_server import continuation as _continuation
+    ctx = {
+        "engine": "codex",
+        "session_id": session_id,
+        "latest": session_id,
+        "title": capture_row.get("title") or "",
+        "transcript_path": capture_row.get("_ccc_capture") or "",
+        "context_tokens": 0,
+    }
+    prompt = _continuation.build_continuation_prompt(text, ctx)
+    override = _core._get_session_override(session_id)
+    override_model = (override or {}).get("model") if override else None
+    effort = (override or {}).get("reasoning_effort") or ""
+    model = (
+        override_model
+        or os.environ.get("CCC_CODEX_MODEL")
+        or capture_row.get("model")
+        or _core._spawn_fallback_model_for_engine("codex")
+    )
+    if _core._model_policy_blocks(model):
+        model = _core._spawn_fallback_model_for_engine("codex")
+    name = ("Continue " + (ctx["title"] or session_id))[:60]
+    _core._resume_ledger_append(
+        "codex_ephemeral_continuation", sid=session_id, cwd=cwd, model=model,
+    )
+    spawn = _core.spawn_session_codex(
+        prompt, name=name, cwd=cwd, repo_path=cwd, model=model,
+        reasoning_effort=effort or "", parent_session_id=session_id,
+    )
+    if not spawn or not spawn.get("ok"):
+        return {
+            "ok": False,
+            "via": "codex-continuation",
+            "code": (spawn or {}).get("code") or "codex_continuation_failed",
+            "error": (spawn or {}).get("error")
+                or "could not start a continuation session",
+        }
+    new_sid = spawn.get("session_id")
+    if new_sid:
+        # The first message was delivered as part of the new session's
+        # initial prompt. Retries resolve to this successor before inject
+        # dedupe, so record delivery under its ID before publishing it.
+        _core._inject_dedupe_record(new_sid, text, idempotency_key=idempotency_key)
+        try:
+            _continuation.record_manual_forward(session_id, new_sid)
+        except Exception:
+            pass
+        try:
+            _continuation.rebind_chain_to(session_id, new_sid)
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "via": "codex-continuation",
+        "continue_from": session_id,
+        "new_session_id": new_sid,
+        "pid": spawn.get("pid"),
+        "spawn_id": spawn.get("spawn_id"),
+        "log": spawn.get("log"),
+        "name": name,
+        "cwd": cwd,
+        "model": model,
+        "ephemeral": True,
+        "message": (
+            "That Codex run was ephemeral (no native thread), so CCC started "
+            "a new Codex session that continues it."
+        ),
+    }
+
+
 def resume_session_codex(
     session_id, text, *, steer=False, _from_queue=False, idempotency_key=None,
     preserve_queued_steer=False, _native_delivery=False,
@@ -2201,8 +2306,13 @@ def resume_session_codex(
                 pass
     row = _core._codex_thread_row(session_id) or {}
     spawned_ctx = _core._spawn_registry_entry_for_session(session_id, "codex") or {}
+    try:
+        capture_row = _core._codex_capture_thread_row(session_id) or {}
+    except Exception:
+        capture_row = {}
     cwd = (
         row.get("cwd")
+        or capture_row.get("cwd")
         or spawned_ctx.get("cwd")
         or (active_resume_entry or {}).get("cwd")
         or _core.find_session_cwd(session_id)
@@ -2214,6 +2324,29 @@ def resume_session_codex(
         except _core.RepoContextError as e:
             cwd_error = e
             cwd = None
+    # A `codex exec --ephemeral` run left no native rollout and no state-DB
+    # row — nothing exists that `codex exec resume` or the app-server could
+    # resume, so a normal send continues it in a fresh session instead.
+    try:
+        native_rollout = _core._resolve_codex_rollout_path(session_id)
+    except Exception:
+        native_rollout = None
+    ephemeral = bool(capture_row.get("_ccc_capture")) and not row and not native_rollout
+    if ephemeral and not steer and not _from_queue:
+        if not cwd:
+            return {
+                "ok": False,
+                "code": "codex_ephemeral_no_cwd",
+                "via": "codex-continuation",
+                "error": (
+                    "This Codex run was ephemeral (no native thread) and its "
+                    "working folder is unknown, so it can't be continued."
+                ),
+            }
+        return _codex_continue_ephemeral(
+            session_id, text, cwd=cwd, capture_row=capture_row,
+            idempotency_key=idempotency_key,
+        )
     # Per-session override (set via the click-to-switch picker) wins over
     # the env-var default and the previous run's recorded model.
     override = _core._get_session_override(session_id)

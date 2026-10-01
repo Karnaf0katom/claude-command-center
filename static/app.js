@@ -11775,6 +11775,13 @@
           markPendingSendDelivered(pendingSend, data);
           showOpToast('OpenCode follow-up started.');
           scheduleFireAndWatchRefresh(paneId || activePaneId());
+        } else if (data.via === 'codex-continuation') {
+          removePendingSendEcho(pendingSend);
+          if (data.new_session_id) applyClearSuccession(sid, data.new_session_id, paneId || activePaneId());
+          else refreshConversationList();
+          showOpToast(data.message || 'Ephemeral Codex run - continued in a new session.', 'info');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
         } else if (data.via === 'wt-send' && !compactCommand) {
           // Routed through WatchTower (dormant session). Stage the echo copy
           // by transport and track the delivery receipt to landed/lost.

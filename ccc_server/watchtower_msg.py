@@ -1472,6 +1472,7 @@ def _inject_text_into_session(session_id, text, **kwargs):
     mode = str(kwargs.get("mode", "send"))
     fields = dict(kwargs.pop("contract_fields", None) or {})
     allow_duplicate = bool(kwargs.pop("allow_duplicate", False))
+    dedupe_sid = kwargs.pop("_dedupe_session_id", None) or session_id
     if not requested:
         requested, legacy_fields = _LEGACY_TO_VERB.get(mode, (mode, {}))
         for key, value in legacy_fields.items():
@@ -1484,7 +1485,7 @@ def _inject_text_into_session(session_id, text, **kwargs):
     dedupe_owner = False
     while True:
         duplicate, pending, dedupe_owner = _core._inject_dedupe_acquire(
-            session_id, text,
+            dedupe_sid, text,
             source=str(kwargs.get("source", "api")),
             idempotency_key=kwargs.get("idempotency_key"),
             from_terminal_queue=bool(kwargs.get("_from_terminal_queue", False)),
@@ -1539,18 +1540,25 @@ def _inject_text_into_session(session_id, text, **kwargs):
     except BaseException:
         if dedupe_owner:
             _core._inject_dedupe_release(
-                session_id, text, kwargs.get("idempotency_key"),
+                dedupe_sid, text, kwargs.get("idempotency_key"),
             )
         raise
     # Queued counts as reaching the session: CCC owns the text from here and
     # the drain (exempt from the check above) delivers it exactly once.
     if isinstance(result, dict) and result.get("ok"):
         _core._inject_dedupe_record(
-            session_id, text, kwargs.get("idempotency_key"),
+            dedupe_sid, text, kwargs.get("idempotency_key"),
         )
+        if result.get("via") == "codex-continuation" and result.get("new_session_id"):
+            # The worker owns the spawn, but this process owns HTTP inject
+            # dedupe. Retries addressed to the old ID now forward to the new
+            # one; its initial prompt already included this message.
+            _core._inject_dedupe_record(
+                result["new_session_id"], text, kwargs.get("idempotency_key"),
+            )
     if dedupe_owner:
         _core._inject_dedupe_release(
-            session_id, text, kwargs.get("idempotency_key"),
+            dedupe_sid, text, kwargs.get("idempotency_key"),
         )
     if not log_owned_by_worker:
         _core._log_inject_result(
