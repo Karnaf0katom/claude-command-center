@@ -1,1 +1,1 @@
-- Offer all enabled New session engines in the Continue in a new session picker, with models and effort levels for the selected engine.
+- Offer all enabled New session engines in the Continue in a new session picker, with models and effort levels for the selected engine. Keep the picker above the composer so its controls remain visible.

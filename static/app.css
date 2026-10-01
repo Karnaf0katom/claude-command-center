@@ -27152,10 +27152,10 @@ a.settings-row:focus-visible .settings-launcher-btn { text-decoration: underline
 /* The follow-up dialog: engine + model + effort stated as a sentence rather
    than a form. Never a required decision — the caret's tooltip already says
    what the route will launch on. Anchored to .route (its parent, position:
-   relative) so it drops directly below the pill regardless of where the
-   toolbar's flex flow happens to place the pill itself. */
+   relative). Open above the composer so the pane's bottom overflow boundary
+   cannot clip the model, effort, or quick-pick controls. */
 .f2c-panel .f2c-config {
-  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30;
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   width: max-content; max-width: 320px;
   margin: 0; padding: 8px 10px;
