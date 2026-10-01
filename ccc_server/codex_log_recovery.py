@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import uuid
 from pathlib import Path
 
 from ccc_server import core as _core
@@ -90,6 +91,18 @@ def _codex_capture_rows(native_rows, spawn_by_sid, repo_path=None):
 
 
 def _codex_capture_thread_row(session_id):
+    row = _CAPTURE_ROWS.get(session_id)
+    if row:
+        return row
+    # Codex exec uses UUIDv7 IDs; Claude UUIDv4 misses must never scan logs.
+    try:
+        if uuid.UUID(str(session_id)).version != 7:
+            return None
+    except ValueError:
+        return None
+    # Direct links can arrive before any list rebuild after a restart.
+    # Header discovery is bounded and memoized; it does not parse transcripts.
+    _codex_capture_rows([], {}, None)
     return _CAPTURE_ROWS.get(session_id)
 
 

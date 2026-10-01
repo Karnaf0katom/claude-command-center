@@ -105,3 +105,14 @@ class EphemeralSessionTests(unittest.TestCase):
         with mock.patch.dict(server._ENGINE_DETECT_CACHE, {'capture-thread': ('claude', float('inf'))}):
             server.find_codex_conversations(repo_path=str(self.repo), resolve_pr_states=False, resolve_worktree_dirty=False)
             self.assertEqual(server._detect_session_engine('capture-thread'), 'codex')
+
+    def test_direct_capture_lookup_works_before_list_scan(self):
+        from ccc_server import codex_log_recovery
+        sid = '00000000-0000-7000-8000-000000000001'
+        self.log.write_text(self.log.read_text().replace('capture-thread', sid))
+        codex_log_recovery._CAPTURE_ROWS.pop(sid, None)
+        with mock.patch.object(server, '_known_repo_paths', return_value=[str(self.repo)]), \
+             mock.patch.object(server, 'repo_log_dir', return_value=self.repo):
+            row = server._codex_capture_thread_row(sid)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['_ccc_capture'], str(self.log))
