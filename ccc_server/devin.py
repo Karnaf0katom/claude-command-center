@@ -2519,6 +2519,28 @@ def _devin_cli_fusion_sidekick_key(con, raw_id):
     return _devin_cli_norm_model_key(model.rsplit("-sidekick-", 1)[1])
 
 
+def _devin_cli_session_model(raw_id):
+    """The session's configured model uid from ``sessions.model``.
+
+    Holds the concrete uid the session is actually running — a variant like
+    ``swe-2-high`` or a ``fusion-<lead>-sidekick-<sidekick>`` slug — updated
+    by the CLI whenever the model is changed (including over ACP
+    set_config_option). '' when the session or column can't be read.
+    """
+    con = _devin_cli_connect_for_raw_id(raw_id)
+    if con is None:
+        return ""
+    try:
+        row = con.execute(
+            "SELECT model FROM sessions WHERE id = ?", (raw_id,)
+        ).fetchone()
+        return str((row[0] if row else "") or "")
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
+
+
 def _devin_cli_response_model(msg):
     """Model label from metadata.response_dimensions[] (uid 'model')."""
     meta = msg.get("metadata")
@@ -2959,7 +2981,8 @@ def _parse_devin_cli_conversation(session_id, after_line=0):
     if after_line and after_line > 0:
         visible = [e for e in events if e["line"] > after_line]
     else:
-        visible = events
+        visible = list(events)
+    visible = _merge_devin_acp_result_events(raw_id, visible)
     elapsed = time.perf_counter() - start
     _devin_cli_profile_log(
         "parse_devin_cli_conversation",
@@ -2968,6 +2991,58 @@ def _parse_devin_cli_conversation(session_id, after_line=0):
         f"last_line={line} after_line={after_line}",
     )
     return {"events": visible, "last_line": line}
+
+
+def _merge_devin_acp_result_events(raw_id, events):
+    """Splice a session's ACP turn-result rows into the DB-parsed event list.
+
+    `devin acp` writes user/assistant/tool content into its own sessions.db,
+    but a turn's terminal result — quota errors, cancellations, end_turn —
+    is only emitted on CCC's ACP transcript (acp/devin/<sid>.jsonl) for
+    sessions CCC has loaded via session/new or session/load. Without this
+    merge a failed turn renders nothing in the pane: the transcript ``result``
+    row is what clears the optimistic "Thinking…" indicator and paints the
+    error banner.
+
+    Merged rows get their transcript line negated — a stable, unique id that
+    can never collide with the DB-derived positive lines — so ``last_line``
+    stays a pure DB count and SSE cursors keep their meaning. Clients dedupe
+    on data-jsonl-line, so re-sending these rows on incremental polls is
+    safe and keeps the merge out of the incremental parse cache.
+    """
+    try:
+        acp_events = _core._acp_transcript_events_after("devin", raw_id, 0)
+    except Exception:
+        return events
+    results = []
+    used_lines = set()
+    for ev in acp_events:
+        if not isinstance(ev, dict) or ev.get("type") != "result":
+            continue
+        ev = dict(ev)
+        try:
+            acp_line = int(ev.get("line") or 0)
+        except (TypeError, ValueError):
+            acp_line = 0
+        neg = -max(1, acp_line)
+        while neg in used_lines:
+            neg -= 1
+        used_lines.add(neg)
+        ev["line"] = neg
+        results.append(ev)
+    if not results:
+        return events
+    events = list(events)
+    merged = []
+    i = 0
+    for res in results:
+        res_ts = str(res.get("ts") or "")
+        while i < len(events) and str(events[i].get("ts") or "") <= res_ts:
+            merged.append(events[i])
+            i += 1
+        merged.append(res)
+    merged.extend(events[i:])
+    return merged
 
 
 DEVIN_CLI_CONTEXT_LIMIT = 200_000
@@ -3065,6 +3140,14 @@ def _extract_devin_cli_usage(session_id):
                     "tokens_cached": cache_read,
                     "tokens_out": out_tok,
                 })
+        if not model:
+            # No assistant turn has reported a generation_model yet (fresh
+            # session, or the first turn died before producing one) — the
+            # session row still knows the configured model.
+            row = con.execute(
+                "SELECT model FROM sessions WHERE id = ?", (raw_id,)
+            ).fetchone()
+            model = str((row[0] if row else "") or "")
     except sqlite3.Error:
         pass
     finally:

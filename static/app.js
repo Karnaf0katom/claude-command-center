@@ -5971,6 +5971,11 @@
         // Desktop / Next, a `devin` TUI, a sibling CCC) — queued sends
         // park until that client lets go, and the user should see why.
         devinExternalOwner: !!data.external_devin_owner,
+        // The session's actual model uid — for devincli sessions this is
+        // the applied ACP session config (e.g. "swe-2-high") or the DB's
+        // sessions.model slug ("fusion-...-sidekick-..."), not the family
+        // id the picker sent.
+        model: (typeof data.model === 'string' && data.model) || null,
         acpError: (typeof data.acp_error === 'string' && data.acp_error) || null,
         // Live "can a steer/send be attempted over devin acp" signal from
         // session-status — the open session's row is not always loaded in
@@ -32668,7 +32673,7 @@
       const dvLive = !!ls.live;
       const dvAcp = dvLive && ls.kind === 'acp';
       const dvBusy = dvAcp && ls.status === 'running';
-      setAll(pill0(dvLive, false,
+      let html = pill0(dvLive, false,
         dvAcp
           ? (dvBusy ? 'Devin ACP · working' : 'Devin ACP')
           : (dvLive ? 'headless · running' : 'headless'),
@@ -32679,7 +32684,20 @@
           : (dvLive
               ? 'A Devin process holds this session (one-shot `devin -p` or another host like Devin Desktop) - sends queue until it lets go.'
               : 'Devin CLI is idle - CCC resumes it when you send (there is no live terminal)'),
-        dvLive ? 'sys' : ''));
+        dvLive ? 'sys' : '');
+      // The session's actual model — the picker sends a family id (swe-2)
+      // and the wire resolves it to a concrete variant (swe-2-high) or a
+      // fusion-<lead>-sidekick-<sidekick> slug. Showing the concrete uid is
+      // the only way to tell what the turn is really running on.
+      const dvModel = (typeof ls.model === 'string' && ls.model) || '';
+      if (dvModel) {
+        const dvFusionMatch = /^fusion-.*-sidekick-(.+)$/.exec(dvModel);
+        html += pill0(true, false,
+          dvFusionMatch ? 'Fusion · ' + dvFusionMatch[1] : dvModel,
+          'Model this session is running' + (dvAcp ? ' (Devin ACP session config)' : '')
+          + ': ' + dvModel);
+      }
+      setAll(html);
       return;
     }
     const headOn = !!ls.headlessPresent;

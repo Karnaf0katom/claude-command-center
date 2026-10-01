@@ -656,7 +656,105 @@ def _devin_acp_try_steer(session_id, raw_id, cwd, text, *, mode="steer",
         return None
 
 
-def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None):
+def _devin_acp_select_option_values(option):
+    """Selectable values of one ACP session config option (select type)."""
+    values = []
+    if not isinstance(option, dict):
+        return values
+    for item in option.get("options") or option.get("values") or []:
+        if isinstance(item, dict):
+            value = item.get("value")
+        else:
+            value = item
+        if value:
+            values.append(str(value))
+    return values
+
+
+_DEVIN_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max", "minimal", "none"}
+
+
+def _devin_uid_effort_suffix(model_uid):
+    """Trailing effort level encoded in a Devin model uid, or ''.
+
+    ``swe-2-max`` -> "max", ``claude-opus-5-5-medium`` -> "medium";
+    bare family uids (``swe-2``) and unrelated suffixes return ''.
+    """
+    tokens = str(model_uid or "").strip().lower().split("-")
+    while tokens and tokens[-1] in ("fast", "priority"):
+        tokens.pop()
+    if tokens and tokens[-1] in _DEVIN_EFFORT_LEVELS:
+        return tokens[-1]
+    return ""
+
+
+def _devin_acp_model_config(model, config_options, reasoning_effort=None):
+    """Resolve a requested Devin model onto a session's ACP config options.
+
+    `devin acp` exposes ``model`` as a curated select — one concrete uid per
+    family (``swe-2-high``, never the bare family ``swe-2``) — and the effort
+    axis separately as ``thought_level``. Sending a family uid or a variant
+    the account's list does not offer (``swe-2-max`` when only
+    ``swe-2-high`` is listed) is rejected with -32602; callers must map the
+    request onto the offered values or the session silently keeps the
+    session/new default.
+
+    Returns {"model": uid, "thought_level": effort?} to apply, or None when
+    no member of the requested family is offered — the caller then aborts the
+    ACP spawn so the `devin -p` fallback (which honors catalog uids natively)
+    can take over instead of silently running the account default.
+    """
+    requested = str(model or "").strip()
+    if not requested:
+        return None
+    options_by_id = {
+        str(o.get("id")): o
+        for o in (config_options or [])
+        if isinstance(o, dict) and o.get("id")
+    }
+    model_option = options_by_id.get("model")
+    if model_option is None:
+        # The session never advertised a model select (older agent build) —
+        # send the request verbatim; the wire's own validation answers and
+        # the caller surfaces a rejection instead of swallowing it.
+        return {"model": requested}
+    values = _devin_acp_select_option_values(model_option)
+    if not values:
+        return None
+    target = requested if requested in values else None
+    effort = str(reasoning_effort or "").strip().lower()
+    if not effort:
+        effort = _devin_uid_effort_suffix(requested)
+    if target is None:
+        # Map family uids and unlisted variants onto the family's member in
+        # the offered list (the wire exposes at most one uid per family).
+        try:
+            data = _core._devin_model_list_json() or {}
+        except Exception:
+            data = {}
+        uid_to_family = data.get("uid_to_family") or {}
+        family_to_uids = data.get("family_to_uids") or {}
+        family = uid_to_family.get(requested.lower())
+        if not family and requested in family_to_uids:
+            family = requested
+        if not family:
+            return None
+        members = [v for v in values if uid_to_family.get(v.lower()) == family]
+        if not members:
+            return None
+        # Prefer the member whose own suffix matches the wanted effort.
+        target = next(
+            (v for v in members if _devin_uid_effort_suffix(v) == effort),
+            members[0],
+        )
+    pairs = {"model": target}
+    if effort and options_by_id.get("thought_level") is not None:
+        pairs["thought_level"] = effort
+    return pairs
+
+
+def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None,
+                                 reasoning_effort=None):
     """Spawn a new Devin session through `devin acp` session/new.
 
     This is the same path Devin Desktop uses: the sessionId arrives in-band
@@ -667,8 +765,11 @@ def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None):
 
     ``permission_mode`` maps the one-shot CLI flag onto the ACP session
     mode: ``dangerous`` (CCC's devin-spawn default) is Bypass Permissions.
-    Config/mode failures degrade gracefully — the session keeps its
-    session/new defaults rather than aborting a spawn that already exists.
+    Mode/effort failures degrade gracefully (note recorded in ``notes``);
+    a ``model`` the session's config cannot honor is a hard failure with no
+    session_id so the caller falls back to `devin -p` — silently running the
+    session/new default (Fusion on some accounts) is the failure this
+    boundary exists to prevent.
     """
     if not prompt:
         return {"ok": False, "error": "empty prompt"}
@@ -679,6 +780,7 @@ def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None):
     if not created.get("ok"):
         return created
     raw_id = created["session_id"]
+    notes = []
     mode_map = {
         "dangerous": "bypass", "bypass": "bypass", "ask": "ask",
         "plan": "plan", "smart": "smart", "accept-edits": "accept-edits",
@@ -686,15 +788,42 @@ def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None):
     }
     target_mode = mode_map.get(str(permission_mode or "").strip().lower())
     if target_mode:
-        try:
-            _core._acp_set_config("devin", raw_id, "mode", target_mode)
-        except Exception:
-            pass
+        resp = _core._acp_set_config("devin", raw_id, "mode", target_mode)
+        if not resp.get("ok"):
+            notes.append(
+                "mode '%s' not applied: %s"
+                % (target_mode, resp.get("error") or "set_config_option failed")
+            )
+    applied_model = ""
     if model:
-        try:
-            _core._acp_set_config("devin", raw_id, "model", model)
-        except Exception:
-            pass
+        pairs = _devin_acp_model_config(
+            model, created.get("config_options"), reasoning_effort,
+        )
+        if not pairs:
+            return {
+                "ok": False, "code": "model_unavailable",
+                "error": (
+                    "model '%s' is not offered by this account's Devin ACP "
+                    "session config" % model
+                ),
+            }
+        for config_id, value in pairs.items():
+            resp = _core._acp_set_config("devin", raw_id, config_id, value)
+            if resp.get("ok"):
+                continue
+            if config_id == "model":
+                return {
+                    "ok": False, "code": "model_rejected",
+                    "error": (
+                        "Devin ACP rejected model '%s': %s"
+                        % (value, resp.get("error") or "set_config_option failed")
+                    ),
+                }
+            notes.append(
+                "%s '%s' not applied: %s"
+                % (config_id, value, resp.get("error") or "set_config_option failed")
+            )
+        applied_model = pairs["model"]
     sent = _core._acp_prompt("devin", raw_id, prompt, mode="send")
     if not sent.get("ok"):
         # The session exists and is attached — report it so the caller can
@@ -703,8 +832,12 @@ def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None):
             "ok": False, "session_id": raw_id, "session_created": True,
             "error": sent.get("error") or "initial prompt failed",
             "code": sent.get("code"),
+            "applied_model": applied_model, "notes": notes,
         }
-    return {"ok": True, "session_id": raw_id, "req_id": sent.get("req_id")}
+    return {
+        "ok": True, "session_id": raw_id, "req_id": sent.get("req_id"),
+        "applied_model": applied_model, "notes": notes,
+    }
 
 
 _grok_external_writer_cache = {}
@@ -956,6 +1089,12 @@ def _acp_request(harness, method, params=None, timeout=20, sid=None):
     if isinstance(error, dict):
         code = error.get("code")
         out = {"ok": False, "error": error.get("message") or f"ACP error {code}", "code": code}
+        # Servers that put the real reason in `data` (devin returns
+        # -32602 "Invalid params" + data "Invalid value 'x' for config
+        # option 'model'") — surface it or every rejection reads alike.
+        detail = error.get("data")
+        if isinstance(detail, str) and detail and detail not in out["error"]:
+            out["error"] = f"{out['error']}: {detail}"
         _cfg = _core._ACP_HARNESSES.get(harness) or {}
         # -32000 is JSON-RPC's generic server-error code. For auth_lazy
         # harnesses an auth demand opens a browser tab, so only honour it

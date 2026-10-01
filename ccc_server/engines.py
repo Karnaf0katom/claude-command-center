@@ -3061,15 +3061,26 @@ def spawn_session_devin(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
             permission_mode=os.environ.get(
                 "CCC_DEVIN_PERMISSION_MODE", "dangerous"
             ),
+            reasoning_effort=reasoning_effort,
         )
     except Exception as exc:
         acp_spawn = {"ok": False, "error": f"devin acp spawn error: {exc}"}
     if isinstance(acp_spawn, dict) and acp_spawn.get("session_id"):
         raw_id = acp_spawn["session_id"]
+        # The uid ACP actually applied (a family request resolves to the
+        # family's offered member, e.g. swe-2 -> swe-2-high); fall back to
+        # the requested uid when no config was applied.
+        applied_model = acp_spawn.get("applied_model") or model_to_use or ""
         with open(log_path, "w") as spawn_log:
             spawn_log.write(
                 f"devin acp session/new -> {raw_id} (cwd={spawn_cwd})\n"
             )
+            if applied_model and applied_model != model_to_use:
+                spawn_log.write(
+                    f"model '{model_to_use}' applied as '{applied_model}'\n"
+                )
+            for note in acp_spawn.get("notes") or []:
+                spawn_log.write(f"config note: {note}\n")
             if not acp_spawn.get("ok"):
                 spawn_log.write(
                     f"initial prompt failed: {acp_spawn.get('error')}\n"
@@ -3084,7 +3095,7 @@ def spawn_session_devin(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
             "engine": "devin",
             "cwd": spawn_cwd,
             "repo_path": repo_for_logs,
-            "model": model_to_use or "",
+            "model": applied_model,
             "reasoning_effort": reasoning_effort or "",
             "parent_session_id": parent_session_id or "",
             "via": "devin-acp",
@@ -3102,7 +3113,7 @@ def spawn_session_devin(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
             pid=entry["spawn_id"], name=session_name, log_path=log_path,
             cwd=spawn_cwd, spawned_at=timestamp, command_summary=prompt[:200],
             fifo=None, engine="devin", session_id=entry["session_id"],
-            repo_path=repo_for_logs, model=model_to_use,
+            repo_path=repo_for_logs, model=applied_model,
             parent_session_id=parent_session_id,
             reasoning_effort=reasoning_effort or "",
         )

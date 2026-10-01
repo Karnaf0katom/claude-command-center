@@ -22983,7 +22983,18 @@ def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
         elif _is_hermes_session(conversation_id):
             return _hermes_session_cache_key(conversation_id)
         elif _is_devin_cli_session(conversation_id):
-            return _devin_cli_cache_key()
+            # Composite key: the sessions DB AND the session's CCC ACP
+            # transcript. Turn-result rows (quota errors, end_turn) are
+            # appended to the transcript without a DB write, so a
+            # DB-only key would never see them land.
+            db_key = _devin_cli_cache_key()
+            try:
+                st = _acp_transcript_path(
+                    "devin", _devin_cli_raw_id(conversation_id)
+                ).stat()
+                return (db_key[0], db_key[1], st.st_mtime_ns, st.st_size)
+            except OSError:
+                return (db_key[0], db_key[1], 0, 0)
         elif _is_grok_session(conversation_id):
             resolved = _grok_conversation_source(conversation_id)
             if not resolved.exists() or resolved.stat().st_size == 0:
@@ -37380,7 +37391,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             last_key = None
             try:
                 while True:
-                    cur_key = _devin_cli_cache_key()
+                    # Composite DB+ACP-transcript key — a turn result written
+                    # only to the transcript (quota error, cancel) must still
+                    # wake the loop and re-push.
+                    cur_key = _conv_parse_jsonl_mtime(conversation_id)
                     if cur_key != last_key:
                         last_key = cur_key
                         sse_start = time.perf_counter()

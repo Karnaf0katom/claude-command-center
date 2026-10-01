@@ -3,13 +3,14 @@
 import importlib
 import json
 import os
+import pathlib
 import shutil
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest import mock
 
 
@@ -1885,6 +1886,148 @@ class DevinCompactorSummaryTests(unittest.TestCase):
         self.assertEqual(usage["model"], "swarm-1")
         # The compactor's tokens are still real spend — totals include them.
         self.assertEqual(usage["total_output_tokens"], 5000)
+
+
+class DevinCliAcpTranscriptMergeTests(unittest.TestCase):
+    """`devin acp` writes user/assistant/tool content into sessions.db but
+    a turn's terminal `result` row (quota error, cancel, end_turn) only
+    lands on CCC's own ACP transcript. `_parse_devin_cli_conversation`
+    must splice those rows in — negated line ids, timestamp order — or a
+    failed turn renders nothing and the pane stays stuck in Thinking."""
+
+    SCHEMA = DevinCompactorSummaryTests.SCHEMA
+
+    def _msg(self, role, content, **meta):
+        return json.dumps({"role": role, "content": content, "metadata": meta})
+
+    def _write_transcript(self, raw_id, events):
+        path = self.server._acp_transcript_path("devin", raw_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+
+    def setUp(self):
+        self.server = importlib.import_module("server")
+        self.devin_mod = importlib.import_module("ccc_server.devin")
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        self.db_path = os.path.join(self.tmpdir, "sessions.db")
+        self.transcript_dir = pathlib.Path(self.tmpdir) / "acp"
+        now = int(time.time() * 1000)
+        con = sqlite3.connect(self.db_path)
+        con.executescript(self.SCHEMA)
+        con.execute(
+            "INSERT INTO sessions VALUES (?, ?, '', ?, '', ?, ?, NULL, NULL)",
+            ("merge-test", "/tmp/ccc", "swe-2-high", now, now),
+        )
+        con.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            ("merge-test", 1, self._msg("user", "hello devin",
+                                       is_user_input=True), now),
+        )
+        con.commit()
+        con.close()
+
+        env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "CCC_DEVIN_DB": self.db_path,
+                "CCC_DEVIN_NEXT_DB": os.path.join(self.tmpdir, "next-sessions.db"),
+            },
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        for p in (
+            mock.patch.object(self.devin_mod, "_DEVIN_CLI_PARSE_CACHE", {}),
+            mock.patch.object(self.devin_mod, "_DEVIN_CLI_LIST_CACHE", {}),
+            mock.patch.object(self.devin_mod, "_DEVIN_CLI_ID_CACHE", {}),
+            mock.patch.object(self.devin_mod, "_DEVIN_CLI_ROW_MEMO", {}),
+            mock.patch.object(self.devin_mod, "_DEVIN_CLI_ROW_MEMO_LOADED", False),
+            mock.patch.object(
+                self.devin_mod,
+                "_devin_cli_row_memo_path",
+                lambda: self.devin_mod.Path(os.path.join(self.tmpdir, "row_memo.json")),
+            ),
+            mock.patch.object(
+                self.devin_mod, "_DEVIN_CLI_ROW_MEMO_BG", {"pending": {}, "thread": None}
+            ),
+            mock.patch.object(self.server, "_spawned_sessions", []),
+            mock.patch.object(
+                self.server, "_ACP_TRANSCRIPT_DIR", self.transcript_dir
+            ),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.devin_mod._devin_cli_row_memo_background_join, 10)
+
+    def test_acp_error_result_splices_into_db_events(self):
+        later = datetime.fromtimestamp(
+            time.time() + 60, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        self._write_transcript("merge-test", [
+            {"type": "user_text", "text": "hello devin", "line": 1,
+             "ts": later},
+            {"type": "result", "subtype": "error",
+             "error": "Your daily usage quota has been exhausted",
+             "line": 2, "ts": later},
+        ])
+        parsed = self.server._parse_devin_cli_conversation("devincli-merge-test")
+        events = parsed["events"]
+        result = next(e for e in events if e.get("type") == "result")
+        self.assertEqual(result["subtype"], "error")
+        self.assertEqual(
+            result["error"], "Your daily usage quota has been exhausted")
+        # Negative, stable, collision-free — never overlaps a DB line.
+        self.assertLess(result["line"], 0)
+        self.assertEqual(result["line"], -2)
+        # Spliced after the DB-derived user row by timestamp.
+        self.assertEqual(events[-1], result)
+
+    def test_acp_result_survives_incremental_parse(self):
+        """An incremental poll (after_line past every DB row) must still
+        surface a transcript result that arrived without any DB write."""
+        later = datetime.fromtimestamp(
+            time.time() + 60, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        self._write_transcript("merge-test", [
+            {"type": "result", "subtype": "error", "error": "cancelled",
+             "line": 1, "ts": later},
+        ])
+        parsed = self.server._parse_devin_cli_conversation(
+            "devincli-merge-test", after_line=99)
+        events = parsed["events"]
+        self.assertEqual([e["type"] for e in events], ["result"])
+        self.assertEqual(events[0]["line"], -1)
+
+    def test_parse_cache_key_tracks_the_transcript(self):
+        conv = "devincli-merge-test"
+        key_no_tr = self.server._conv_parse_jsonl_mtime(conv)
+        self.assertEqual(len(key_no_tr), 4)
+        self.assertEqual(key_no_tr[2:], (0, 0))
+        later = datetime.fromtimestamp(
+            time.time() + 60, tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        self._write_transcript("merge-test", [
+            {"type": "result", "subtype": "success", "line": 1,
+             "ts": later},
+        ])
+        key_tr = self.server._conv_parse_jsonl_mtime(conv)
+        self.assertNotEqual(key_tr, key_no_tr)
+        size = self.server._acp_transcript_path(
+            "devin", "merge-test").stat().st_size
+        self.assertEqual(key_tr[3], size)
+
+    def test_session_model_falls_back_to_sessions_row(self):
+        """No assistant row has reported generation_model yet — the
+        sessions.model slug (e.g. the concrete variant ACP applied) is
+        still the session's real model."""
+        self.assertEqual(
+            self.devin_mod._devin_cli_session_model("merge-test"),
+            "swe-2-high")
+        usage = self.devin_mod._extract_devin_cli_usage("devincli-merge-test")
+        self.assertEqual(usage["model"], "swe-2-high")
 
 
 class DevinCliFusionLaneTests(unittest.TestCase):

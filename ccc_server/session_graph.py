@@ -3420,6 +3420,7 @@ def session_live_status(session_id, session_cwd):
             result["live"] = True
             result["kind"] = "headless"
             result["match_count"] = 1
+            result["model"] = _core._devin_cli_session_model(raw_id)
             return result
         # No live spawn entry — check the lock file (CLI may have been
         # started outside CCC).
@@ -3438,7 +3439,9 @@ def session_live_status(session_id, session_cwd):
                     "running" if snap.get("status") == "active" else "idle"
                 )
                 result["cwd"] = snap.get("cwd") or result["cwd"]
-                result["model"] = snap.get("model")
+                result["model"] = (
+                    snap.get("model") or _core._devin_cli_session_model(raw_id)
+                )
                 result["acp_pending_permission"] = snap.get("pending_permission")
                 if snap.get("pending_permissions"):
                     result["needs_approval"] = True
@@ -3449,6 +3452,7 @@ def session_live_status(session_id, session_cwd):
                 # sibling CCC) owns the writer slot — a send can only queue
                 # until that client lets go, so the UI should say why.
                 result["external_devin_owner"] = True
+                result["model"] = _core._devin_cli_session_model(raw_id)
             return result
         # Dormant session — no live process anywhere. Same ACP contract as
         # kimi/grok: "live" means the shared `devin acp` conn can attach and
@@ -3466,7 +3470,9 @@ def session_live_status(session_id, session_cwd):
                 or _core._devin_cli_session_cwd(raw_id)
                 or session_cwd
             )
-            result["model"] = snap.get("model")
+            result["model"] = (
+                snap.get("model") or _core._devin_cli_session_model(raw_id)
+            )
             result["acp_pending_permission"] = snap.get("pending_permission")
             if snap.get("pending_permissions"):
                 result["needs_approval"] = True
