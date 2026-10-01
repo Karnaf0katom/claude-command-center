@@ -67,8 +67,6 @@ def find_codex_conversations(
     resolve_worktree_dirty=True,
 ):
     rows = _core._codex_fetch_threads(limit=limit)
-    if not rows:
-        return []
     if repo_only:
         repo_path = _core.resolve_repo_path(repo_path)
         repo_path_obj = Path(repo_path)
@@ -96,6 +94,8 @@ def find_codex_conversations(
     cutoff = _core._session_scan_cutoff_ts(include_old)
     max_rows = _core._session_scan_file_limit(include_old)
     spawn_by_sid = _core._codex_spawn_pid_by_thread_id()
+    rows = list(rows or [])
+    rows.extend(_core._codex_capture_rows(rows, spawn_by_sid, repo_path if repo_only else None))
     # One read of the spawn-edge table for the whole scan; per-row lookups are
     # O(1) dict hits (perf gate: no per-row DB work). Lets a spawned agent nest
     # under its parent in the Current-sessions tree. (CCC-298)
@@ -123,7 +123,8 @@ def find_codex_conversations(
                 pinned_repo = True
             elif not _core._codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
                 continue
-        path = _core._codex_rollout_path_from_row(row)
+        capture = row.get("_ccc_capture")
+        path = Path(capture) if capture else _core._codex_rollout_path_from_row(row)
         if not path or not path.is_file():
             continue
         scanned += 1
@@ -131,7 +132,7 @@ def find_codex_conversations(
             st = path.stat()
         except OSError:
             continue
-        tail = _core._extract_codex_tail_meta(path) or {}
+        tail = (_core._codex_capture_tail(sid, path) if capture else _core._extract_codex_tail_meta(path)) or {}
         cwd = tail.get("cwd") or cwd
         modified = (
             tail.get("last_meaningful_ts")

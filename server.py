@@ -22806,6 +22806,10 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
             if exec_log:
                 return exec_log, _parse_codex_exec_log_event
         return codex_path, _parse_codex_event
+    capture_row = _codex_capture_thread_row(conversation_id) or {}
+    capture = capture_row.get("_ccc_capture")
+    if capture and _codex_capture_header_id(capture) == conversation_id:
+        return Path(capture), _parse_codex_exec_log_event
     cursor_path = _cursor_transcript_path(conversation_id)
     if cursor_path and cursor_path.is_file():
         return cursor_path, _parse_cursor_event
@@ -37674,8 +37678,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         last_keepalive = time.time()
         try:
             while True:
-                native = Path(filepath).stat()
-                if _codex_native_recovery_metadata(filepath) is None:
+                native_path = filepath or _resolve_codex_rollout_path(conversation_id)
+                native = Path(native_path).stat() if native_path else None
+                if native_path and _codex_native_recovery_metadata(native_path) is None:
                     # Native and recovered sources have different line
                     # offsets. Reload the pane rather than append duplicates.
                     self.wfile.write(b"event: source_reset\ndata: {}\n\n")
@@ -37683,8 +37688,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     return
                 # A resume writes a new per-turn log. Rediscover before
                 # fingerprinting so an unchanged old capture cannot hide it.
-                recovered = _codex_recover_log_conversation(conversation_id, filepath)
-                key = (native.st_mtime_ns, native.st_size,
+                recovered = _codex_recover_log_conversation(conversation_id, native_path)
+                key = (native.st_mtime_ns if native else 0, native.st_size if native else 0,
                        _codex_capture_fingerprint(conversation_id))
                 if key != last_key:
                     last_key = key

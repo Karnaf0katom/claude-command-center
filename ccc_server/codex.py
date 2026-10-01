@@ -8632,7 +8632,7 @@ def _find_ccc_spawn_log_for_thread(thread_id, repo_path):
 
 
 def _is_codex_session(session_id):
-    return bool(_core._codex_thread_row(session_id))
+    return bool(_core._codex_thread_row(session_id) or _core._codex_capture_thread_row(session_id))
 
 
 _KIMI_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -9339,7 +9339,13 @@ def _codex_logs_for_session(session_id):
     if not session_id:
         return []
     repo_paths = []
-    row = _core._codex_thread_row(session_id) or {}
+    row = _core._codex_thread_row(session_id) or _core._codex_capture_thread_row(session_id) or {}
+    capture = row.get("_ccc_capture")
+    if capture and _core._codex_capture_header_id(capture) == session_id:
+        try:
+            return [(Path(capture).stat().st_mtime, capture)]
+        except OSError:
+            return []
     cwd = row.get("cwd") or ""
     if cwd:
         try:
