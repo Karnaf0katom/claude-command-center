@@ -5958,7 +5958,9 @@ def _codex_app_server_thread_start_params(cwd=None, model=None):
     params = {
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
-        "threadSource": "ccc",
+        # Desktop's project sidebar lists user threads. CCC provenance is
+        # tracked separately in our spawn/thread registries.
+        "threadSource": "user",
         "sessionStartSource": "startup",
         "ephemeral": False,
     }
@@ -7643,6 +7645,9 @@ def _mark_codex_rollout_user_visible(thread_id, rollout_path):
         thread_source = payload.get("thread_source")
         if source and source not in ("exec", "cli", "vscode"):
             return False
+        # Older CCC app-server threads may still have an open rollout writer,
+        # even while idle. Replacing its inode would strand later writes.
+        # Repair their SQLite sidebar marker only; leave the rollout intact.
         if thread_source and thread_source != "user":
             return False
         if source != "vscode":
@@ -7701,12 +7706,13 @@ def _restore_codex_rollout_mtime_from_row(row):
 
 
 def _mark_codex_thread_user_visible(thread_id, update_rollout=True):
-    """Mark a CCC-created Codex exec thread as visible in Codex.app.
+    """Mark a CCC-created Codex thread as visible in Codex Desktop.
 
     Codex Desktop starts sidebar-visible threads with `thread_source='user'`.
     Its sidebar also treats IDE-originated rows as `source='vscode'`; plain
     `codex exec` rows can otherwise stay hidden. Codex can rebuild SQLite from
-    the rollout JSONL, so we patch the rollout metadata when it is safe too.
+    the rollout JSONL, so we patch legacy exec metadata too. CCC-tagged
+    app-server rollouts are left intact because their writer may remain open.
     """
     sid = str(thread_id or "").strip()
     if not sid:
@@ -7735,7 +7741,7 @@ def _mark_codex_thread_user_visible(thread_id, update_rollout=True):
             values_by_col = dict(zip(selected, row))
             current = values_by_col.get("thread_source")
             source = values_by_col.get("source", "vscode")
-            if current and current != "user":
+            if current and current not in ("user", "ccc"):
                 return False
             if source and source not in ("exec", "cli", "vscode"):
                 return False
@@ -9450,12 +9456,12 @@ def _codex_sidebar_project_roots_from_values(repo_paths):
 
 
 def _codex_backfill_candidate_rows(days=None, repo_paths=None, now=None, limit=1000):
-    """Recent Codex exec/cli rows that can be made sidebar-visible.
+    """Recent Codex exec/cli or CCC-tagged rows needing sidebar visibility.
 
     This complements CCC spawn logs: the Codex DB is the durable index, while
     old CCC logs/registry entries can be pruned or missed. Keep the candidate
-    set narrow so we only rewrite rows that Codex itself classifies as
-    non-interactive and otherwise user-owned.
+    set narrow so we only rewrite non-interactive user-owned rows or roots
+    explicitly marked by CCC's older app-server spawn path.
     """
     if days is None:
         days = _codex_sidebar_backfill_window_days()
@@ -9477,9 +9483,11 @@ def _codex_backfill_candidate_rows(days=None, repo_paths=None, now=None, limit=1
     for row in _core._codex_fetch_threads(limit=limit):
         source = row.get("source")
         thread_source = row.get("thread_source")
-        if source not in ("exec", "cli"):
+        if source not in ("exec", "cli") and not (
+            source == "vscode" and thread_source == "ccc"
+        ):
             continue
-        if thread_source and thread_source != "user":
+        if thread_source and thread_source not in ("user", "ccc"):
             continue
         ts = _core._codex_ts_seconds(row, "updated") or _core._codex_ts_seconds(row, "created")
         if ts and ts < cutoff:
