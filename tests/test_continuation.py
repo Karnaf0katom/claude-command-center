@@ -84,6 +84,22 @@ def test_session_context_not_found(monkeypatch):
     assert continuation.session_context("nope") is None
 
 
+def test_capture_only_continuation_dry_run_uses_capture(monkeypatch, tmp_path):
+    capture = tmp_path / "spawn-codex-example.log"
+    capture.write_text('{"type":"turn.completed"}\n')
+    monkeypatch.setattr(continuation, "_brief", lambda q: _brief_dict(q, engine="codex"))
+    monkeypatch.setattr(continuation, "_transcript_path", lambda c, sid: str(capture))
+    monkeypatch.setattr(continuation._usage_limit, "_usage_limit_row_for_session", lambda *a, **k: {})
+    monkeypatch.setattr(continuation._usage_limit, "_usage_limit_context_tokens", lambda *a: 0)
+    monkeypatch.setattr(server, "_codex_capture_thread_row", lambda sid: {"_ccc_capture": str(capture)})
+    monkeypatch.setattr(server, "_codex_thread_row", lambda sid: None)
+    monkeypatch.setattr(server, "_resolve_codex_rollout_path", lambda sid: None)
+    result = continuation.spawn_continuation("capture-sid", prompt="finish it", dry_run=True)
+    assert "CCC capture log" in result["prompt"]
+    assert str(capture) in result["prompt"]
+    assert "find ~/.codex/sessions" not in result["prompt"]
+
+
 def test_session_context_basic_fields(monkeypatch):
     briefs = {"abc": _brief_dict("abc", title="Migrate the DB", cwd="/repo/x")}
     row = {"mtime": 1000.0, "model": "opus-5", "reasoning_effort": "high",

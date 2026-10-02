@@ -600,7 +600,8 @@ def build_codex_session_diagnostics(session_id):
     }
 
     try:
-        proc = _log_facts(entry.get("log"), alive, now)
+        log_path = entry.get("log") or storage["capture_log"].get("path")
+        proc = _log_facts(log_path, alive, now)
         proc["pid"] = entry.get("pid")
         proc["alive"] = alive
     except Exception:

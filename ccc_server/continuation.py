@@ -133,6 +133,13 @@ def session_context(query):
     conn = _sg._get_connection()
     path = _transcript_path(conn, latest)
     engine = info.get("engine") or "claude"
+    capture_path = None
+    if engine == "codex" and not _core._codex_thread_row(latest) \
+            and not _core._resolve_codex_rollout_path(latest):
+        capture = _core._codex_capture_thread_row(latest) or {}
+        capture_path = capture.get("_ccc_capture")
+        if capture_path:
+            path = capture_path
     row = _usage_limit._usage_limit_row_for_session(latest, engine=engine) or {}
     context_tokens = _usage_limit._usage_limit_context_tokens(engine, path, row)
     mtime = row.get("mtime")
@@ -146,6 +153,7 @@ def session_context(query):
         "repo": info.get("repo") or "",
         "engine": engine,
         "transcript_path": path,
+        "capture_path": capture_path,
         "context_tokens": context_tokens,
         "idle_seconds": idle_seconds,
         "model": row.get("model") or None,
@@ -161,6 +169,7 @@ def build_continuation_prompt(user_prompt, ctx):
     wording with each other."""
     block, _label = _usage_limit.continuation_retrieval_block(
         ctx["engine"], ctx["latest"], ctx["context_tokens"],
+        capture_path=ctx.get("capture_path"),
     )
     title = ctx["title"] or ctx["latest"]
     preamble = (

@@ -167,6 +167,9 @@ class EphemeralSessionTests(unittest.TestCase):
         self.assertEqual(kwargs['parent_session_id'], 'capture-thread')
         prompt = spawn.call_args[0][0]
         self.assertIn('Origin session id: capture-thread', prompt)
+        self.assertIn(str(self.log), prompt)
+        self.assertIn('CCC capture log', prompt)
+        self.assertNotIn('find ~/.codex/sessions', prompt)
         self.assertIn('is it fixed now', prompt)
         fwd.assert_called_once_with('capture-thread', 'new-thread')
 

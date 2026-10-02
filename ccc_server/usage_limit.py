@@ -471,7 +471,7 @@ def _usage_limit_attach_continuation_fields(found, session_id, path):
     return found
 
 
-def continuation_retrieval_block(engine, sid, context_tokens=0):
+def continuation_retrieval_block(engine, sid, context_tokens=0, *, capture_path=None):
     """Shared "Origin session id + how to pull context selectively" block for
     every continuation-spawn path: the F2 "Continue in a new session" button
     (JS port below), unattended usage-limit auto-resume
@@ -483,6 +483,12 @@ def continuation_retrieval_block(engine, sid, context_tokens=0):
     label, note, cmd_fn = _USAGE_LIMIT_ENGINE_LOCATE.get(
         engine, _USAGE_LIMIT_ENGINE_LOCATE["claude"]
     )
+    if engine == "codex" and capture_path:
+        note = (
+            "This session has no native Codex rollout. Its transcript is the "
+            "CCC capture log at:"
+        )
+        cmd_fn = lambda _sid: f"  {capture_path}"
     size_note = (
         f" (it is ~{context_tokens / 1000:.0f}k tokens)"
         if context_tokens and context_tokens >= 1000

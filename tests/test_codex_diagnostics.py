@@ -114,6 +114,21 @@ class CodexDiagnosticsTests(unittest.TestCase):
         self.assertEqual(diag['verdict']['state'], 'completed')
         self.assertEqual(diag['process']['turn_outcome'], 'completed')
 
+    def test_completed_capture_without_spawn_registry(self):
+        self.log.write_text(json.dumps({'type': 'turn.completed'}) + '\n')
+        self._patch('_codex_capture_thread_row', return_value={'_ccc_capture': str(self.log)})
+        diag = server.build_codex_session_diagnostics(SID)
+        self.assertEqual(diag['process']['log_path'], str(self.log))
+        self.assertEqual(diag['verdict']['state'], 'completed')
+        self.assertEqual(diag['verdict']['severity'], 'ok')
+
+    def test_failed_capture_without_spawn_registry(self):
+        self.log.write_text(json.dumps({'type': 'turn.failed', 'error': {'message': 'Run failed'}}) + '\n')
+        self._patch('_codex_capture_thread_row', return_value={'_ccc_capture': str(self.log)})
+        diag = server.build_codex_session_diagnostics(SID)
+        self.assertEqual(diag['verdict']['state'], 'failed')
+        self.assertEqual(diag['verdict']['detail'], 'Run failed')
+
     def test_native_thread_desktop_writing(self):
         rollout = self.repo / 'rollout-2026-10-01.jsonl'
         rollout.write_text('{}\n')

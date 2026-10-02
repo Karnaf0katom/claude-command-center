@@ -2139,6 +2139,7 @@ def _codex_spawn_ephemeral_continuation(
         "latest": session_id,
         "title": capture_row.get("title") or "",
         "transcript_path": capture_row.get("_ccc_capture") or "",
+        "capture_path": capture_row.get("_ccc_capture") or "",
         "context_tokens": 0,
     }
     prompt = _continuation.build_continuation_prompt(text, ctx)
