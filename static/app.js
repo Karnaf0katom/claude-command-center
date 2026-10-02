@@ -38519,6 +38519,13 @@
     _parkSharedQueuePanelForSidebarRender();
     $convList.innerHTML = _convListHtml;
     _convListRenderVersion++;
+    // Re-apply decorator overlays in the SAME task, before the first paint of
+    // the rebuilt list. Their MutationObserver fallbacks defer via rAF, which
+    // lands one frame late when this rebuild itself ran inside a rAF (the
+    // _scheduleSidebarRender path) — painting an undecorated frame every tick
+    // (missing orch border/lanes chip, missing Other machines section).
+    try { if (typeof orchApplyFamilyRows === 'function') orchApplyFamilyRows(); } catch (_) {}
+    try { if (window.cccFederatedSidebar && window.cccFederatedSidebar.render) window.cccFederatedSidebar.render(); } catch (_) {}
     _updateConvTabBarHeightVar($convList);
     _mountSharedQueuePanel();
     // Jobs tab: refill the fresh host from cached data (no flicker, no fetch).
