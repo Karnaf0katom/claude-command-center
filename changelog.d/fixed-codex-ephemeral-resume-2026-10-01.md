@@ -1,1 +1,0 @@
-- Sending to a Codex session that ran via the ephemeral exec fallback no longer fails with "repo_required"; CCC now continues it in a new Codex session in the same folder.

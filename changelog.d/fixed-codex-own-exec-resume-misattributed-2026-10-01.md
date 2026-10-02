@@ -1,1 +1,0 @@
-- Codex diagnostics and send-queueing no longer mistake CCC's own fallback `codex exec resume` run for "another app driving this thread"; the spawn registry also no longer drops Codex children launched through the npm `node` wrapper.

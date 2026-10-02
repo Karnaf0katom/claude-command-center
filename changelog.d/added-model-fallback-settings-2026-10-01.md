@@ -1,1 +1,0 @@
-Configure quota fallback in Settings → Engines: enable it by default, choose ordered provider models and effort, map fast/standard/deep capability profiles, and override individual queues with On, Off, or Use machine default. Active runs and stored queue pins are preserved.

@@ -1,1 +1,0 @@
-Sessions now show a live WIP timer while a turn is running: a "12s / 3m 4s" chip next to the Working signal in the sidebar row, and "Working · Ns" on the Codex state pill. Timed from the real turn start (Codex turn/started, ACP turn tracking, or a Claude in-flight tool's start); waiting-on-you states never get a timer.

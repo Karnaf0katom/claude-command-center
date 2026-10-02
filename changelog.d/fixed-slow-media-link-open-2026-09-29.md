@@ -1,1 +1,0 @@
-- Clicking an image, PDF or video link in a conversation no longer stalls for seconds while the server rescans every project folder to find known repos.

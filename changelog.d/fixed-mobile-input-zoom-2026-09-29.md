@@ -1,1 +1,0 @@
-- Tapping Search (or any other text field) on a phone no longer zooms the page in with no way back out.

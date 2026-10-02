@@ -1,1 +1,0 @@
-- The queue activity log reads faster: each row's plain-language statement is bold, machine key=value fields sit on a dimmer line below, and rows without a worker no longer leave an empty gap before the text.

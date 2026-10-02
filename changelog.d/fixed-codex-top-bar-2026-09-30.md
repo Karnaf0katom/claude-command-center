@@ -1,1 +1,0 @@
-- The conversation top bar now shows the original ask for Codex and worker sessions whose recent history has no user message, instead of disappearing.

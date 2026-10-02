@@ -1,1 +1,0 @@
-- The session list no longer paints a bare frame after each periodic rebuild: orchestration borders/lane chips and the "Other machines" section are re-applied synchronously instead of one frame late.

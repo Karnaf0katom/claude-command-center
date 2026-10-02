@@ -1,1 +1,0 @@
-- WatchTower tickets waiting on a review gate (`in_review`) now appear in the queue panel and the q2 board with who they wait on. Reviews for you show up as Decision Inbox cards with Accept and Reject, and the ticket detail has the same buttons. Queue counts treat these tickets as not closed.

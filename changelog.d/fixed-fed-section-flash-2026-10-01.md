@@ -1,1 +1,0 @@
-- The "Other machines" sidebar section no longer flashes in for a split second when the shared sidebar-tab key changes under another window or mid-correction - it now follows the tab actually rendered in the list.

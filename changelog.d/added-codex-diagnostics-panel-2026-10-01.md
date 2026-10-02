@@ -1,1 +1,0 @@
-- Metadata tab now shows a Codex diagnostics panel: what state the session is in, whether CCC is driving it via the app-server or a one-shot `codex exec` fallback (and why it fell back), whether the run is ephemeral/invisible to Codex desktop, and whether Codex desktop is competing for the thread.

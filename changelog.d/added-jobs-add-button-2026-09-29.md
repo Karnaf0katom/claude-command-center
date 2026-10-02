@@ -1,1 +1,0 @@
-- Jobs tab: a "+ Add" button opens a short form (host, folder, what, when) and starts an agent session that creates the scheduled job and checks it appears in the list.

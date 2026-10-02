@@ -1,1 +1,0 @@
-- Long ticket titles in the Workers tab's WORKING NOW rows now wrap (up to three lines) instead of spilling past the card.

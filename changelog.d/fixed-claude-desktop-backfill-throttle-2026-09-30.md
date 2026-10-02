@@ -1,1 +1,0 @@
-- Restarting CCC no longer re-runs the full Claude Desktop sidebar sweep every time: it runs at most once every 12 hours (new sessions still appear right away), removing a several-second CPU burst after each restart.

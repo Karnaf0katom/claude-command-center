@@ -1,1 +1,0 @@
-- Codex sessions spawned by CCC now use the desktop sidebar's user-thread marker; the bounded startup repair also fixes older CCC-marked sessions while preserving their IDs and conversation history.

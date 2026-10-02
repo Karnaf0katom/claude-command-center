@@ -1,1 +1,0 @@
-- On phones, the ticket details view no longer slides under the status bar, so its close button and header are fully visible.

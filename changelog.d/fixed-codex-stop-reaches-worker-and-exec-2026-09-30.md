@@ -1,1 +1,0 @@
-Stop now interrupts Codex threads running inside the CCC worker's app-server (it used to report "not live"), and SIGINTs headless `codex exec` workers CCC did not spawn. Steering or compacting a headless exec worker now fails immediately with a clear reason instead of queueing forever.

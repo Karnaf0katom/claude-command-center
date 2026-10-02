@@ -1,1 +1,0 @@
-- Clicking a queue's engine · model · effort chip now opens a quick popover of 1-tap chips (your favorite engine/model picks plus the effort ladder) that saves instantly; "More settings…" still opens the full queue manager.

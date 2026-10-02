@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.36.0] - 2026-10-02
+
+### Added
+- Added a “Hand over to Codex Desktop” conversation button that waits for replies and queued work to finish, releases CCC’s writer ownership, and opens the same conversation in Desktop. Waiting can be cancelled.
+- Metadata tab now shows a Codex diagnostics panel: what state the session is in, whether CCC is driving it via the app-server or a one-shot `codex exec` fallback (and why it fell back), whether the run is ephemeral/invisible to Codex desktop, and whether Codex desktop is competing for the thread.
+- `POST /api/jobs/add` and `ccc jobs add` create a scheduled job through an agent session (host, repo, what, when); `ccc jobs ls` lists jobs with status, last/next run and outcome. The Jobs tab's + Add dialog now uses the same endpoint.
+- Jobs tab: a "+ Add" button opens a short form (host, folder, what, when) and starts an agent session that creates the scheduled job and checks it appears in the list.
+- Jobs tab: a project / recent / day toggle (choice is remembered). Day lists today's launches in clock order with a "now" marker; recent is flat, running first.
+- Jobs tab: a running job shows a "live" pill. It opens the WatchTower ticket the run printed, or tails the run's log live (auto-scrolls unless you scroll up, stops when the job finishes).
+- Jobs tab: larger text and spacing throughout.
+- **Jobs tab**: a new sidebar tab next to Workers lists scheduled jobs grouped by project, newest run first. Each row shows what the job does, a 24h strip of when it launches, the ticket/PR/issue chips its last run produced (or the job's own last output), and when it last ran. Covers the Hermes VM's systemd timers and the scheduled laptop launchd agents; a job can print a `CCC_OUTCOME:` line to set its own one-line summary. New `GET /api/jobs` serves it from a background-refreshed cache.
+- Jobs tab is now on phones: a Jobs button in the bottom nav opens it, with 36px+ tap targets, a scrollable live log and an Add dialog that fits the screen.
+- Configure quota fallback in Settings → Engines: enable it by default, choose ordered provider models and effort, map fast/standard/deep capability profiles, and override individual queues with On, Off, or Use machine default. Active runs and stored queue pins are preserved.
+- "Needs you" cards now carry buttons: Run a suggested command in a terminal (after a confirm), Copy it, Restart CCC, Reload, open linked URLs and files, or jump to the composer to reply.
+- Needs-you cards now show a one-tap chip for a quoted reply the agent asked for (e.g. Say "ship now"); tapping it sends that text.
+- Queue settings now have a Roles section: pick the engine and model for the planner, plan reviewer and verifier (builder shown alongside), with the effective value and where it comes from. Choices come from WatchTower's approved catalog, and refused picks show their error inline.
+- Queue rows now say "waiting on REF" instead of READY when a ticket is blocked by another open ticket. Click the chip to open the blocker. The queue header counts blocked tickets separately, and closed tickets no longer show a readiness chip.
+- New sessions can pick their folder from the prompt. Without any setup, a path or repo name in your message is matched locally (no network) and offered as a "<folder>?" chip. Add an optional TypeSafe Jev key under Settings > BYOK to guess the project even when the message never names it; very confident guesses switch the folder for you with an "Auto-picked <folder> · undo" chip. Prompts are scrubbed of likely secrets and are only sent when a Jev key is set.
+- Sessions started by a script (`claude -p`) now record who launched them at startup: the launching script or app is shown as "via: <caller>" instead of "via: Terminal", and when the launcher was a Claude session it is linked as the parent.
+- Sessions now show a live WIP timer while a turn is running: a "12s / 3m 4s" chip next to the Working signal in the sidebar row, and "Working · Ns" on the Codex state pill. Timed from the real turn start (Codex turn/started, ACP turn tracking, or a Claude in-flight tool's start); waiting-on-you states never get a timer.
+- The ticket detail now has an Acceptance section: the acceptance line, each check (command, independent verifier, review) in order with passed/failed/waiting, the command output or verifier findings, which engine and model ran the verifier with a link to its session, and why a failed check sent the ticket back.
+- The q2 queue board now shows each WatchTower ticket's stages (plan, plan review, build, checks, verify, closed). Rows get a stage strip and say which stage the ticket is in, which model runs it and for how long. The ticket detail adds a Stages panel with loop counts, floor routing, what the ticket waits on, links to the stage transcripts, the plan, reviewer verdicts and check output. The ticket list header shows per-stage counts and the queue's role models.
+- WatchTower tickets waiting on a review gate (`in_review`) now appear in the queue panel and the q2 board with who they wait on. Reviews for you show up as Decision Inbox cards with Accept and Reject, and the ticket detail has the same buttons. Queue counts treat these tickets as not closed.
+
+### Changed
+- Codex sends return as soon as `turn/start` is accepted instead of blocking ~1.5-5s on the durable-delivery confirmation. The check still runs — on a background thread with a wider 30s window (`CCC_CODEX_WAKE_CONFIRM_TIMEOUT`), reporting the result via `codex_wake_confirm` telemetry and the wake ledger. Inject responses now carry `confirmed: null` + `confirmation_source: "pending"` until that lands, matching the spawn path's contract.
+- Changed: Codex sends to a thread the app-server already holds now go straight to `turn/start` — `thread/resume` only runs when the thread might be missing or stale (foreign rollout writes, busy state, or a "thread not found" reply). The per-send latency drops by the whole resume round-trip (~0.1-0.7s). The "Wake up" button is now labeled "Nudge" — it always sent a status-check message rather than waking any server.
+- Codex sessions no longer fall back to one-shot `codex exec` runs: spawns go through the app-server exclusively (and fail visibly if it can't start), and failed resumes park the message in the durable queue for retry instead of launching an unsteerable `codex exec resume`. The shared-state holder check no longer blocks CCC's private app-server, so sessions stay on the native transport even while Codex Desktop or a terminal Codex is running.
+- Files is its own tab in the session side panel again (with a count on the tab), instead of being docked at the bottom of Metadata. Metadata is now the first tab, before Orchestration.
+- License: CCC is now under the Functional Source License 1.1 with MIT future license (FSL-1.1-MIT). You can use and modify it for free, including at work and on your own servers for your team. Selling CCC or offering it as a competing product or hosted service is not allowed. Each release becomes MIT two years after it ships.
+- Model catalog now discovers new Claude and Codex models on its own: prices, context limits, default reasoning effort (e.g. Opus 5.5 defaults to medium) and retirement/launch dates come from the vendors' published docs and the Codex CLI's model list on the hourly refresh, with no code change per model. Superseded Codex models (e.g. GPT-5.6 Sol once GPT-6 Sol exists) drop out of the picker like older Claude tiers already did, and discovered prices flow into the usage database.
+- The queue activity log reads faster: each row's plain-language statement is bold, machine key=value fields sit on a dimmer line below, and rows without a worker no longer leave an empty gap before the text.
+- Clicking a queue's engine · model · effort chip now opens a quick popover of 1-tap chips (your favorite engine/model picks plus the effort ladder) that saves instantly; "More settings…" still opens the full queue manager.
+- Queue status dots now color the ticket's WatchTower stage: cyan while planning, pink during checks/verify, orange when stuck, and a check mark on tickets closed after a passed verify.
+- Optimized Claude Desktop session lookup by pre-warming project paths and caching jsonl locations, reducing metadata pruning and backfill CPU cost by up to 36x. (CCC-1248)
+- "Create queue for this session" now suggests a short, editable queue name, links the queue to the session on the server (so agents and other browsers can find it), tells the session how to split its work into tickets (`--accept`, `--after`, checks), and asks "Start N workers?" once the first tickets land.
+- The queue's "waiting on REF" chip and blocked count now come from WatchTower's own `waiting_on`, so they always match what workers will claim. Needs a WatchTower with `waiting_on`; older installs just show no chip.
+
+### Fixed
+- The sidebar no longer sits empty for 20-30 seconds after the CCC server restarts: the saved conversation list loads once for every early request, and the Devin CLI overlay no longer scans its multi-GB database inline on the first list request.
+- Restarting CCC no longer re-runs the full Claude Desktop sidebar sweep every time: it runs at most once every 12 hours (new sessions still appear right away), removing a several-second CPU burst after each restart.
+- Sends to Codex sessions now settle the message echo immediately: the `codex-app-turn` response branch finally calls `markPendingSendDelivered`, so the bubble flips to "✓ Delivered - waiting for Codex" and the Thinking indicator shows during Codex's time-to-first-token instead of the message sitting in "Sending…" for seconds.
+- Codex sessions stored only in capture logs retain their completion diagnostics after spawn records expire, and follow-ups point to the capture log instead of a nonexistent native transcript.
+- Compacting a Codex session that another process is still driving (for example a headless WatchTower `codex exec` worker) now says which process owns the thread and its pid, instead of a generic "already has an active writer" error with a misleading retry hint.
+- Codex compactions no longer leave the card stuck on "reading the new size…". The app-server's completion signal lands before the rollout writes the rebuilt-context `token_count`, so the wait now honors an in-progress grace window past the deadline (12s) instead of returning `post_tokens: 0`; a `token_count` with `input_tokens` set is rejected so a normal turn can't pose as the post-compact size, and if no size is ever confirmed the card settles on an honest "new size not reported" instead of reading forever.
+- Codex sends no longer wait out a 5-second confirm window: the delivery-ack matcher now recognizes current Codex's `UserMessage` items (`content[].text`) on notifications and in rollout files, so accepted turns confirm in well under a second instead of always timing out.
+- Opening a Codex (or other non-Claude) conversation no longer stalls on "Loading..." for seconds: CCC stopped scanning every Claude project folder on each request for a session it already knows is not a Claude one.
+- Fixed follow-up sends to native Codex sessions while Desktop is open by waiting for Desktop's definitive ownership response before selecting the session transport.
+- Codex sessions spawned by CCC now use the desktop sidebar's user-thread marker; the bounded startup repair also fixes older CCC-marked sessions while preserving their IDs and conversation history.
+- Sending to a Codex session that ran via the ephemeral exec fallback no longer fails with "repo_required"; CCC now continues it in a new Codex session in the same folder.
+- Fixed the dashboard showing a blank transcript for a Codex session whose native history got stuck at "task started" (the `codex exec` fallback bug fixed in the previous release); it now falls back to CCC's own spawn log so the real conversation still renders.
+- Fixed a Codex spawn falling back to the plain CLI (because another Codex process held the shared state database) leaving a broken, permanently-stuck thread in the Codex desktop app even though the run itself completed successfully; the fallback now runs `--ephemeral` so it no longer writes that native state at all.
+- Show Codex fallback runs and their captured replies even when no native session is saved, instead of leaving their cards stuck on “spawning”.
+- Automatically repair a missing native package in a user-owned npm Codex CLI at its installed version, with bounded retries and a clear manual repair command if recovery fails.
+- Codex diagnostics and send-queueing no longer mistake CCC's own fallback `codex exec resume` run for "another app driving this thread"; the spawn registry also no longer drops Codex children launched through the npm `node` wrapper.
+- Codex background status checks no longer load conversations or acquire their writer locks. CCC unsubscribes idle conversations after work finishes, while preserving subscriptions for active goals and queued input; Codex releases them after its inactivity grace period.
+- Make Codex CLI transcript recovery work in the normal viewer, retain tool results and errors, and refresh correctly as captured output or native history changes.
+- Codex replies now update in place when live snapshots revise rendered text, and saved replies reconcile by native item identity. This prevents repeated reply text and speak/copy controls during streaming and transcript handoff.
+- Report unavailable Codex capabilities with an installation diagnostic instead of the misleading “Unknown Codex operation” send error.
+- Stop now interrupts Codex threads running inside the CCC worker's app-server (it used to report "not live"), and SIGINTs headless `codex exec` workers CCC did not spawn. Steering or compacting a headless exec worker now fails immediately with a clear reason instead of queueing forever.
+- The conversation top bar now shows the original ask for Codex and worker sessions whose recent history has no user message, instead of disappearing.
+- Keep the preceding user prompt visible when opening a Codex conversation window in the middle of a long turn, preserving contiguous history and pagination.
+- Fixed Codex sessions falsely reporting "Another app is driving this thread" (and hiding the Steer button / mislabeling the status pill) while CCC's own turn was writing. Three compounding causes: the dashboard read only its local thread-state map, which stays empty when the control-plane worker owns the app-server; routed `thread/list`/`thread/read` responses recorded stale snapshot entries into that local map, which then shadowed live worker state; and a `turn/started` notification carrying no turn id downgraded the `ccc` writer stamp to `unknown`. Writer attribution, the diagnostics verdict, conversation overlays, and the nudge-outcome breakdown now resolve thread state from the owning process via one TTL-cached query with remote-wins merging, and the notification handler keeps `ccc` ownership when no id is present to contradict it.
+- Offer all enabled New session engines in the Continue in a new session picker, with models and effort levels for the selected engine. Keep the picker above the composer so its controls remain visible.
+- Devin sessions spawned from the picker no longer silently run on the account default model: family ids like `swe-2` are now resolved to a concrete variant the ACP session actually offers (e.g. `swe-2-high`), and a rejected model aborts to the `devin -p` fallback instead of being swallowed. Devin panes also surface ACP turn results — quota errors and cancels now render and clear the "Thinking" indicator instead of leaving it spinning — and the status pill shows the session's real model uid.
+- The "Other machines" sidebar section no longer flashes in for a split second when the shared sidebar-tab key changes under another window or mid-correction - it now follows the tab actually rendered in the list.
+- The Other machines sidebar list shows a peer's most recently active sessions again, instead of only ones from a day or more ago.
+- Jobs on Linux now read local systemd timers and journal logs directly, avoiding a failed SSH connection back to the same machine. macOS continues to collect remote systemd jobs over SSH.
+- **Jobs tab**: a job whose log stamps each line with a timestamp (like `bym-ship`) now shows its `CCC_OUTCOME:` sentence (e.g. "Shipped PR #1884 (3 commits).") instead of only a PR chip.
+- The session list no longer paints a bare frame after each periodic rebuild: orchestration borders/lane chips and the "Other machines" section are re-applied synchronously instead of one frame late.
+- Keep the conversation’s live generating indicator steady while assistant replies and tool results arrive during an active turn.
+- Tapping Search (or any other text field) on a phone no longer zooms the page in with no way back out.
+- On phones, the selected session row's trash and actions buttons no longer cover its lanes chip, so a parent session's lanes can be collapsed again.
+- On phones, the new-session send button no longer hides under the keyboard; the folder and model rows scroll instead.
+- On phones, the ticket details view no longer slides under the status bar, so its close button and header are fully visible.
+- The sidebar session list no longer jumps for a moment when it refreshes in narrow windows.
+- Keep session titles and line wrapping stable when working or waiting status markers appear and disappear in the sidebar.
+- Clicking an image, PDF or video link in a conversation no longer stalls for seconds while the server rescans every project folder to find known repos.
+- Archive loads during server startup now participate in performance alerts using the cold-load budget, so slow startup loads are no longer silently excluded from ticketing.
+
+Model discovery now survives opening New session during startup, preventing newly available models from disappearing behind the fallback catalog.
+- The lane map no longer shows a Task subagent as "landed" while it is still thinking or narrating between tool calls.
+- WORKING NOW keeps one row per worker, led by its live ticket and aged from that claim; tickets parked on needs-input (or extra claims) show as clickable chips, and the worker's own uptime is labeled separately.
+- Long ticket titles in the Workers tab's WORKING NOW rows now wrap (up to three lines) instead of spilling past the card.
+- WatchTower planner, plan-reviewer, verifier and assessor sessions now sort into the Workers tab instead of Coding.
+
 ## [5.35.0] - 2026-09-28
 
 ### Added
@@ -3562,7 +3648,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.35.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.36.0...HEAD
+[5.36.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.36.0
 [5.35.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.35.0
 [5.34.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.34.0
 [5.33.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.33.0

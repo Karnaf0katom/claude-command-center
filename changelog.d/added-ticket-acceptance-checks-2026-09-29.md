@@ -1,1 +1,0 @@
-- The ticket detail now has an Acceptance section: the acceptance line, each check (command, independent verifier, review) in order with passed/failed/waiting, the command output or verifier findings, which engine and model ran the verifier with a link to its session, and why a failed check sent the ticket back.

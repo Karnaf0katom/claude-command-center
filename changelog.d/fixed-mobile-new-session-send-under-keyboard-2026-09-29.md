@@ -1,1 +1,0 @@
-- On phones, the new-session send button no longer hides under the keyboard; the folder and model rows scroll instead.

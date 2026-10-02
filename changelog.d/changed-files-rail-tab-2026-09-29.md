@@ -1,1 +1,0 @@
-- Files is its own tab in the session side panel again (with a count on the tab), instead of being docked at the bottom of Metadata. Metadata is now the first tab, before Orchestration.

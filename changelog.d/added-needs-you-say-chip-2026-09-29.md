@@ -1,1 +1,0 @@
-- Needs-you cards now show a one-tap chip for a quoted reply the agent asked for (e.g. Say "ship now"); tapping it sends that text.

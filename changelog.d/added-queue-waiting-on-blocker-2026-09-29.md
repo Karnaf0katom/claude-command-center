@@ -1,1 +1,0 @@
-- Queue rows now say "waiting on REF" instead of READY when a ticket is blocked by another open ticket. Click the chip to open the blocker. The queue header counts blocked tickets separately, and closed tickets no longer show a readiness chip.

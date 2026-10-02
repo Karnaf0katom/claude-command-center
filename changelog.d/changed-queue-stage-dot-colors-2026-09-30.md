@@ -1,1 +1,0 @@
-- Queue status dots now color the ticket's WatchTower stage: cyan while planning, pink during checks/verify, orange when stuck, and a check mark on tickets closed after a passed verify.
