@@ -12056,29 +12056,42 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["pasted_image_sandbox"])
         self.assertTrue(server._open_launch_allowed(result))
 
-    def test_spawn_codex_attaches_command_center_pasted_images(self):
-        """Pasted image paths in Codex prompts should be sent as --image args."""
+    def _assert_spawn_codex_sends_local_image(self, image):
+        """Run a Codex spawn through a fake app-server and assert turn/start
+        carries the image as a localImage input entry."""
         server = self.server
-        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
-        paste_dir.mkdir(parents=True)
-        image = paste_dir / "paste-123.png"
-        image.write_bytes(b"\x89PNG\r\n\x1a\n")
-        proc = mock.Mock(pid=4242)
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
         original_spawns = list(server._spawned_sessions)
         server._spawned_sessions.clear()
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append((method, params or {}))
+            if method == "thread/start":
+                return {"result": {"thread": {"id": sid, "status": {"type": "idle"}, "turns": []}}}
+            if method == "thread/name/set":
+                return {"result": {}}
+            if method == "turn/start":
+                return {"result": {"turn": {"id": "turn-1"}}}
+            raise AssertionError(f"unexpected method: {method}")
+
         try:
-            with mock.patch.object(
-                server,
-                "_resolve_codex_bin",
-                return_value={"available": True, "bin": "/usr/bin/codex-test"},
-            ), mock.patch.dict(os.environ, {"CCC_CODEX_SPAWN_APP_SERVER": "0"}), \
-                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
-                 mock.patch.object(server, "_record_spawn_to_registry"):
+            with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request), \
+                 mock.patch.object(server, "_codex_rollout_stat", return_value=None), \
+                 mock.patch.object(server, "_codex_app_server_transport_kind", return_value="stdio"), \
+                 mock.patch.object(server, "_mark_codex_thread_user_visible", return_value=True), \
+                 mock.patch.object(server, "_register_codex_sidebar_project_for_spawn_entry"), \
+                 mock.patch.object(server, "_record_spawn_to_registry"), \
+                 mock.patch.object(server, "_wt_register_codex_agent"), \
+                 mock.patch.object(server.subprocess, "Popen", side_effect=AssertionError("exec fallback should not run")):
                 result = server.spawn_session_codex(
                     f"inspect this screenshot {image}",
                     name="image prompt",
                     repo_path=str(self.repo),
                 )
+                finalizer = server._CODEX_LAST_SPAWN_FINALIZER
+                if finalizer:
+                    finalizer.join(10)
         finally:
             for entry in server._spawned_sessions:
                 fh = entry.get("log_fh")
@@ -12088,45 +12101,27 @@ class TestRepoContextHelpers(unittest.TestCase):
             server._spawned_sessions.extend(original_spawns)
 
         self.assertTrue(result["ok"])
-        cmd = popen.call_args.args[0]
-        self.assertIn("--image", cmd)
-        self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
+        turn_start = next(params for method, params in calls if method == "turn/start")
+        images = [i for i in turn_start.get("input", []) if i.get("type") == "localImage"]
+        self.assertEqual([i.get("path") for i in images], [str(image)])
+
+    def test_spawn_codex_attaches_command_center_pasted_images(self):
+        """Pasted image paths in Codex prompts go out as localImage inputs."""
+        server = self.server
+        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
+        paste_dir.mkdir(parents=True)
+        image = paste_dir / "paste-123.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        self._assert_spawn_codex_sends_local_image(image)
 
     def test_spawn_codex_attaches_managed_drop_images(self):
-        """Image drops use the same Codex --image delivery as image paste."""
+        """Image drops use the same Codex localImage delivery as image paste."""
         server = self.server
         attachment_dir = server.COMMAND_CENTER_ATTACHMENTS_DIR
         attachment_dir.mkdir(parents=True)
         image = attachment_dir / "attachment-123.png"
         image.write_bytes(b"\x89PNG\r\n\x1a\n")
-        proc = mock.Mock(pid=4242)
-        original_spawns = list(server._spawned_sessions)
-        server._spawned_sessions.clear()
-        try:
-            with mock.patch.object(
-                server,
-                "_resolve_codex_bin",
-                return_value={"available": True, "bin": "/usr/bin/codex-test"},
-            ), mock.patch.dict(os.environ, {"CCC_CODEX_SPAWN_APP_SERVER": "0"}), \
-                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
-                 mock.patch.object(server, "_record_spawn_to_registry"):
-                result = server.spawn_session_codex(
-                    f"inspect this screenshot {image}",
-                    name="dropped image prompt",
-                    repo_path=str(self.repo),
-                )
-        finally:
-            for entry in server._spawned_sessions:
-                fh = entry.get("log_fh")
-                if fh:
-                    fh.close()
-            server._spawned_sessions.clear()
-            server._spawned_sessions.extend(original_spawns)
-
-        self.assertTrue(result["ok"])
-        cmd = popen.call_args.args[0]
-        self.assertIn("--image", cmd)
-        self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
+        self._assert_spawn_codex_sends_local_image(image)
 
     def test_spawn_session_codex_uses_app_server_when_available(self):
         """Fresh Codex sessions should prefer app-server thread/start."""
@@ -12312,11 +12307,10 @@ class TestRepoContextHelpers(unittest.TestCase):
         )
         self.assertEqual(calls[-1][1]["threadId"], fresh_sid)
 
-    def test_spawn_codex_falls_back_to_exec_when_threads_stay_lost(self):
+    def test_spawn_codex_reports_lost_threads_without_exec_fallback(self):
         """If even a recreated thread turns up 'thread not found', the spawn
-        must fall back to the legacy exec path instead of failing — the error
-        is definitive proof no turn was accepted, so a second session cannot
-        duplicate the task."""
+        fails visibly on the durable thread id instead of falling back to a
+        one-shot `codex exec` process."""
         server = self.server
         stale_sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363485"
         fresh_sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363486"
@@ -12361,13 +12355,12 @@ class TestRepoContextHelpers(unittest.TestCase):
             server._spawned_sessions.clear()
             server._spawned_sessions.extend(original_spawns)
 
-        self.assertTrue(result["ok"])
-        self.assertNotEqual(result.get("via"), "codex-app-spawn")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("via"), "codex-app-spawn")
+        self.assertEqual(result.get("code"), "codex_app_spawn_failed")
+        self.assertEqual(result.get("session_id"), fresh_sid)
         recycle.assert_called_once()
-        popen.assert_called_once()
-        cmd = popen.call_args.args[0]
-        self.assertIn("exec", cmd)
-        self.assertEqual(cmd[-1], "say ok")
+        popen.assert_not_called()
 
     def _run_thread_resume_requests(self, server, sid, count, rollout_exists):
         server._CODEX_APP_SERVER_FALSE_MISSES = 0
@@ -12426,25 +12419,44 @@ class TestRepoContextHelpers(unittest.TestCase):
     def test_spawn_codex_defaults_to_best_model_and_max_context_arg(self):
         """Default Codex spawns should prefer GPT-5.6 Terra while requesting max context."""
         server = self.server
-        proc = mock.Mock(pid=4244)
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
         original_spawns = list(server._spawned_sessions)
         old_defaults = server.SPAWN_DEFAULTS_FILE
         server._spawned_sessions.clear()
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append((method, params or {}))
+            if method == "thread/start":
+                return {"result": {"thread": {"id": sid, "status": {"type": "idle"}, "turns": []}}}
+            if method == "thread/name/set":
+                return {"result": {}}
+            if method == "turn/start":
+                return {"result": {"turn": {"id": "turn-1"}}}
+            raise AssertionError(f"unexpected method: {method}")
+
         with tempfile.TemporaryDirectory() as td:
             server.SPAWN_DEFAULTS_FILE = pathlib.Path(td) / "spawn-defaults.json"
             try:
-                with mock.patch.dict(os.environ, {"CCC_CODEX_SPAWN_APP_SERVER": "0"}, clear=True), \
-                     mock.patch.object(
-                         server,
-                         "_resolve_codex_bin",
-                         return_value={"available": True, "bin": "/usr/bin/codex-test"},
-                     ), mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
-                     mock.patch.object(server, "_record_spawn_to_registry"):
+                with mock.patch.dict(os.environ, {
+                        k: v for k, v in os.environ.items() if not k.startswith("CCC_")
+                    }, clear=True), \
+                     mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request), \
+                     mock.patch.object(server, "_codex_rollout_stat", return_value=None), \
+                     mock.patch.object(server, "_codex_app_server_transport_kind", return_value="stdio"), \
+                     mock.patch.object(server, "_mark_codex_thread_user_visible", return_value=True), \
+                     mock.patch.object(server, "_register_codex_sidebar_project_for_spawn_entry"), \
+                     mock.patch.object(server, "_record_spawn_to_registry"), \
+                     mock.patch.object(server, "_wt_register_codex_agent"), \
+                     mock.patch.object(server.subprocess, "Popen", side_effect=AssertionError("exec fallback should not run")):
                     result = server.spawn_session_codex(
                         "say ok",
                         name="context prompt",
                         repo_path=str(self.repo),
                     )
+                    finalizer = server._CODEX_LAST_SPAWN_FINALIZER
+                    if finalizer:
+                        finalizer.join(10)
             finally:
                 for entry in server._spawned_sessions:
                     fh = entry.get("log_fh")
@@ -12455,32 +12467,49 @@ class TestRepoContextHelpers(unittest.TestCase):
                 server.SPAWN_DEFAULTS_FILE = old_defaults
 
         self.assertTrue(result["ok"])
-        cmd = popen.call_args.args[0]
-        self.assertIn("-c", cmd)
-        self.assertEqual(cmd[cmd.index("-c") + 1], "model_context_window=1000000")
-        self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.6-terra")
+        start_params = next(params for method, params in calls if method == "thread/start")
+        self.assertEqual(start_params.get("model"), "gpt-5.6-terra")
+        self.assertEqual(start_params["config"]["model_context_window"], 1000000)
 
     def test_resume_codex_attaches_command_center_pasted_images(self):
-        """Resumed Codex sessions need the same pasted-image attachment path."""
+        """Resumed Codex sessions carry pasted images as localImage inputs."""
         server = self.server
         paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
         paste_dir.mkdir(parents=True)
         image = paste_dir / "paste-123.png"
         image.write_bytes(b"\x89PNG\r\n\x1a\n")
         sid = "00000000-0000-4000-8000-000000000003"
-        proc = mock.Mock(pid=4243)
+        calls = []
         original_spawns = list(server._spawned_sessions)
         server._spawned_sessions.clear()
+        with server._pending_resume_lock:
+            original_queue = dict(server._pending_resume_queue)
+            server._pending_resume_queue.clear()
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append((method, params or {}))
+            if method == "thread/resume":
+                return {"result": {"thread": {"id": sid, "status": {"type": "idle"}, "turns": []}}}
+            if method == "turn/start":
+                return {"result": {"turn": {"id": "turn-1"}}}
+            raise AssertionError(f"unexpected method: {method}")
+
         try:
-            with mock.patch.dict(os.environ, {"CCC_CODEX_APP_SERVER": "0"}), \
+            with mock.patch.object(server, "_control_plane_engine_call", return_value=None), \
+                 mock.patch.object(server, "_pending_writer_compatibility_status", return_value={"ok": True}), \
                  mock.patch.object(
                      server,
                      "_resolve_codex_bin",
                      return_value={"available": True, "bin": "/usr/bin/codex-test"},
                  ), mock.patch.object(server, "_codex_thread_row", return_value={"cwd": str(self.repo)}), \
+                 mock.patch.object(server, "_codex_capture_thread_row", return_value={}), \
+                 mock.patch.object(server, "_resolve_codex_rollout_path", return_value=None), \
                  mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
-                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
-                 mock.patch.object(server, "_record_spawn_to_registry"):
+                 mock.patch.object(server, "_get_session_override", return_value=None), \
+                 mock.patch.object(server, "_codex_thread_writer_snapshot", return_value={}), \
+                 mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request), \
+                 mock.patch.object(server.subprocess, "Popen", side_effect=AssertionError("exec fallback should not run")) as popen, \
+                 mock.patch("ccc_server.codex_client.resume_desktop_conversation", return_value=None):
                 result = server.resume_session_codex(sid, f"look at {image}")
         finally:
             for entry in server._spawned_sessions:
@@ -12489,12 +12518,15 @@ class TestRepoContextHelpers(unittest.TestCase):
                     fh.close()
             server._spawned_sessions.clear()
             server._spawned_sessions.extend(original_spawns)
+            with server._pending_resume_lock:
+                server._pending_resume_queue.clear()
+                server._pending_resume_queue.update(original_queue)
 
         self.assertTrue(result["ok"])
-        cmd = popen.call_args.args[0]
-        self.assertIn("--image", cmd)
-        self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
-        self.assertIn(sid, cmd)
+        popen.assert_not_called()
+        turn_start = next(params for method, params in calls if method == "turn/start")
+        images = [i for i in turn_start.get("input", []) if i.get("type") == "localImage"]
+        self.assertEqual([i.get("path") for i in images], [str(image)])
 
     def test_resolve_cursor_bin_honors_env(self):
         server = self.server
@@ -14198,7 +14230,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("pids=200,300", conflict["summary"])
         self.assertIn("Quit the other Codex process", conflict["message"])
 
-    def test_codex_ensure_app_server_blocks_stdio_when_foreign_writer_holds_state(self):
+    def test_codex_ensure_app_server_attempts_stdio_despite_foreign_writer(self):
         server = self.server
         conflict = {
             "summary": "pids=200 commands=codex",
@@ -14211,11 +14243,21 @@ class TestRepoContextHelpers(unittest.TestCase):
             try:
                 with mock.patch.object(server, "_codex_managed_app_server_socket_path", return_value=sock), \
                      mock.patch.object(server, "_connect_codex_managed_app_server", side_effect=OSError("nope")), \
-                     mock.patch.object(server, "_codex_shared_state_conflict", return_value=conflict):
+                     mock.patch.object(server, "_codex_shared_state_conflict", return_value=conflict) as conflict_check, \
+                     mock.patch.object(server, "_resolve_codex_bin", return_value={"available": True, "bin": "/usr/bin/codex-test"}), \
+                     mock.patch.object(server, "_codex_app_server_reap_stray_children"), \
+                     mock.patch.object(server.subprocess, "Popen", side_effect=OSError("no spawn")) as popen:
                     result = server._ensure_codex_app_server()
             finally:
                 server._codex_app_server_shutdown()
         self.assertIsNone(result)
+        # The shared-state conflict no longer gates the private stdio
+        # app-server: the spawn is attempted (and fails here only because
+        # Popen is mocked to fail). The holder check stays diagnostics-only.
+        popen.assert_called_once()
+        cmd = popen.call_args.args[0]
+        self.assertIn("app-server", cmd)
+        conflict_check.assert_not_called()
 
     def test_codex_managed_app_server_ui_label_is_present(self):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")

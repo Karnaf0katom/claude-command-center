@@ -83,17 +83,6 @@ _CODEX_APP_SERVER_LIVENESS_MISS_THRESHOLD = 2
 # path. Callers must fall back rather than waiting behind that stale flag
 # forever; a normal initialize request itself has a 10-second deadline.
 _CODEX_APP_SERVER_INITIALIZING_WAIT_S = 15.0
-_CODEX_SHARED_STATE_BLOCK_RETRY_S = 30.0
-_CODEX_SHARED_STATE_BLOCK_RETRY_UNTIL = 0.0
-# OpenAI's own codex-rs hit this same shared-sqlite conflict class (Desktop vs.
-# an IDE extension, github.com/openai/codex#30105) and mitigated it with a WAL
-# busy_timeout rather than a hard refuse -- a momentary second holder (a
-# browser extension's app-server touching the file for one poll) resolves
-# itself within a few seconds instead of needing the user to go kill it.
-# Mirror that here: retry the holder check for a few seconds before treating
-# it as the durable, "go quit the other process" conflict.
-_CODEX_SHARED_STATE_CONFLICT_RETRY_BUDGET_S = 5.0
-_CODEX_SHARED_STATE_CONFLICT_POLL_S = 0.5
 _CODEX_APP_SERVER_INFLIGHT_LOCK = threading.Lock()
 # `thread/list` is a GLOBAL call -- one reply carries every thread the
 # app-server knows -- so it must be throttled globally too. It used to be
@@ -1072,45 +1061,6 @@ def _codex_shared_state_conflict(now=None, force=False):
             f"Codex process and retry."
         ),
     }
-
-
-def _codex_app_server_stdio_safe_to_spawn(now=None):
-    """True when no foreign Codex process holds the shared state DBs.
-
-    CCC's private stdio app-server must be the only persistent writer against
-    ~/.codex/state_5.sqlite. If a terminal `codex` TUI, the managed daemon, or
-    another integration already holds those files, spawning a second private
-    app-server risks cross-posting input between sessions.
-    """
-    return _core._codex_shared_state_conflict(now) is None
-
-
-def _codex_wait_for_shared_state_clear(timeout_s=None, poll_interval_s=None):
-    """Retry the shared-state holder check briefly before calling it a conflict.
-
-    A momentary second holder -- a browser extension's app-server touching
-    ~/.codex/state_5.sqlite for one poll, a terminal `codex` command that ran
-    and exited -- clears on its own within a couple seconds. Blocking CCC's
-    own spawn on the very first lsof sample turns that into a hard "quit the
-    other Codex process" error for something that was never actually a
-    sustained conflict. Poll for a short, bounded window instead; a conflict
-    that is still present at the end of it is durable and should block.
-
-    Uses time.monotonic() rather than time.time() for the retry deadline:
-    callers elsewhere in this module freeze time.time() to a fixed value in
-    tests (for the unrelated _CODEX_SHARED_STATE_BLOCK_RETRY_UNTIL cooldown),
-    which would make a time.time()-based deadline here never elapse.
-    """
-    if timeout_s is None:
-        timeout_s = _CODEX_SHARED_STATE_CONFLICT_RETRY_BUDGET_S
-    if poll_interval_s is None:
-        poll_interval_s = _CODEX_SHARED_STATE_CONFLICT_POLL_S
-    deadline = time.monotonic() + max(0.0, float(timeout_s))
-    conflict = _core._codex_shared_state_conflict(force=True)
-    while conflict is not None and time.monotonic() < deadline:
-        time.sleep(poll_interval_s)
-        conflict = _core._codex_shared_state_conflict(force=True)
-    return conflict
 
 
 class _CodexAppServerTransport:
@@ -3159,7 +3109,7 @@ def _codex_app_server_request_to_transport(
                 "app-server", "SENDFAIL",
                 f"method={method} id={req_id} send failed: {send_error!r}",
             )
-            return {"ok": False, "error": str(send_error), "fallback": "exec"}
+            return {"ok": False, "error": str(send_error), "fallback": "queue"}
         if exited:
             proc = transport.proc
             exit_code = proc.poll() if proc is not None else None
@@ -3177,7 +3127,7 @@ def _codex_app_server_request_to_transport(
             return {
                 "ok": False,
                 "error": f"Codex app-server exited before replying: {method}",
-                "fallback": "exec",
+                "fallback": "queue",
                 "exited": True,
             }
         if timed_out is not None:
@@ -3194,7 +3144,7 @@ def _codex_app_server_request_to_transport(
             return {
                 "ok": False,
                 "error": f"Codex app-server request timed out: {method}",
-                "fallback": "exec",
+                "fallback": "queue",
             }
     finally:
         if count_as_inflight:
@@ -3316,7 +3266,7 @@ def _codex_app_server_request(method, params=None, timeout=20, *, _route=True, _
         return {
             "ok": False,
             "error": routed.get("error") or "Codex worker returned no response",
-            "fallback": "exec",
+            "fallback": "queue",
         }
     from ccc_server.codex_handover import in_progress
     with _core._CODEX_APP_SERVER_LOCK:
@@ -3348,7 +3298,7 @@ def _codex_app_server_request(method, params=None, timeout=20, *, _route=True, _
         return {
             "ok": False,
             "error": error,
-            "fallback": "exec",
+            "fallback": "queue",
         }
     if _expected_generation is not None:
         from ccc_server.codex_conversation import CODEX_CONVERSATIONS
@@ -3623,7 +3573,7 @@ def _codex_app_server_active_turn_fresh(now):
 
 def _ensure_codex_app_server(*, allow_stdio=True):
     """Start and initialize a persistent Codex app-server if needed."""
-    global _CODEX_APP_SERVER_READER, _CODEX_SHARED_STATE_BLOCK_RETRY_UNTIL
+    global _CODEX_APP_SERVER_READER
     # _log_activity and the stack-dump marker both do file I/O, and any
     # syscall can stall for seconds under memory pressure. Holding
     # _CODEX_APP_SERVER_LOCK across that I/O starves the reader thread that
@@ -3810,19 +3760,6 @@ def _ensure_codex_app_server(*, allow_stdio=True):
         return keep_transport
 
     managed_path = _core._codex_managed_app_server_socket_path()
-    # A foreign Codex writer is a durable safety block, not a transient
-    # transport failure. Rechecking it on every status poll produced a noisy
-    # 2–3s retry loop. Keep managed-daemon attachment eligible, but wait before
-    # retrying private stdio when it is the only available transport.
-    if (
-        allow_stdio
-        and time.time() < _CODEX_SHARED_STATE_BLOCK_RETRY_UNTIL
-        and not (_core._codex_managed_app_server_enabled() and managed_path.exists())
-    ):
-        with _core._CODEX_APP_SERVER_LOCK:
-            _core._CODEX_APP_SERVER_INITIALIZING = False
-            _core._CODEX_APP_SERVER_LOCK.notify_all()
-        return None
     candidates = []
     if _core._codex_managed_app_server_enabled() and managed_path.exists():
         if _codex_managed_in_cooldown():
@@ -3833,23 +3770,13 @@ def _ensure_codex_app_server(*, allow_stdio=True):
         else:
             candidates.append(("managed-unix", managed_path))
     if allow_stdio:
-        conflict = _core._codex_wait_for_shared_state_clear()
-        if conflict is None:
-            candidates.append(("stdio", None))
-        else:
-            _CODEX_SHARED_STATE_BLOCK_RETRY_UNTIL = (
-                time.time() + _CODEX_SHARED_STATE_BLOCK_RETRY_S
-            )
-            _core._app_server_trace(
-                "shared-state-block",
-                reason="foreign codex process holds shared state db",
-                conflict=conflict["summary"],
-            )
-            _core._log_activity(
-                "codex",
-                "SHARED_STATE_BLOCK",
-                f"private stdio app-server blocked: {conflict['summary']}",
-            )
+        # Codex treats the shared state DBs as multi-process by design (WAL +
+        # per-thread writer records). A foreign Codex process holding them --
+        # Codex Desktop's embedded host, a terminal TUI -- is normal, so it no
+        # longer gates CCC's private stdio app-server. Contention surfaces as
+        # per-thread "active writer" errors, which queue durably instead of
+        # dropping to a one-shot `codex exec`.
+        candidates.append(("stdio", None))
 
     for kind, arg in candidates:
         transport = None
@@ -6372,24 +6299,25 @@ def _codex_spawn_via_app_server(
 ):
     """Start a fresh Codex thread through the app-server.
 
-    Returns None when callers should fall back to the legacy `codex exec` path.
-    Once a durable thread has been created, errors are returned to the caller
-    instead of launching a second session for the same requested task — except
-    "thread not found" from turn/start, which proves the turn was never
-    accepted (even after reattach + recreate recovery), so the exec fallback
-    is safe and preferred over rejecting the user's submission.
+    The legacy `codex exec` fallback is gone — every failure here is returned
+    to the caller as an error payload instead of launching a one-shot process.
     """
     if not _codex_app_server_spawn_enabled():
         _core._codex_telemetry_append(
             "codex_spawn",
             ok=False,
             via="codex-app-spawn",
-            fallback="codex-exec",
+            fallback="none",
             fallback_reason="app-server-disabled",
             cwd=spawn_cwd,
             model=model_to_use,
         )
-        return None
+        return {
+            "ok": False,
+            "via": "codex-app-spawn",
+            "code": "codex_app_server_disabled",
+            "error": "Codex app-server spawning is disabled (CCC_CODEX_SPAWN_APP_SERVER=0)",
+        }
     timestamp = timestamp or time.strftime("%Y%m%dT%H%M%S")
     total_start = time.monotonic()
     app_server_warm = _core._codex_app_server_is_live()
@@ -6405,14 +6333,15 @@ def _codex_spawn_via_app_server(
     )
     thread_start_ms = _codex_elapsed_ms(thread_start_at)
     if not _core._codex_response_succeeded(start):
+        error = _codex_app_server_response_error(start)
         _core._codex_telemetry_append(
             "codex_spawn",
             ok=False,
             via="codex-app-spawn",
-            fallback="codex-exec",
+            fallback="none",
             fallback_reason="thread/start failed",
             stage="thread/start",
-            error=_codex_app_server_response_error(start),
+            error=error,
             app_server_warm=app_server_warm,
             thread_start_ms=thread_start_ms,
             total_ms=_codex_elapsed_ms(total_start),
@@ -6420,11 +6349,21 @@ def _codex_spawn_via_app_server(
             cwd=spawn_cwd,
             model=model_to_use,
         )
-        return None
+        return {
+            "ok": False,
+            "via": "codex-app-spawn",
+            "code": "codex_app_spawn_failed",
+            "error": error,
+        }
     thread = ((start.get("result") or {}).get("thread") or {})
     thread_id = thread.get("id")
     if not thread_id:
-        return None
+        return {
+            "ok": False,
+            "via": "codex-app-spawn",
+            "code": "codex_app_spawn_failed",
+            "error": "Codex app-server thread/start returned no thread id",
+        }
     thread_id = str(thread_id)
     _core._codex_app_server_record_thread(thread_id, thread)
     # Backdate t0 to the start of the spawn so thread_start is measured from
@@ -6558,18 +6497,15 @@ def _codex_spawn_via_app_server(
         turn_start_ms = _codex_elapsed_ms(turn_start_at)
         if not _core._codex_response_succeeded(started):
             error = _codex_app_server_response_error(started)
-            # "thread not found" is definitive: the app-server never accepted
-            # the turn, so no work ran on this thread. After the reattach +
-            # recreate recovery above has also failed, the app-server is
-            # persistently unable to run turns (wedged child, broken shared
-            # state) — falling back to the one-shot `codex exec` path cannot
-            # duplicate the task, unlike other errors (e.g. a lost response
-            # after the turn was accepted) where a second session could.
+            # "thread not found" survives the reattach + recreate recovery:
+            # the app-server is persistently unable to run turns (wedged
+            # child, broken shared state). The durable thread still exists —
+            # report it so the caller can surface the failure on it.
             thread_lost = "thread not found" in error.lower()
             log_fh.write(json.dumps({
                 "event": "codex_app_server_turn_failed",
                 "error": error,
-                "fallback": "codex-exec" if thread_lost else "none",
+                "fallback": "none",
             }, sort_keys=True) + "\n")
             log_fh.flush()
             if thread_lost:
@@ -6577,7 +6513,7 @@ def _codex_spawn_via_app_server(
                     "codex_spawn",
                     ok=False,
                     via="codex-app-spawn",
-                    fallback="codex-exec",
+                    fallback="none",
                     fallback_reason="turn/start thread-not-found after recovery",
                     stage="turn/start",
                     error=error,
@@ -6594,7 +6530,14 @@ def _codex_spawn_via_app_server(
                     cwd=spawn_cwd,
                     model=model_to_use,
                 )
-                return None
+                return {
+                    "ok": False,
+                    "error": error,
+                    "code": "codex_app_spawn_failed",
+                    "via": "codex-app-spawn",
+                    "session_id": thread_id,
+                    "log": str(log_path),
+                }
             _core._codex_telemetry_append(
                 "codex_spawn",
                 ok=False,
@@ -6837,14 +6780,14 @@ def _codex_resume_or_steer_via_app_server_locked(
             "codex_wake",
             ok=False,
             via="codex-app-server",
-            fallback="exec",
+            fallback="queue",
             fallback_reason="app-server-disabled",
             stage="disabled",
             session_id=session_id,
             cwd=cwd,
             model=model,
         )
-        return {"ok": False, "fallback": "exec", "error": "Codex app-server disabled"}
+        return {"ok": False, "fallback": "queue", "error": "Codex app-server disabled"}
     total_start = time.monotonic()
     app_server_warm = _core._codex_app_server_is_live()
     resume_params = {
@@ -6870,15 +6813,18 @@ def _codex_resume_or_steer_via_app_server_locked(
         return {"ok": False, "fallback": "queue", "via": "codex-app-server", "error": resumed["error"]}
     if resumed.get("error"):
         _err = _codex_error_text(resumed)
+        # The one-shot `codex exec` fallback is gone: a resume failure parks
+        # the message in the durable queue so the pump retries the app-server
+        # when the transport (or the thread's writer) frees up.
         _core._resume_ledger_append(
-            "codex_wake_fail", sid=session_id,
-            stage="thread/resume", error=_err, fallback="exec",
+            "codex_wake_queued", sid=session_id,
+            stage="thread/resume", reason=_err,
         )
         _core._codex_telemetry_append(
             "codex_wake",
             ok=False,
             via="codex-app-server",
-            fallback="exec",
+            fallback="queue",
             fallback_reason="thread/resume failed",
             stage="thread/resume",
             error=_err,
@@ -6894,7 +6840,7 @@ def _codex_resume_or_steer_via_app_server_locked(
             "ok": False,
             "via": "codex-app-server",
             "stage": "thread/resume",
-            "fallback": "exec",
+            "fallback": "queue",
             "error": _err,
             "app_server_warm": app_server_warm,
             "resume_ms": resume_ms,
@@ -7131,15 +7077,18 @@ def _codex_resume_or_steer_via_app_server_locked(
             "latency_ms": _codex_elapsed_ms(total_start),
         }
     _err = _codex_error_text(started)
+    # Same policy as thread/resume failures: the exec fallback is gone, so a
+    # failed turn/start parks the message in the durable queue for the pump
+    # to retry through the app-server.
     _core._resume_ledger_append(
-        "codex_wake_fail", sid=session_id,
-        stage="turn/start", error=_err, fallback="exec",
+        "codex_wake_queued", sid=session_id,
+        stage="turn/start", reason=_err,
     )
     _core._codex_telemetry_append(
         "codex_wake",
         ok=False,
         via="codex-app-server",
-        fallback="exec",
+        fallback="queue",
         fallback_reason="turn/start failed",
         stage="turn/start",
         error=_err,
@@ -7156,7 +7105,7 @@ def _codex_resume_or_steer_via_app_server_locked(
         "ok": False,
         "via": "codex-app-server",
         "stage": "turn/start",
-        "fallback": "exec",
+        "fallback": "queue",
         "error": _err,
         "app_server_warm": app_server_warm,
         "resume_ms": resume_ms,

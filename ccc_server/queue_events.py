@@ -16,7 +16,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import threading
 import time
 
@@ -1692,9 +1691,9 @@ def build_codex_wake_status(session_id):
     tc_epoch = float(snap.get("task_complete_epoch") or 0.0)
     turn_ended = bool(running_reached and tc_epoch and tc_epoch >= (attempt_epoch - 1.0))
 
-    # A hard failure that will not yield a turn: exec-stage failure, or a
-    # queue fallback (message parked for later). A fail whose fallback is
-    # "exec" is a retry, not terminal, so it is ignored here.
+    # A hard failure that will not yield a turn: an exec-stage failure from
+    # a historical one-shot exec attempt, or a queue fallback (message parked
+    # for later). The current code only ever produces fallback "queue".
     hard_error = None
     if fail and float(fail.get("epoch") or 0.0) >= attempt_epoch:
         if fail.get("stage") == "exec" or fail.get("fallback") == "queue":
@@ -2209,7 +2208,11 @@ def resume_session_codex(
     queued_steer_transaction_protocol=None,
     queued_delivery_transaction_protocol=0,
 ):
-    """Resume a dormant Codex thread with a new prompt via `codex exec resume`."""
+    """Resume a dormant Codex thread with a new prompt through the app-server.
+
+    There is no `codex exec resume` fallback: when the app-server transport
+    cannot deliver, the message is parked in the durable queue and retried.
+    """
     transaction_protocol = (
         _CODEX_QUEUED_STEER_TRANSACTION_PROTOCOL
         if queued_steer_transaction_protocol is None
@@ -2447,76 +2450,24 @@ def resume_session_codex(
         return _core._queue_codex_resume(session_id, text, pid=active_resume_entry.get("pid"))
     if cwd_error is not None:
         return cwd_error.as_payload()
-    timestamp = time.strftime("%Y%m%dT%H%M%S")
-    log_filename = f"resume-codex-{session_id[:8]}-{timestamp}.log"
-    repo_for_logs = _core._git_toplevel_for_existing_dir(cwd) or cwd
-    log_dir = _core.repo_log_dir(repo_for_logs)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / log_filename
-    cmd = [
-        resolved["bin"], *_core._codex_context_window_args(), "exec", "resume",
-        "--json",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--model", model,
-    ]
-    if reasoning_effort:
-        cmd.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
-    for image_path in image_paths:
-        cmd.extend(["--image", image_path])
-    cmd.extend([session_id, text])
+    # No one-shot `codex exec resume` fallback: park the message in the
+    # durable queue and let the pump retry the app-server transport. An
+    # exec one-shot could only produce output CCC can't steer, orphan the
+    # thread's native writer state, or (worse) double-post once the real
+    # transport recovers — queueing keeps the message safe and ordered.
+    reason = app_result.get("error") or "Codex app-server delivery failed"
     _core._resume_ledger_append(
-        "codex_wake_exec", sid=session_id,
-        stage="exec", log_path=str(log_path),
+        "codex_wake_queued", sid=session_id, stage="transport", reason=reason,
     )
-    log_fh = open(log_path, "w")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-            start_new_session=True,
-        )
-    except (FileNotFoundError, OSError) as e:
-        log_fh.close()
-        _core._resume_ledger_append(
-            "codex_wake_fail", sid=session_id,
-            stage="exec", error=str(e),
-        )
-        return {"ok": False, "error": str(e), "via": "codex-resume", "stage": "exec"}
-    entry = {
-        "pid": proc.pid,
-        "name": f"resume-codex-{session_id[:8]}",
-        "log": str(log_path),
-        "prompt": text[:200],
-        "started": timestamp,
-        "proc": proc,
-        "log_fh": log_fh,
-        "resumed_sid": session_id,
-        "fifo": None,
-        "stdin_fd": None,
-        "engine": "codex",
-        "cwd": cwd,
-        "repo_path": repo_for_logs,
-        "model": model,
-    }
-    _core._spawned_sessions.append(entry)
-    _core._record_spawn_to_registry(
-        pid=proc.pid,
-        name=entry["name"],
-        log_path=log_path,
-        cwd=cwd,
-        spawned_at=timestamp,
-        command_summary=text[:200],
-        fifo=None,
-        engine="codex",
-        session_id=session_id,
-        repo_path=repo_for_logs,
-        model=model,
-    )
-    return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "codex-resume"}
+    if _from_queue:
+        return {
+            "ok": True,
+            "queued": True,
+            "via": "codex-resume-queued",
+            "queued_reason": reason,
+            "error": reason,
+        }
+    return _core._queue_codex_resume(session_id, text, reason=reason)
 
 
 def _extract_codex_usage(session_id):

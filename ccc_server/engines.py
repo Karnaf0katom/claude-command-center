@@ -6179,23 +6179,23 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
 def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None, reasoning_effort="", parent_session_id=None):
     """Spawn a headless Codex run and return tracking info.
 
-    Prefer the Codex app-server for fresh durable threads when available. If
-    that is disabled or unavailable before a thread is created, fall back to the
-    legacy Codex CLI `exec` path. `codex exec` is one-shot: the prompt comes
-    from argv and the process exits when the model is done, so it uses
-    `subprocess.DEVNULL` for stdin (no FIFO, no mid-run inject support).
+    Spawning goes through the Codex app-server exclusively: it creates fresh
+    durable threads (native rollout + state-DB row) that stay resumable and
+    steerable. There is no `codex exec` fallback — when the app-server cannot
+    create the thread, the error is returned to the caller rather than
+    launching a one-shot process.
 
     Tested against codex-cli 0.125.0-alpha.3.
 
-    The spawned subprocess requires an explicit cwd or repo_path. Codex `--cd`
-    is set so the agent's workspace root matches that concrete directory.
+    The spawn requires an explicit cwd or repo_path. Codex `--cd` is set so
+    the agent's workspace root matches that concrete directory.
 
     If `worktree=True`, create a fresh git worktree off the launch cwd on a
     `feat/<slug>` branch (same shape as the Claude path) and run codex there.
 
     Returns the same shape as spawn_session:
       {ok: True,  pid, name, log}                       — success
-      {ok: False, error}                                — resolver failed
+      {ok: False, error}                                — spawn failed
     """
     routed = _core._control_plane_engine_call(
         "codex", "spawn", {
@@ -6226,9 +6226,6 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
     model_to_use = _core._spawn_model_for_engine("codex", model) or _core._spawn_fallback_model_for_engine("codex")
     if model_to_use:
         _core._set_session_model(log_filename[:-4], model_to_use, False)
-    log_dir = _core.repo_log_dir(repo_for_logs)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / log_filename
 
     worktree_path = None
     worktree_branch = None
@@ -6258,146 +6255,15 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=Fa
     if app_server_spawn is not None:
         return app_server_spawn
 
-    exec_total_start = time.monotonic()
-    resolved = _core._resolve_codex_bin()
-    if not resolved["available"]:
-        _core._codex_telemetry_append(
-            "codex_spawn",
-            ok=False,
-            via="codex-spawn",
-            stage="resolve",
-            error=resolved["reason"],
-            code=resolved.get("code"),
-            total_ms=_core._codex_elapsed_ms(exec_total_start),
-            cwd=spawn_cwd,
-            model=model_to_use,
-        )
-        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
-    bin_path = resolved["bin"]
-
-    cmd = [
-        bin_path, *_core._codex_context_window_args(), "exec",
-        "--json",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        # This fallback only runs when the app-server path (native
-        # thread/turn persistence) is unavailable, so it's already a
-        # fire-and-forget one-shot CCC tracks via its own spawn log, not a
-        # resumable native thread. Racing the same holder that caused the
-        # fallback to write ~/.codex's shared rollout/sqlite state produces
-        # a permanently orphaned thread the Codex desktop app can't open
-        # (OPS-1275) even though the run itself completes correctly.
-        # --ephemeral skips that disk persistence entirely.
-        "--ephemeral",
-        "--model", model_to_use,
-        "--cd", spawn_cwd,
-    ]
-    if reasoning_effort:
-        cmd.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
-    for image_path in image_paths:
-        cmd.extend(["--image", image_path])
-    cmd.extend(["--", prompt])
-
-    log_fh = open(log_path, "w")
-    if worktree_path:
-        _core._run_worktree_init_hook(worktree_path, ctx["repo_path"], session_name, log_fh)
-    try:
-        launch_start = time.monotonic()
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            cwd=spawn_cwd,
-            start_new_session=True,
-        )
-        launch_ms = _core._codex_elapsed_ms(launch_start)
-    except (FileNotFoundError, OSError) as e:
-        log_fh.close()
-        _core._codex_telemetry_append(
-            "codex_spawn",
-            ok=False,
-            via="codex-spawn",
-            stage="popen",
-            error=str(e),
-            code="codex_launch_failed",
-            total_ms=_core._codex_elapsed_ms(exec_total_start),
-            cwd=spawn_cwd,
-            model=model_to_use,
-        )
-        return {"ok": False, "error": str(e), "code": "codex_launch_failed", "via": "codex-spawn"}
-    failure = _spawn_early_failure_payload(
-        proc, log_path, log_fh, engine="codex", via="codex-spawn",
-    )
-    if failure:
-        _core._codex_telemetry_append(
-            "codex_spawn",
-            ok=False,
-            via="codex-spawn",
-            stage="early-failure",
-            error=failure.get("error"),
-            code=failure.get("code"),
-            launch_ms=launch_ms,
-            total_ms=_core._codex_elapsed_ms(exec_total_start),
-            pid=proc.pid,
-            cwd=spawn_cwd,
-            model=model_to_use,
-        )
-        return failure
-
-    entry = {
-        "pid": proc.pid,
-        "name": session_name,
-        "log": str(log_path),
-        "prompt": prompt[:200],
-        "started": timestamp,
-        "proc": proc,
-        "log_fh": log_fh,
-        "fifo": None,         # Codex exec is one-shot; no inject FIFO.
-        "stdin_fd": None,
-        "engine": "codex",
-        "cwd": spawn_cwd,
-        "repo_path": repo_for_logs,
-        "model": model_to_use or "",
-        "parent_session_id": parent_session_id or "",
+    # _codex_spawn_via_app_server always returns a payload now — there is no
+    # one-shot `codex exec` fallback. A None return would mean a new exit
+    # path was added without one; fail visibly rather than spawn a process.
+    return {
+        "ok": False,
+        "via": "codex-app-spawn",
+        "code": "codex_app_spawn_unavailable",
+        "error": "Codex app-server spawn returned no result",
     }
-    _core._spawned_sessions.append(entry)
-    _core._record_spawn_to_registry(
-        pid=proc.pid,
-        name=session_name,
-        log_path=log_path,
-        cwd=spawn_cwd,
-        spawned_at=timestamp,
-        command_summary=prompt[:200],
-        fifo=None,
-        engine="codex",
-        repo_path=repo_for_logs,
-        model=model_to_use,
-        parent_session_id=parent_session_id,
-        reasoning_effort=reasoning_effort,
-    )
-
-    resp = {
-        "ok": True,
-        "pid": proc.pid,
-        "name": session_name,
-        "log": str(log_path),
-        "via": "codex-spawn",
-    }
-    if worktree_path:
-        resp["worktree_path"] = worktree_path
-        resp["worktree_branch"] = worktree_branch
-    _core._codex_telemetry_append(
-        "codex_spawn",
-        ok=True,
-        via="codex-spawn",
-        launch_ms=launch_ms,
-        total_ms=_core._codex_elapsed_ms(exec_total_start),
-        pid=proc.pid,
-        cwd=spawn_cwd,
-        model=model_to_use,
-    )
-    return _finalize_spawn_response(resp, entry, ctx)
 
 
 def spawn_session_kilo(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None, parent_session_id=None):
