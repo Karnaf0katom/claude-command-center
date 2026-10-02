@@ -2615,7 +2615,16 @@ def _codex_app_server_handle_notification(method, params):
         # reconnects after a restart while its own earlier turn is still
         # running. Treat unproven ownership as unknown; the writer gate still
         # serializes behind it.
-        writer = "ccc" if state.get("ccc_turn_start_pending") or known_ccc_turn else "unknown"
+        # Missing turn_id (notification params carry none in this protocol
+        # revision) must not downgrade an already-CCC-stamped writer: the
+        # response path marks active_writer=ccc before this notification is
+        # dispatched, and turn/started without an id can't point at a
+        # different turn either.
+        writer = "ccc" if (
+            state.get("ccc_turn_start_pending")
+            or known_ccc_turn
+            or (not turn_id and state.get("active_writer") == "ccc")
+        ) else "unknown"
         if writer == "ccc" and turn_id:
             _bind_codex_queued_delivery_ack_suppression(
                 thread_id,
@@ -2850,8 +2859,12 @@ def _codex_thread_state_map_resolved():
         with _codex_thread_state_remote_lock:
             _codex_thread_state_remote["ts"] = time.time()
             _codex_thread_state_remote["map"] = remote
-    merged = dict(remote)
-    merged.update(local)
+    # Remote (owner) wins per key: routed call responses like thread/list
+    # refresh get recorded into the CALLER's map too, so a dashboard-local
+    # entry is usually a stale snapshot while the worker's copy tracks
+    # notifications live.
+    merged = dict(local)
+    merged.update(remote)
     return merged
 
 
@@ -2860,17 +2873,14 @@ def _codex_thread_state_resolved(session_id):
 
     Engine operations route to the control-plane worker, so daemon
     notifications land in the worker's thread-state map — the dashboard's
-    local map stays empty for routed threads. Readers that attribute writes
-    (writer gate, diagnostics verdict, wake fast-path) must consult the
-    owner or they misread a fresh rollout written by CCC's own turn as an
-    external writer. Local-first: in the worker (or unrouted mode) the local
-    map is authoritative and this costs nothing extra.
+    local map stays empty for routed threads (or carries only stale
+    snapshots recorded from routed call responses). Readers that attribute
+    writes (writer gate, diagnostics verdict, wake fast-path) must consult
+    the owner or they misread a fresh rollout written by CCC's own turn as
+    an external writer.
     """
     if not session_id:
         return {}
-    state = _core._codex_app_server_thread_state(session_id)
-    if state:
-        return state
     remote = _codex_thread_state_map_resolved()
     state = remote.get(str(session_id))
     return dict(state) if isinstance(state, dict) else {}

@@ -336,10 +336,17 @@ def _app_server_facts(sid, now):
              "ccc_turn_start_pending": False, "last_activity_age_s": None,
              "needs_approval": False, "approval_message": ""}
     try:
-        facts["live"] = bool(_core._codex_app_server_is_live())
-        facts["transport_kind"] = _core._codex_app_server_transport_kind()
+        # The transport lives in whichever process owns it (the worker when
+        # engine routing is on); the dashboard's own handle is dead there.
+        _remote = _core._app_server_status_preferring_worker() or {}
+        facts["live"] = bool(_remote.get("live"))
+        facts["transport_kind"] = _remote.get("kind")
     except Exception:
-        pass
+        try:
+            facts["live"] = bool(_core._codex_app_server_is_live())
+            facts["transport_kind"] = _core._codex_app_server_transport_kind()
+        except Exception:
+            pass
     state = None
     try:
         state = _core._codex_thread_state_resolved(sid)
@@ -369,9 +376,8 @@ def _app_server_facts(sid, now):
 def _coordination_events(sid):
     try:
         _core._codex_load_coordination_state()
-        with _core._CODEX_APP_SERVER_LOCK:
-            state = _core._CODEX_APP_SERVER_THREAD_STATE.get(sid) or {}
-            events = list(state.get("coordination_events") or [])
+        state = _core._codex_thread_state_resolved(sid) or {}
+        events = list(state.get("coordination_events") or [])
     except Exception:
         return []
     texts = {}
