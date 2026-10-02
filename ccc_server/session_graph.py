@@ -3879,7 +3879,7 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     """Open the macOS Codex app for a Codex session.
 
     Codex.app registers a `codex://` URL scheme. We mirror the Claude
-    Desktop launch path with a best-effort resume URL so the UI can expose a
+    Desktop launch path with a canonical thread URL so the UI can expose a
     distinct app destination next to the terminal fallback.
     """
     if not session_id:
@@ -3889,20 +3889,21 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     if sys.platform != "darwin":
         _core._log_macos_only("desktopDeepLinks")
         return {"ok": False, "error": "Codex app launch is macOS-only"}
-    params = {"session": session_id}
-    if cwd:
-        params["cwd"] = cwd
-    url = "codex://resume?" + urllib.parse.urlencode(params)
+    # Existing chats retain their recorded workspace. The supported thread
+    # link needs only the ID, so caller-supplied cwd cannot replace it.
+    url = "codex://threads/" + urllib.parse.quote(str(session_id), safe="")
     try:
         ctx = _core.repo_from_session(session_id)
         log_dir = _core.repo_log_dir(ctx["repo_path"])
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"codex-desktop-{session_id[:8]}.log"
-        lf = open(log_path, "w")
-        subprocess.Popen(["open", url], stdout=lf, stderr=lf)
+        with open(log_path, "w") as lf:
+            launched = subprocess.run(["open", "-b", "com.openai.codex", url], stdout=lf, stderr=lf, timeout=10)
+        if launched.returncode:
+            return {"ok": False, "error": "Codex Desktop did not accept the conversation link. Try opening it again.", "url": url}
     except _core.RepoContextError as e:
         return e.as_payload()
-    except (FileNotFoundError, OSError) as e:
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
         print(f"open_session_in_codex_desktop: {e!r}", file=sys.stderr, flush=True)
         return {"ok": False, "error": "could not launch Codex", "url": url}
     return {"ok": True, "url": url}

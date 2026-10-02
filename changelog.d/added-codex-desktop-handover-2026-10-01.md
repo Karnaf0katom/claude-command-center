@@ -1,0 +1,1 @@
+Added a “Hand over to Codex Desktop” conversation button that waits for replies and queued work to finish, releases CCC’s writer ownership, and opens the same conversation in Desktop. Waiting can be cancelled.

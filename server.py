@@ -29843,7 +29843,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # shared codex_request card; queue-owner backs the still-live
             # native-vs-CCC queue ownership feature (unrelated to the
             # deleted UI).
-            if action not in ("respond", "queue-owner"):
+            if action not in ("respond", "queue-owner", "handover"):
                 self.send_json({"ok": False, "error": "Unknown Codex action"}, 404)
                 return
             try:

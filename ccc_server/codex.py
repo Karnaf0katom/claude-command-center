@@ -3103,6 +3103,10 @@ def _codex_app_server_request_to_transport(
     sent_at = None
     try:
         with _core._CODEX_APP_SERVER_LOCK:
+            from ccc_server.codex_handover import in_progress
+            from ccc_server.codex_capabilities import codex_method_is_mutating
+            if in_progress() and codex_method_is_mutating(method):
+                return {"ok": False, "code": "codex_handover_pending", "error": "Desktop handover has an active writer gate; retry when it finishes."}
             req_id = _CODEX_APP_SERVER_NEXT_ID
             _CODEX_APP_SERVER_NEXT_ID += 1
             try:
@@ -3314,6 +3318,10 @@ def _codex_app_server_request(method, params=None, timeout=20, *, _route=True, _
             "error": routed.get("error") or "Codex worker returned no response",
             "fallback": "exec",
         }
+    from ccc_server.codex_handover import in_progress
+    with _core._CODEX_APP_SERVER_LOCK:
+        if in_progress() and mutating:
+            return {"ok": False, "code": "codex_handover_pending", "error": "Desktop handover has an active writer gate; retry when it finishes."}
     thread_id = _codex_app_server_request_thread_id(method, params)
     if method == "turn/start" and thread_id:
         with _core._CODEX_APP_SERVER_LOCK:
@@ -3629,6 +3637,9 @@ def _ensure_codex_app_server(*, allow_stdio=True):
     initialization_wait_timed_out = False
     initialization_wait_started = time.monotonic()
     with _core._CODEX_APP_SERVER_LOCK:
+        from ccc_server.codex_handover import in_progress
+        if in_progress():
+            return _core._CODEX_APP_SERVER_TRANSPORT
         while _core._CODEX_APP_SERVER_INITIALIZING:
             remaining = _CODEX_APP_SERVER_INITIALIZING_WAIT_S - (
                 time.monotonic() - initialization_wait_started
@@ -6855,6 +6866,8 @@ def _codex_resume_or_steer_via_app_server_locked(
     resume_at = time.monotonic()
     resumed = _core._codex_app_server_request("thread/resume", resume_params, timeout=20)
     resume_ms = _codex_elapsed_ms(resume_at)
+    if resumed.get("code") == "codex_handover_pending":
+        return {"ok": False, "fallback": "queue", "via": "codex-app-server", "error": resumed["error"]}
     if resumed.get("error"):
         _err = _codex_error_text(resumed)
         _core._resume_ledger_append(

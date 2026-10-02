@@ -865,6 +865,9 @@ def codex_client_dispatch(action, data):
                 resolve_repo=_core.resolve_repo_path, read_thread=lambda _: tombstone)
         else:
             _client_scope("thread/read", {"threadId": tid}, context)
+        if action == "handover":
+            from ccc_server.codex_handover import handover_to_desktop
+            return handover_to_desktop(tid, cwd=_client_read_thread(tid).get("cwd"))
         if action == "queue-owner":
             if _client_desktop_mode():
                 raise ValueError("This desktop conversation keeps its queue with Codex Desktop")

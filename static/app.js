@@ -5437,10 +5437,73 @@
     await launchTerminal({ currentTarget: btn });
   }
 
-  // The Resume-in-CLI button used to live in convToolbar; it was removed
-  // because every session row already exposes the same command via its
-  // copy-button menu. Kept as a no-op shim so existing call sites stay valid.
-  function updateResumeButton() {}
+  // Desktop handover controls share the conversation's existing refresh hook.
+  const $codexHandoverBtn = document.getElementById('codexHandoverBtn');
+  let codexHandoverWait = null;
+
+  function cancelCodexDesktopHandover() {
+    if (codexHandoverWait) clearTimeout(codexHandoverWait.timer);
+    codexHandoverWait = null;
+    if ($codexHandoverBtn) {
+      $codexHandoverBtn.disabled = false;
+      $codexHandoverBtn.textContent = 'Hand over to Codex Desktop';
+      $codexHandoverBtn.title = 'Wait for replies to finish, then continue this conversation in Codex Desktop.';
+    }
+  }
+
+  function updateResumeButton() {
+    if (!$codexHandoverBtn) return;
+    const session = currentSession || {};
+    if (codexHandoverWait && codexHandoverWait.id !== session.id) cancelCodexDesktopHandover();
+    $codexHandoverBtn.style.display = session.source === 'codex' && session.id ? '' : 'none';
+  }
+
+  async function handOverToCodexDesktop() {
+    if (!$codexHandoverBtn || !currentSession.id || currentSession.source !== 'codex') return;
+    if (codexHandoverWait) {
+      cancelCodexDesktopHandover();
+      return;
+    }
+    const request = {
+      id: currentSession.id, timer: null,
+      context: { thread_id: currentSession.id,
+        repo_path: currentSession.repoPath || currentSession.cwd,
+        cwd: currentSession.cwd },
+    };
+    codexHandoverWait = request;
+    async function attempt() {
+      if (codexHandoverWait !== request || currentSession.id !== request.id) return;
+      $codexHandoverBtn.disabled = true;
+      $codexHandoverBtn.textContent = 'Checking handover…';
+      try {
+        const response = await fetch('/api/codex/client/handover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context: request.context }),
+        });
+        const data = await response.json();
+        if (codexHandoverWait !== request || currentSession.id !== request.id) return;
+        if (!data.ok) throw new Error(data.error || 'Could not hand over this conversation.');
+        if (data.pending) {
+          $codexHandoverBtn.textContent = 'Waiting to hand over · Cancel';
+          $codexHandoverBtn.title = (data.message || 'Waiting for Codex replies to finish.') + ' Click to cancel.';
+          $codexHandoverBtn.disabled = false;
+          request.timer = setTimeout(attempt, 3000);
+          return;
+        }
+        codexHandoverWait = null;
+        $codexHandoverBtn.textContent = 'Opened in Codex Desktop';
+        $codexHandoverBtn.title = 'Continue this conversation in Codex Desktop.';
+        $codexHandoverBtn.disabled = false;
+        showOpToast('Conversation handed over to Codex Desktop.', 'success');
+      } catch (error) {
+        if (codexHandoverWait !== request) return;
+        cancelCodexDesktopHandover();
+        showOpToast(error.message || 'Could not hand over this conversation.', 'error');
+      }
+    }
+    await attempt();
+  }
+  if ($codexHandoverBtn) $codexHandoverBtn.addEventListener('click', handOverToCodexDesktop);
 
   function updateAnnounceButton() {
     if (!$announceBtnConv) return;
