@@ -1,0 +1,1 @@
+- Sends to Codex sessions now settle the message echo immediately: the `codex-app-turn` response branch finally calls `markPendingSendDelivered`, so the bubble flips to "✓ Delivered - waiting for Codex" and the Thinking indicator shows during Codex's time-to-first-token instead of the message sitting in "Sending…" for seconds.

@@ -7301,6 +7301,22 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("markPendingSendQueued(pendingSend,", branch)
         self.assertIn("Queued for Codex", branch)
 
+    def test_codex_app_turn_send_marks_pending_echo_delivered(self):
+        """A codex-app-turn ACK must settle the optimistic echo.
+
+        Every other transport branch calls markPendingSendDelivered /
+        markPendingSendQueued / removePendingSendEcho; the app-turn branch
+        used to only toast, so the echo stayed in "Sending…" until the
+        rollout dedupe replaced it and no Thinking indicator ever showed
+        during Codex's multi-second time-to-first-token.
+        """
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        branch = app_js[
+            app_js.index("} else if (data.via === 'codex-app-turn') {"):
+            app_js.index("} else if (data.via === 'cursor-resume') {", app_js.index("} else if (data.via === 'codex-app-turn') {"))
+        ]
+        self.assertIn("markPendingSendDelivered(pendingSend, data);", branch)
+
     def test_pending_spawn_timeout_stays_visible(self):
         """A Claude pending-spawn placeholder that never materializes must not
         vanish silently. It should turn into a visible failed/not-acknowledged

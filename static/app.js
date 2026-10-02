@@ -11811,6 +11811,7 @@
           refreshLiveStatus();
           setTimeout(refreshConversationList, 1500);
         } else if (data.via === 'codex-app-turn') {
+          markPendingSendDelivered(pendingSend, data);
           showOpToast('Codex follow-up started.');
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
