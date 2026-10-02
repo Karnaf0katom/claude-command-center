@@ -9792,6 +9792,7 @@ _LIVE_ACTIVITY_FIELD_KEYS = (
     "stale_tool_age_s",
     "stale_tool_threshold_s",
     "acp_status",
+    "working_since",
 )
 
 
@@ -10013,6 +10014,10 @@ def _acp_live_activity_fields(harness, session_id):
     out["turn_age_s"] = (
         max(0.0, now - track["turn_started_at"]) if track["turn_started_at"] else None
     )
+    # Epoch the current turn started, for the UI's persistent WIP timer.
+    # Suppressed while parked on an approval — that's "waiting", not working.
+    if track["turn_started_at"] and not out["needs_approval"]:
+        out["working_since"] = track["turn_started_at"]
     try:
         threshold = float(_stale_tool_threshold_s())
     except Exception:
@@ -10095,6 +10100,8 @@ def _live_activity_entry_for_session(session_id):
                 entry["needs_approval_message"] = acp_fields.get(
                     "needs_approval_message")
             entry["acp_status"] = _devin_live_acp_status(raw_id)
+            if acp_fields.get("working_since"):
+                entry["working_since"] = acp_fields["working_since"]
         except Exception:
             pass
     elif engine == "hermes":
@@ -10103,6 +10110,16 @@ def _live_activity_entry_for_session(session_id):
         pass
     else:
         _add_sidecar_fields(entry)
+        # sidecar_ts is the in-flight tool's started_at — an honest "working
+        # since" epoch. Parked states (a question or permission prompt waiting
+        # on the human) are waiting, not working, so they get no timer.
+        if (
+            entry.get("sidecar_in_flight")
+            and entry.get("sidecar_ts")
+            and not entry.get("question_waiting")
+            and not entry.get("needs_approval")
+        ):
+            entry["working_since"] = entry["sidecar_ts"]
     return entry
 
 
@@ -12268,6 +12285,7 @@ def build_session_census(since_s=None):
             "helper": helper,
             "unanswered_input": False,
             "turn_age_s": entry.get("turn_age_s"),
+            "working_since": entry.get("working_since"),
             "stuck": bool(entry.get("stale_tool_call")),
             "stuck_age_s": entry.get("stale_tool_age_s") or None,
         })
@@ -12305,6 +12323,7 @@ def build_session_census(since_s=None):
                 "helper": False,
                 "unanswered_input": _census_unanswered_input(sid, ident.get("jsonl_path")),
                 "turn_age_s": None,
+                "working_since": None,
                 "stuck": False,
                 "stuck_age_s": None,
             })
@@ -27933,6 +27952,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             }
             status["state"] = _stamp_session_state(_state_view)
             status["ended_blocked"] = _session_ended_blocked(_state_view)
+            # WIP timer epoch for the open-session header. Engine-specific
+            # providers (codex_state_fields, ACP turn tracking) already set it;
+            # the fallback derives it from an in-flight sidecar tool's
+            # started_at. Parked states (question/permission waiting on the
+            # human) are waiting, not working — no timer.
+            if "working_since" not in status:
+                if (
+                    status.get("sidecar_in_flight")
+                    and status.get("sidecar_ts")
+                    and not status.get("question_waiting")
+                    and not status.get("needs_approval")
+                ):
+                    status["working_since"] = status["sidecar_ts"]
             self.send_json(status)
         elif re.match(r"^/api/conversations/[^/]+/tool-input$", path):
             conv_id = urllib.parse.unquote(path.split("/")[-2])

@@ -3384,6 +3384,7 @@
     'codex_state', 'codex_fresh', 'codex_state_reason',
     'codex_writer', 'codex_desktop_attached',
     'transcript_mtime', 'last_event_ts', 'pending_tool_ts', 'codex_app_server_last_activity_at',
+    'working_since',
   ];
 
   function _liveOverlayFieldsFromRow(c) {
@@ -6049,6 +6050,10 @@
         // sessions.model slug ("fusion-...-sidekick-..."), not the family
         // id the picker sent.
         model: (typeof data.model === 'string' && data.model) || null,
+        // Epoch the current turn began (server-observed; null/0 when idle or
+        // unknown). Drives the WIP timer on the state badge — the client
+        // re-derives the age every second so it survives paused polls.
+        workingSince: Number(data.working_since) || 0,
         acpError: (typeof data.acp_error === 'string' && data.acp_error) || null,
         // Live "can a steer/send be attempted over devin acp" signal from
         // session-status — the open session's row is not always loaded in
@@ -6851,6 +6856,24 @@
     return !!optimistic;
   }
 
+  // WIP timer chip for the sidebar status slot. The server stamps
+  // working_since (epoch the current turn began — codex turn/started, ACP
+  // turn tracking, or a Claude in-flight tool's started_at) on live-activity
+  // entries; parked states (waiting on a question or approval) never carry
+  // it, and are double-gated here anyway so a stale overlay can't flash a
+  // timer on a row that's blocked on the human. data-working-since feeds
+  // the shared 1s ticker, which recounts between renders without a repaint.
+  function wipAgeChipHtml(c) {
+    const sinceSec = Math.max(0, Number((c && c.working_since) || 0) || 0);
+    if (sinceSec <= 0) return '';
+    if (c.needs_approval || c.question_waiting
+        || c.state === 'waiting' || c.codex_state === 'waiting') return '';
+    const age = _optimisticAgeLabel(Date.now() - sinceSec * 1000);
+    return '<span class="conv-signal conv-working-age" data-working-since="' + sinceSec + '"'
+      + ' title="This turn has been working for ' + escapeAttr(age) + '">'
+      + escapeHtml(age) + '</span>';
+  }
+
   const SESSION_ENGINE_LABELS = {
     claude: 'Claude', codex: 'Codex', gemini: 'Gemini', cursor: 'Cursor',
     antigravity: 'Antigravity', hermes: 'Hermes', kimi: 'Kimi',
@@ -7112,6 +7135,21 @@
     _optimisticAgentMisses = 0;
     _optimisticAgentTick = setInterval(_tickOptimisticAgeNow, 1000);
   }
+
+  // WIP timers: one shared 1s tick relabels every [data-working-since] chip —
+  // sidebar row ages and the codex state badge's elapsed time. The server
+  // stamps the epoch into the attribute at render time, so the label stays
+  // honest across innerHTML rebuilds and paused polls; an idle tick is one
+  // cheap selector query.
+  setInterval(() => {
+    const els = document.querySelectorAll('[data-working-since]');
+    if (!els.length) return;
+    const nowMs = Date.now();
+    els.forEach((el) => {
+      const since = Number(el.getAttribute('data-working-since') || 0);
+      if (since > 0) el.textContent = _optimisticAgeLabel(nowMs - since * 1000);
+    });
+  }, 1000);
 
   async function cancelOptimisticAgentTurn($view, button) {
     const sid = currentSession && currentSession.id;
@@ -8614,7 +8652,18 @@
     badge.title = wakeable
       ? ((reason || TITLES[st] || '') + ' - click to wake GPT')
       : (writerTitle || reason || TITLES[st] || '');
+    // WIP timer: while the turn is running show "Working · 12s" — the epoch
+    // lives in data-working-since so the shared 1s ticker keeps it counting
+    // between status polls.
+    const _wipSince = (st === 'working') ? Number(liveStatus.workingSince || 0) : 0;
+    const wipAgeHtml = _wipSince > 0
+      ? '<span class="ccs-age" data-working-since="' + _wipSince + '"'
+        + ' title="This turn has been working for ' + escapeAttr(_optimisticAgeLabel(Date.now() - _wipSince * 1000)) + '">'
+        + escapeHtml(_optimisticAgeLabel(Date.now() - _wipSince * 1000))
+        + '</span>'
+      : '';
     badge.innerHTML = '<span class="ccs-dot"></span><span class="ccs-label">' + escapeHtml(label) + '</span>'
+      + wipAgeHtml
       + (reason ? '<span class="ccs-reason">' + escapeHtml(reason) + '</span>' : '')
       + attachedSuffix
       + grabBackHtml
@@ -34793,6 +34842,7 @@
         const doneTitle = 'Turn finished ' + (doneMins < 1 ? 'just now' : doneMins + 'm ago');
         signals += '<span class="conv-signal done" title="' + escapeAttr(doneTitle) + '">✓ done</span>';
       }
+      signals += wipAgeChipHtml(c);
       const _showGitStateSignals = !_rowsCompactOn;
       if (c.source === 'pkood') {
         const ps = (c.pkood_status || '').toUpperCase();

@@ -1461,13 +1461,17 @@ def _codex_app_server_record_thread(thread_id, thread):
         # A thread/read after CCC restarts is observation, not progress. Keep
         # the persisted activity timestamp when it rediscovers the same turn;
         # otherwise every watcher reconciliation would make a silent turn look
-        # newly active and it could sleep forever.
+        # newly active and it could sleep forever. For a genuinely different
+        # turn the true start is unknowable - "at least since now" is honest.
         if previous_turn_id != turn_id or not state.get("last_activity_at"):
             state["last_activity_at"] = state["last_event_at"]
+        if previous_turn_id != turn_id:
+            state["turn_started_at"] = time.time()
         _core._CODEX_APP_SERVER_TURN_THREAD[turn_id] = thread_id
     elif str(status or "").lower() == "idle":
         state.pop("active_turn_id", None)
         state.pop("active_writer", None)
+        state.pop("turn_started_at", None)
         state["thread_needs_approval"] = False
         state["active_flags"] = []
     for turn in turns:
@@ -2324,6 +2328,10 @@ def _codex_app_server_activity_fields(session_id):
     if not active:
         return fields
     item = state.get("active_item") if isinstance(state.get("active_item"), dict) else None
+    # WIP timer epoch for the open-session badge — the stamped turn start,
+    # not last_activity (which advances on every delta and would pin the
+    # timer near zero).
+    turn_start = state.get("turn_started_at") or state.get("ccc_turn_start_pending_at")
     if item and item.get("tool") and item.get("tool") != "Thinking":
         fields.update({
             "sidecar_status": "active",
@@ -2333,6 +2341,8 @@ def _codex_app_server_activity_fields(session_id):
             "sidecar_ts": item.get("ts") or state.get("last_activity_at") or time.time(),
             "sidecar_in_flight": bool(item.get("in_flight", True)),
         })
+        if turn_start:
+            fields["working_since"] = turn_start
         return fields
     fields.update({
         "sidecar_status": "active",
@@ -2341,6 +2351,8 @@ def _codex_app_server_activity_fields(session_id):
         "sidecar_ts": state.get("last_activity_at") or state.get("last_event_at") or time.time(),
         "sidecar_in_flight": True,
     })
+    if turn_start:
+        fields["working_since"] = turn_start
     return fields
 
 
@@ -2575,6 +2587,7 @@ def _codex_app_server_handle_notification(method, params):
                 pump_after_notification = True
                 state.pop("active_turn_id", None)
                 state.pop("active_writer", None)
+                state.pop("turn_started_at", None)
                 state.pop("active_item", None)
                 state.pop("active_items", None)
                 state["thread_needs_approval"] = False
@@ -2590,6 +2603,11 @@ def _codex_app_server_handle_notification(method, params):
             and str(state.get("active_turn_id") or "") == str(turn_id)
         )
         if turn_id:
+            if str(state.get("active_turn_id") or "") != str(turn_id):
+                # Genuine new turn - stamp its start so the UI's WIP timer
+                # reads "working for Ns" off a real boundary, not off the
+                # poll that happened to notice it.
+                state["turn_started_at"] = now
             state["active_turn_id"] = turn_id
             state["last_activity_at"] = now
         # A notification without our transient start marker proves that a turn
@@ -2640,6 +2658,11 @@ def _codex_app_server_handle_notification(method, params):
         if not late_completed_turn:
             state["last_activity_at"] = now
             if turn_id:
+                if str(state.get("active_turn_id") or "") != str(turn_id):
+                    # First sighting of this turn without a turn/started
+                    # (e.g. CCC reconnected mid-turn) - the real start is
+                    # unknown, so "at least since now" is the honest stamp.
+                    state["turn_started_at"] = now
                 state["active_turn_id"] = turn_id
         if method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage") or params.get("token_usage") or params.get("usage")
@@ -2670,6 +2693,7 @@ def _codex_app_server_handle_notification(method, params):
         if not turn_id or state.get("active_turn_id") == turn_id:
             state.pop("active_turn_id", None)
             state.pop("active_writer", None)
+            state.pop("turn_started_at", None)
         state.pop("active_item", None)
         state.pop("active_items", None)
         state["status"] = "idle"
@@ -3346,6 +3370,7 @@ def _codex_app_server_request(method, params=None, timeout=20, *, _route=True, _
                 if turn_id:
                     state["active_turn_id"] = turn_id
                     state["active_writer"] = "ccc"
+                    state["turn_started_at"] = time.time()
                     _core._CODEX_APP_SERVER_TURN_THREAD[turn_id] = thread_id
     return response
 
@@ -5349,6 +5374,7 @@ def _codex_reconcile_thread_idle(session_id):
         state["status"] = "idle"
         state.pop("active_turn_id", None)
         state.pop("active_writer", None)
+        state.pop("turn_started_at", None)
         state.pop("active_item", None)
         state.pop("active_items", None)
         if cleared_phantom:
@@ -10495,6 +10521,12 @@ def _extract_codex_tail_meta(path):
             "pending_tool": None,
             "pending_file": None,
             "pending_tool_ts": 0,
+            # Turn-boundary timestamps for the sidebar WIP timer. task_started
+            # stamps the live turn's real start; user_message stamps the last
+            # submitted prompt (covers turns whose task_started is absent or
+            # hasn't flushed yet); both clear semantics differ so both kept.
+            "turn_started_ts": 0,
+            "last_user_ts": 0,
             "needs_approval": False,
             "needs_approval_message": "",
             "pending_approval_call_id": "",
@@ -10634,6 +10666,13 @@ def _extract_codex_tail_meta(path):
                     meta["model"] = payload.get("model") or meta["model"]
                     continue
                 if ev_type == "event_msg":
+                    if ptype == "task_started":
+                        # The turn's own durable start marker — cleared by
+                        # task_complete below. Drives the sidebar WIP timer.
+                        if ts_epoch:
+                            meta["turn_started_ts"] = ts_epoch
+                            meta["last_meaningful_ts"] = ts_epoch
+                        continue
                     if ptype == "user_message":
                         text = _core._strip_ccc_session_state_instruction(
                             payload.get("message") or ""
@@ -10651,6 +10690,7 @@ def _extract_codex_tail_meta(path):
                         pending_calls.clear()
                         if ts_epoch:
                             meta["last_meaningful_ts"] = ts_epoch
+                            meta["last_user_ts"] = ts_epoch
                     elif ptype == "agent_message":
                         text = (payload.get("message") or "").strip()
                         if text:
@@ -10667,6 +10707,7 @@ def _extract_codex_tail_meta(path):
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
                         meta["pending_tool_ts"] = 0
+                        meta["turn_started_ts"] = 0
                         meta["needs_approval"] = False
                         meta["needs_approval_message"] = ""
                         meta["pending_approval_call_id"] = ""
@@ -11086,6 +11127,26 @@ def _codex_state_fields(
             fields["codex_desktop_attached"] = True
     except Exception:
         snap = {}
+
+    def _working_since():
+        """Epoch the current turn began, for the UI's WIP timer. Preference:
+        the app-server's stamped turn start (exact), then the rollout's own
+        task_started/user_message markers (what the dashboard can read even
+        when the worker owns the transport)."""
+        for v in (
+            app_state.get("turn_started_at"),
+            app_state.get("ccc_turn_start_pending_at"),
+            tail.get("turn_started_ts"),
+            tail.get("last_user_ts"),
+        ):
+            try:
+                f = float(v or 0)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                return f
+        return 0.0
+
     try:
         if app_state and (app_state.get("active_turn_id") or str(app_state.get("status") or "").lower() == "active"):
             try:
@@ -11097,6 +11158,9 @@ def _codex_state_fields(
             if not (tail_ts > app_ts + 2 and (tail or {}).get("last_event_type") == "result"):
                 fields["codex_state"] = "working"
                 fields["codex_fresh"] = True
+                ws = _working_since()
+                if ws:
+                    fields["working_since"] = ws
                 return fields
     except Exception:
         pass
@@ -11110,6 +11174,9 @@ def _codex_state_fields(
             if snap.get("writer") == "desktop"
             else "An active Codex turn is writing this thread"
         )
+        ws = _working_since()
+        if ws:
+            fields["working_since"] = ws
         return fields
     if not path or mtime is None:
         return fields
@@ -11126,6 +11193,9 @@ def _codex_state_fields(
     fields["codex_state"] = state
     if state == "working":
         fields["codex_fresh"] = (now - float(mtime)) < _codex_fresh_threshold_s()
+        ws = _working_since()
+        if ws:
+            fields["working_since"] = ws
     elif state == "stuck":
         fields["codex_state_reason"] = _codex_stuck_reason(tail, mtime, now)
     return fields
