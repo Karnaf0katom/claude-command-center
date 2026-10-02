@@ -6853,6 +6853,208 @@ def _codex_spawn_via_app_server(
     return _core._finalize_spawn_response(resp, entry, {"cwd": spawn_cwd, "repo_path": repo_for_logs}, wait_for_session_id=False)
 
 
+# Slack between "the daemon last reported on this thread" (last_event_at,
+# stamped only by notification/response handlers) and the rollout file mtime.
+# The daemon writes a rollout row then notifies, so its own writes land at or
+# below the watermark; the slack absorbs flush-vs-notify ordering jitter. A
+# foreign writer (a bare `codex exec` run, an app-server that doesn't share
+# our daemon) appends without notifying us — its mtime lands above the
+# watermark and sends the caller down the full resume path.
+_CODEX_THREAD_FRESH_SLACK_S = 5.0
+
+
+def _codex_app_server_thread_fresh(session_id, *, state=None, rollout=None):
+    """True when the app-server's in-memory view of this thread is current.
+
+    Skipping thread/resume is only safe when (a) the daemon has provably
+    reported on this thread in this process (`last_event_at`, set exclusively
+    by notification/response handlers — never by request bookkeeping), and
+    (b) the rollout has not moved since that report: the file is append-only,
+    so an mtime at/below the watermark means no turn landed that the daemon
+    cannot see. Anything else — no state, no rollout, moved file, busy
+    markers — returns False and the caller takes the full resume path, which
+    is also the authority that reports a busy thread.
+    """
+    state = state if state is not None else _core._codex_app_server_thread_state(session_id)
+    if not state:
+        return False
+    heard = 0.0
+    for key in ("last_event_at", "last_activity_at"):
+        try:
+            heard = max(heard, float(state.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    if heard <= 0:
+        return False
+    if (
+        str(state.get("status") or "").strip().lower() == "active"
+        or state.get("active_turn_id")
+        or state.get("ccc_turn_start_pending")
+        or state.get("active_flags")
+        or state.get("pending_approval_request")
+        or state.get("active_items")
+    ):
+        return False
+    if rollout is None:
+        rollout = _core._codex_rollout_stat(session_id)
+    try:
+        mtime = float((rollout or {}).get("mtime_ns") or 0) / 1e9
+    except (TypeError, ValueError):
+        return False
+    if mtime <= 0:
+        return False
+    return mtime <= heard + _CODEX_THREAD_FRESH_SLACK_S
+
+
+def _codex_error_is_thread_unloaded(response):
+    """Definite 'the daemon does not have this thread' replies — safe to
+    retry after thread/resume reloads it."""
+    lowered = _codex_error_text(response).lower()
+    return any(
+        token in lowered
+        for token in ("thread not found", "not loaded", "unknown thread", "no such thread")
+    )
+
+
+def _codex_wake_turn_accepted(
+    session_id,
+    text,
+    started,
+    *,
+    total_start,
+    turn_start_at,
+    turn_start_ms,
+    resume_ms,
+    cwd,
+    model,
+    baseline_state,
+    baseline_rollout,
+    app_server_warm,
+    resume_skipped=False,
+):
+    turn = ((started.get("result") or {}).get("turn") or {})
+    _turn_id = turn.get("id")
+    _core._codex_telemetry_register_turn(
+        session_id,
+        _turn_id,
+        path="wake",
+        started_at_monotonic=turn_start_at,
+        transport=_core._codex_app_server_transport_kind(),
+        cwd=cwd,
+        model=model,
+    )
+    _core._resume_ledger_append(
+        "codex_wake_ok", sid=session_id,
+        via="codex-app-turn", turn_id=_turn_id,
+    )
+    # The turn is accepted and already running. Proving the prompt durably
+    # landed is diagnostics-only -- nothing downstream branches on
+    # `confirmed`, and the rollout echo costs ~1.5-5s the user counts as
+    # send latency. Same treatment as the spawn path: report pending and
+    # finish the check on a daemon thread (see _codex_finalize_wake_async).
+    _codex_finalize_wake_async(
+        session_id,
+        _turn_id,
+        expected_text=text,
+        baseline_state=baseline_state,
+        baseline_rollout=baseline_rollout,
+        model=model,
+        cwd=cwd,
+    )
+    total_ms = _codex_elapsed_ms(total_start)
+    _core._codex_telemetry_append(
+        "codex_wake",
+        ok=True,
+        via="codex-app-turn",
+        app_server_warm=app_server_warm,
+        resume_ms=resume_ms,
+        resume_skipped=bool(resume_skipped),
+        turn_start_ms=turn_start_ms,
+        confirm_ms=None,
+        total_ms=total_ms,
+        confirmed=None,
+        confirmation_source="pending",
+        warning=None,
+        transport=_core._codex_app_server_transport_kind(),
+        session_id=session_id,
+        turn_id=_turn_id,
+        cwd=cwd,
+        model=model,
+    )
+    return {
+        "ok": True,
+        "via": "codex-app-turn",
+        "accepted": True,
+        # None (not False) until _codex_finalize_wake_async lands: the turn
+        # was accepted, the durability check just has not reported yet.
+        "confirmed": None,
+        "confirmation_source": "pending",
+        "warning": None,
+        "turn_id": _turn_id,
+        "session_id": session_id,
+        "app_server_transport": _core._codex_app_server_transport_kind(),
+        "app_server_warm": app_server_warm,
+        "resume_ms": resume_ms,
+        "resume_skipped": bool(resume_skipped),
+        "turn_start_ms": turn_start_ms,
+        "confirm_ms": None,
+        "latency_ms": total_ms,
+    }
+
+
+def _codex_wake_turn_start_failed(
+    session_id,
+    started,
+    *,
+    total_start,
+    turn_start_ms,
+    resume_ms,
+    cwd,
+    model,
+    app_server_warm,
+    resume_skipped=False,
+):
+    _err = _codex_error_text(started)
+    # Same policy as thread/resume failures: the exec fallback is gone, so a
+    # failed turn/start parks the message in the durable queue for the pump
+    # to retry through the app-server. An ambiguous transport failure is
+    # NEVER retried inline — the turn may have started server-side.
+    _core._resume_ledger_append(
+        "codex_wake_queued", sid=session_id,
+        stage="turn/start", reason=_err,
+    )
+    _core._codex_telemetry_append(
+        "codex_wake",
+        ok=False,
+        via="codex-app-server",
+        fallback="queue",
+        fallback_reason="turn/start failed",
+        stage="turn/start",
+        error=_err,
+        app_server_warm=app_server_warm,
+        resume_ms=resume_ms,
+        resume_skipped=bool(resume_skipped),
+        turn_start_ms=turn_start_ms,
+        total_ms=_codex_elapsed_ms(total_start),
+        transport=_core._codex_app_server_transport_kind(),
+        session_id=session_id,
+        cwd=cwd,
+        model=model,
+    )
+    return {
+        "ok": False,
+        "via": "codex-app-server",
+        "stage": "turn/start",
+        "fallback": "queue",
+        "error": _err,
+        "app_server_warm": app_server_warm,
+        "resume_ms": resume_ms,
+        "resume_skipped": bool(resume_skipped),
+        "turn_start_ms": turn_start_ms,
+        "latency_ms": _codex_elapsed_ms(total_start),
+    }
+
+
 def _codex_resume_or_steer_via_app_server(
     session_id,
     text,
@@ -6922,6 +7124,68 @@ def _codex_resume_or_steer_via_app_server_locked(
         return {"ok": False, "fallback": "queue", "error": "Codex app-server disabled"}
     total_start = time.monotonic()
     app_server_warm = _core._codex_app_server_is_live()
+    # Fast path: when the daemon's in-memory view of the thread is provably
+    # current (it has reported on the thread and the append-only rollout has
+    # not moved since), turn/start alone is enough — the same shape as the
+    # codex-client/desktop send path (thread/read + turn/start, no resume).
+    # thread/resume re-reads the whole thread and costs ~100-700ms per send.
+    # A definite "thread not found"/busy reply falls through to resume below;
+    # an ambiguous transport failure returns the queue response immediately —
+    # never retry a maybe-started turn inline.
+    fast_baseline_state = None
+    fast_baseline_rollout = None
+    if allow_start and app_server_warm:
+        fast_baseline_state = _core._codex_app_server_thread_state(session_id)
+        fast_baseline_rollout = _core._codex_rollout_stat(session_id)
+        if _codex_app_server_thread_fresh(
+            session_id, state=fast_baseline_state, rollout=fast_baseline_rollout,
+        ):
+            try:
+                _core._resume_ledger_append(
+                    "codex_wake_stage", sid=session_id, stage="turn-start-fast",
+                )
+            except Exception:
+                pass
+            turn_start_at = time.monotonic()
+            started = _core._codex_app_server_request(
+                "turn/start",
+                _codex_turn_params(
+                    session_id, text, cwd=cwd, model=model,
+                    image_paths=image_paths, effort=reasoning_effort,
+                ),
+                timeout=20,
+            )
+            turn_start_ms = _codex_elapsed_ms(turn_start_at)
+            if _core._codex_response_succeeded(started):
+                return _codex_wake_turn_accepted(
+                    session_id, text, started,
+                    total_start=total_start,
+                    turn_start_at=turn_start_at,
+                    turn_start_ms=turn_start_ms,
+                    resume_ms=0,
+                    cwd=cwd, model=model,
+                    baseline_state=fast_baseline_state,
+                    baseline_rollout=fast_baseline_rollout,
+                    app_server_warm=app_server_warm,
+                    resume_skipped=True,
+                )
+            if _codex_error_is_thread_unloaded(started) or _core._codex_error_is_not_steerable(started):
+                try:
+                    _core._resume_ledger_append(
+                        "codex_wake_stage", sid=session_id, stage="fast-miss-resume",
+                    )
+                except Exception:
+                    pass
+            else:
+                return _codex_wake_turn_start_failed(
+                    session_id, started,
+                    total_start=total_start,
+                    turn_start_ms=turn_start_ms,
+                    resume_ms=None,
+                    cwd=cwd, model=model,
+                    app_server_warm=app_server_warm,
+                    resume_skipped=True,
+                )
     resume_params = {
         "threadId": session_id,
         "excludeTurns": False,
@@ -7104,72 +7368,17 @@ def _codex_resume_or_steer_via_app_server_locked(
     )
     turn_start_ms = _codex_elapsed_ms(turn_start_at)
     if _core._codex_response_succeeded(started):
-        turn = ((started.get("result") or {}).get("turn") or {})
-        _turn_id = turn.get("id")
-        _core._codex_telemetry_register_turn(
-            session_id,
-            _turn_id,
-            path="wake",
-            started_at_monotonic=turn_start_at,
-            transport=_core._codex_app_server_transport_kind(),
-            cwd=cwd,
-            model=model,
-        )
-        _core._resume_ledger_append(
-            "codex_wake_ok", sid=session_id,
-            via="codex-app-turn", turn_id=_turn_id,
-        )
-        # The turn is accepted and already running. Proving the prompt durably
-        # landed is diagnostics-only -- nothing downstream branches on
-        # `confirmed`, and the rollout echo costs ~1.5-5s the user counts as
-        # send latency. Same treatment as the spawn path: report pending and
-        # finish the check on a daemon thread (see _codex_finalize_wake_async).
-        _codex_finalize_wake_async(
-            session_id,
-            _turn_id,
-            expected_text=text,
+        return _codex_wake_turn_accepted(
+            session_id, text, started,
+            total_start=total_start,
+            turn_start_at=turn_start_at,
+            turn_start_ms=turn_start_ms,
+            resume_ms=resume_ms,
+            cwd=cwd, model=model,
             baseline_state=baseline_state,
             baseline_rollout=baseline_rollout,
-            model=model,
-            cwd=cwd,
-        )
-        total_ms = _codex_elapsed_ms(total_start)
-        _core._codex_telemetry_append(
-            "codex_wake",
-            ok=True,
-            via="codex-app-turn",
             app_server_warm=app_server_warm,
-            resume_ms=resume_ms,
-            turn_start_ms=turn_start_ms,
-            confirm_ms=None,
-            total_ms=total_ms,
-            confirmed=None,
-            confirmation_source="pending",
-            warning=None,
-            transport=_core._codex_app_server_transport_kind(),
-            session_id=session_id,
-            turn_id=_turn_id,
-            cwd=cwd,
-            model=model,
         )
-        return {
-            "ok": True,
-            "via": "codex-app-turn",
-            "accepted": True,
-            # None (not False) until _codex_finalize_wake_async lands: the turn
-            # was accepted, the durability check just has not reported yet.
-            "confirmed": None,
-            "confirmation_source": "pending",
-            "warning": None,
-            "turn_id": _turn_id,
-            "session_id": session_id,
-            "app_server_transport": _core._codex_app_server_transport_kind(),
-            "app_server_warm": app_server_warm,
-            "resume_ms": resume_ms,
-            "turn_start_ms": turn_start_ms,
-            "confirm_ms": None,
-            "latency_ms": total_ms,
-        }
     if _core._codex_error_is_not_steerable(started):
         _err = _codex_error_text(started)
         _core._resume_ledger_append(
@@ -7204,42 +7413,14 @@ def _codex_resume_or_steer_via_app_server_locked(
             "turn_start_ms": turn_start_ms,
             "latency_ms": _codex_elapsed_ms(total_start),
         }
-    _err = _codex_error_text(started)
-    # Same policy as thread/resume failures: the exec fallback is gone, so a
-    # failed turn/start parks the message in the durable queue for the pump
-    # to retry through the app-server.
-    _core._resume_ledger_append(
-        "codex_wake_queued", sid=session_id,
-        stage="turn/start", reason=_err,
-    )
-    _core._codex_telemetry_append(
-        "codex_wake",
-        ok=False,
-        via="codex-app-server",
-        fallback="queue",
-        fallback_reason="turn/start failed",
-        stage="turn/start",
-        error=_err,
-        app_server_warm=app_server_warm,
-        resume_ms=resume_ms,
+    return _codex_wake_turn_start_failed(
+        session_id, started,
+        total_start=total_start,
         turn_start_ms=turn_start_ms,
-        total_ms=_codex_elapsed_ms(total_start),
-        transport=_core._codex_app_server_transport_kind(),
-        session_id=session_id,
-        cwd=cwd,
-        model=model,
+        resume_ms=resume_ms,
+        cwd=cwd, model=model,
+        app_server_warm=app_server_warm,
     )
-    return {
-        "ok": False,
-        "via": "codex-app-server",
-        "stage": "turn/start",
-        "fallback": "queue",
-        "error": _err,
-        "app_server_warm": app_server_warm,
-        "resume_ms": resume_ms,
-        "turn_start_ms": turn_start_ms,
-        "latency_ms": _codex_elapsed_ms(total_start),
-    }
 
 
 def _codex_steer_via_app_server(session_id, text, cwd=None, model=None, image_paths=None):
@@ -7255,6 +7436,47 @@ def _codex_steer_via_app_server(session_id, text, cwd=None, model=None, image_pa
     # external/unknown merely because CCC has not observed its owning client.
     # Ask Codex to resume the thread and use its actual turn id below; the
     # native RPC is the authority on whether the active turn can be steered.
+    #
+    # Fast path first: when the daemon has already reported this thread's
+    # active turn, expectedTurnId makes turn/steer self-verifying — a stale
+    # turn id is rejected, not steered. Only a definite miss falls through to
+    # the resume below; an ambiguous transport failure returns immediately —
+    # the input may already have been injected, and a retry could double-post.
+    try:
+        _state = _core._codex_app_server_thread_state(session_id)
+    except Exception:
+        _state = {}
+    _fast_turn_id = str((_state or {}).get("active_turn_id") or "").strip()
+    if _fast_turn_id and _core._codex_app_server_is_live():
+        _bind_codex_queued_steer_ack_suppression(
+            session_id, text, _fast_turn_id,
+        )
+        steered = _core._codex_app_server_request(
+            "turn/steer",
+            {
+                "threadId": session_id,
+                "expectedTurnId": _fast_turn_id,
+                "input": _codex_user_input(text, image_paths=image_paths),
+            },
+            timeout=20,
+        )
+        if _core._codex_response_succeeded(steered):
+            return {
+                "ok": True,
+                "via": "codex-steer",
+                "turn_id": (steered["result"] or {}).get("turnId") or _fast_turn_id,
+                "session_id": session_id,
+                "resume_skipped": True,
+            }
+        if _codex_error_is_thread_unloaded(steered) or _core._codex_error_is_not_steerable(steered):
+            pass  # stale fast-path state — resume below is the authority
+        else:
+            return {
+                "ok": False,
+                "via": "codex-steer",
+                "code": "codex_steer_failed",
+                "error": _codex_error_text(steered) or "Codex steer failed",
+            }
     resume_params = {
         "threadId": session_id,
         "excludeTurns": False,

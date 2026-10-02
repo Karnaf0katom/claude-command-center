@@ -7486,7 +7486,7 @@
         appendStageRow(s.name, done, !done && i === currentIdx);
       });
     } else {
-      appendStageRow('Waiting for wake request', false, true);
+      appendStageRow('Waiting for delivery', false, true);
     }
     const readout = document.createElement('div');
     readout.className = 'wb-readout';
@@ -7950,7 +7950,7 @@
     }
   });
 
-  // "Wake up" / "Push input" button inside the live tool strip (Working... / Generating... / in-flight tool > 60s).
+  // "Nudge" / "Push input" button inside the live tool strip (Working... / Generating... / in-flight tool > 60s).
   // Uses delegation because the button is inside innerHTML-replaced content.
   document.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('.cl-working-wake-btn, .cl-agy-wake-btn');
@@ -7961,7 +7961,7 @@
     if (!sid || btn.disabled) return;
     btn.disabled = true;
     const origText = btn.textContent;
-    btn.textContent = 'Waking…';
+    btn.textContent = 'Sending…';
     const engine = ((currentSession && (currentSession.source || currentSession.engine)) || '').toLowerCase();
     const wakeText = (engine === 'kimi')
       ? 'continue'
@@ -7989,16 +7989,16 @@
         });
         data = await res.json().catch(() => ({}));
       }
-      if (!data.ok) throw new Error(data.error || 'wake failed');
+      if (!data.ok) throw new Error(data.error || 'nudge failed');
       btn.textContent = 'Sent';
-      showOpToast('Wake message sent to session.');
+      showOpToast('Nudge sent to session.');
       setTimeout(refreshConversationList, 1500);
       setTimeout(() => {
         btn.textContent = origText;
         btn.disabled = false;
       }, 3000);
     } catch (err) {
-      showOpToast('Wake failed: ' + (err && err.message || 'unknown'), 'error');
+      showOpToast('Nudge failed: ' + (err && err.message || 'unknown'), 'error');
       btn.textContent = 'Failed';
       setTimeout(() => {
         btn.textContent = origText;
@@ -8208,7 +8208,7 @@
       stuckInline.innerHTML = '<span class="cl-stuck-icon">⚠</span>'
         + '<span class="cl-tool">Stuck: no output for ' + stuckMins + 'm</span>'
         + (stuckToolName ? '<span class="cl-file">last: ' + escapeHtml(stuckToolName) + '</span>' : '')
-        + '<button class="cl-stuck-wake" type="button" title="Send &quot;continue&quot; to restart this turn where it left off">Wake up</button>';
+        + '<button class="cl-stuck-wake" type="button" title="Send a continue nudge to restart this turn where it left off">Nudge</button>';
       stuckInline.title = 'This turn has produced no output for ' + stuckMins
         + 'm. The session may be stuck. Click to focus the composer; sending a message nudges it.';
       if (stuckInline.parentElement !== $view || stuckInline !== $view.lastElementChild) {
@@ -8226,7 +8226,7 @@
             const sid = currentSession && currentSession.id;
             if (!sid || wakeBtn.disabled) return;
             wakeBtn.disabled = true;
-            wakeBtn.textContent = 'Waking…';
+            wakeBtn.textContent = 'Sending…';
             fetch('/api/inject-input', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -8475,7 +8475,7 @@
       const _silenceSec = (_liveMatches && liveStatus.staleToolAgeS) || (ageSec < 9000 ? ageSec : 0);
       const showGeneratingWakeBtn = _silenceSec >= 60 && !hasWakeProgress;
       const _wakeBtnHtml = showGeneratingWakeBtn
-        ? '<button type="button" class="cl-working-wake-btn" title="No output for ' + Math.max(1, Math.floor(_silenceSec / 60)) + 'm - click to send a status check / wake input">Wake up</button>'
+        ? '<button type="button" class="cl-working-wake-btn" title="No output for ' + Math.max(1, Math.floor(_silenceSec / 60)) + 'm - click to send a status-check nudge">Nudge</button>'
         : '';
       inline.className = 'conv-live-tool-inline is-generating' + (_activeItem.label ? ' in-flight' : '');
       // Webui panes get the kimi-web moon-phases waiting spinner (honest
@@ -8544,7 +8544,7 @@
       + (isQuestion ? '' : expandedDetailHtml)
       + '<span class="cl-age">' + ageLbl + '</span>'
       + (isQuestion ? detailHtml : '')
-      + (showWakeBtn ? '<button type="button" class="cl-working-wake-btn cl-agy-wake-btn" title="Session has had no output for ' + dur + ' - click to push a wake message">Wake up</button>' : '');
+      + (showWakeBtn ? '<button type="button" class="cl-working-wake-btn cl-agy-wake-btn" title="Session has had no output for ' + dur + ' - click to send a nudge">Nudge</button>' : '');
     inline.innerHTML = expandHtml;
     _reanchorToTailUnlessOnlyTransientBetween($view, inline);
     _liveStripShown = true;
@@ -8643,14 +8643,14 @@
     if (wakeable) {
       badge.setAttribute('role', 'button');
       badge.setAttribute('tabindex', '0');
-      badge.setAttribute('aria-label', 'Wake GPT - ' + (LABELS[st] || st));
+      badge.setAttribute('aria-label', 'Nudge GPT - ' + (LABELS[st] || st));
     } else {
       badge.removeAttribute('role');
       badge.removeAttribute('tabindex');
       badge.removeAttribute('aria-label');
     }
     badge.title = wakeable
-      ? ((reason || TITLES[st] || '') + ' - click to wake GPT')
+      ? ((reason || TITLES[st] || '') + ' - click to nudge GPT')
       : (writerTitle || reason || TITLES[st] || '');
     // WIP timer: while the turn is running show "Working · 12s" — the epoch
     // lives in data-working-since so the shared 1s ticker keeps it counting
@@ -8667,7 +8667,7 @@
       + (reason ? '<span class="ccs-reason">' + escapeHtml(reason) + '</span>' : '')
       + attachedSuffix
       + grabBackHtml
-      + (wakeable ? '<span class="ccs-wake" aria-hidden="true" title="Wake GPT">↻</span>' : '');
+      + (wakeable ? '<span class="ccs-wake" aria-hidden="true" title="Nudge GPT">↻</span>' : '');
   }
 
   const $convSessionId = document.getElementById('convSessionId');
@@ -31505,7 +31505,7 @@
           : '<button class="kanban-action-btn" data-action="create-issue" title="Create GitHub issue">&#128221;</button>';
         const isCardCodex = c.source === 'codex' || c.engine === 'codex';
         const wakeBtn = (isCardCodex && c.stale_tool_call && !c.archived && !c.verified)
-          ? '<button class="kanban-action-btn is-wake" data-action="wake-codex" title="Wake Codex with a status check">&#8635;</button>'
+          ? '<button class="kanban-action-btn is-wake" data-action="wake-codex" title="Nudge Codex with a status check">&#8635;</button>'
           : '';
         // Persistent per-card ✨: show on every card that has a first_message
         // (both un-summarized AND user-renamed). A user who rename-regretted
@@ -33401,12 +33401,12 @@
       )) {
         data = await postInjectInput(sessionId, CODEX_WAKE_TEXT, 'send');
       }
-      if (!data.ok) throw new Error(data.error || 'wake failed');
+      if (!data.ok) throw new Error(data.error || 'nudge failed');
       if (opts && opts.view) {
         renderConvWakeOutcome(opts.view, data);
       }
       touchSessionOptimistically(sessionId);
-      showOpToast(data.via === 'codex-steer' ? 'Wake sent to running Codex turn.' : 'Wake sent to Codex.');
+      showOpToast(data.via === 'codex-steer' ? 'Nudge sent to running Codex turn.' : 'Nudge sent to Codex.');
       setTimeout(refreshConversationList, 1500);
       setTimeout(refreshConversationList, 3500);
       if (feedbackEl) {
@@ -33421,7 +33421,7 @@
       }
     } catch (err) {
       clearSessionSending(sessionId);
-      showOpToast('Wake failed: ' + (err.message || 'unknown'), 'error');
+      showOpToast('Nudge failed: ' + (err.message || 'unknown'), 'error');
       if (feedbackEl) {
         feedbackEl.textContent = originalText;
         feedbackEl.disabled = false;
@@ -34487,7 +34487,7 @@
           // is actually stuck. Surface the same Stuck badge so it's visible.
           const mins = Math.floor(sidecarAge / 60);
           const stuckTitle = 'This session has shown no progress for ' + mins
-            + 'm while "' + (c.sidecar_tool || 'working') + '" - it may be stuck. Open it to wake or stop it.';
+            + 'm while "' + (c.sidecar_tool || 'working') + '" - it may be stuck. Open it to nudge or stop it.';
           liveToolHtml = '<span class="conv-live-tool stale" title="' + escapeAttr(stuckTitle) + '">'
             + '<span class="conv-live-name">Stuck</span>'
             + '<span class="conv-live-file">' + escapeHtml(liveActivityCompactToolLabel(c.sidecar_tool)) + '</span>'
@@ -34911,7 +34911,7 @@
         ? '<button class="conv-merge-btn" data-role="merge" title="' + escapeHtml(_mergeTitle) + '">&#128256;</button>'
         : '';
       const wakeBtn = (isCodexRow && c.stale_tool_call && !c.archived && !c.verified)
-        ? '<button class="conv-wake-btn" data-role="wake-codex" title="Wake Codex with a status check" aria-label="Wake Codex">&#8635;</button>'
+        ? '<button class="conv-wake-btn" data-role="wake-codex" title="Nudge Codex with a status check" aria-label="Nudge Codex">&#8635;</button>'
         : '';
       const elevateObjectBtn = (opts.elevateToObject && !isBacklogRow && !isGithubPrRow)
         ? '<button class="conv-elevate-object-btn" data-role="elevate-to-object"'
@@ -42750,7 +42750,7 @@
       + (canWakeCodex
         ? '<button type="button" class="cob-wake-btn" data-role="outcome-wake-codex"'
           + ' data-session-id="' + escapeAttr(wakeSessionId) + '"'
-          + ' title="Wake Codex with a status check">Wake up</button>'
+          + ' title="Nudge Codex with a status check">Nudge</button>'
         : '');
     const wakeBtn = banner.querySelector('[data-role="outcome-wake-codex"]');
     if (wakeBtn) {

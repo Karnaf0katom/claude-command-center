@@ -1671,7 +1671,12 @@ def build_codex_wake_status(session_id):
 
     attempt = _last("codex_wake_attempt")
     connect = _last("codex_wake_stage", stage="connect")
-    turnstart = _last("codex_wake_stage", stage="turn-start")
+    # "turn-start-fast" is the resume-skipped fast path — the daemon's thread
+    # view was already current, so no thread/resume row belongs in the
+    # timeline. A fast miss still falls through to the full resume path and
+    # emits the usual "connect" stage.
+    fast_turnstart = _last("codex_wake_stage", stage="turn-start-fast")
+    turnstart = _last("codex_wake_stage", stage="turn-start") or fast_turnstart
     ok = _last("codex_wake_ok")
     warn = _last("codex_wake_warn")
     exec_ev = _last("codex_wake_exec")
@@ -1754,17 +1759,18 @@ def build_codex_wake_status(session_id):
     running_done = outcome is not None
 
     stages = []
-    if attempt or connect:
+    if attempt or connect or fast_turnstart:
         stages.append({
             "name": "connect",
             "ts": float((connect or attempt or {}).get("epoch") or 0.0) or None,
             "done": bool(resume_returned),
         })
-        stages.append({
-            "name": "thread-resume",
-            "ts": float((turnstart or connect or attempt or {}).get("epoch") or 0.0) or None,
-            "done": bool(threadresume_done),
-        })
+        if not (fast_turnstart and connect is None):
+            stages.append({
+                "name": "thread-resume",
+                "ts": float((turnstart or connect or attempt or {}).get("epoch") or 0.0) or None,
+                "done": bool(threadresume_done),
+            })
     if turnstart_started:
         stages.append({
             "name": "turn-start",
