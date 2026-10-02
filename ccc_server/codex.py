@@ -7325,7 +7325,7 @@ _CODEX_COMPACT_POLL_S = 0.4
 # Once the compaction marker lands, wait a moment longer for the token_count
 # that reports the rebuilt context size so the UI can print the real number
 # instead of "reading the new size...".
-_CODEX_COMPACT_POST_GRACE_S = 6.0
+_CODEX_COMPACT_POST_GRACE_S = 12.0
 _CODEX_COMPACT_MARKER = b'"context_compacted"'
 
 
@@ -7341,13 +7341,17 @@ def _codex_compaction_post_tokens(payload):
     """Rebuilt-context size off one post-compaction `token_count` payload."""
     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
     usage = info.get("last_token_usage")
-    if not isinstance(usage, dict) or not usage:
-        usage = info.get("total_token_usage")
     if not isinstance(usage, dict):
         return 0
-    # Codex zeroes the per-turn fields on the compaction turn and reports the
-    # new context size in total_tokens (see `_extract_codex_usage`).
-    return _core._codex_int(usage.get("input_tokens")) or _core._codex_int(usage.get("total_tokens"))
+    # Codex zeroes every per-turn field on the compaction turn and reports
+    # the rebuilt context size in total_tokens only (same rule as
+    # codex_parse._codex_compact_post_tokens_from_usage). A reading with
+    # input_tokens set is a NORMAL turn's pre-compact size, and the
+    # cumulative total_token_usage block counts the whole session -- both
+    # must be rejected so the card never prints a garbage "post" figure.
+    if _core._codex_int(usage.get("input_tokens")):
+        return 0
+    return _core._codex_int(usage.get("total_tokens"))
 
 
 def _codex_scan_compaction_tail(path, offset, seen_marker=False):
@@ -7512,7 +7516,13 @@ def _codex_compact_via_app_server(session_id, cwd=None, model=None):
         post_grace_until = 0.0
         while True:
             now = time.time()
-            if now >= deadline:
+            # The deadline must not cut a grace window that is still open:
+            # the app-server's item/completed notification (state_done) lands
+            # BEFORE the rollout flush writes compacted+token_count, so a
+            # compaction that finishes near the 180s mark would otherwise
+            # return post_tokens=0 the moment the deadline passes — observed
+            # as the card's permanent "reading the new size…" state.
+            if now >= deadline and not (post_grace_until and now < post_grace_until):
                 break
             if rollout_path:
                 seen_marker, found_post, scan_offset = _codex_scan_compaction_tail(

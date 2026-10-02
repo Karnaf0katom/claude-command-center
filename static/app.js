@@ -14237,9 +14237,13 @@
         + ' freed <span class="compact-run-pct">(−' + pct + '%)</span></span>');
     } else if (before && !after) {
       // The post-compact usage rollup lands sporadically in the JSONL; say we
-      // are still reading it rather than printing a wrong or missing number.
+      // are still reading it rather than printing a wrong or missing number —
+      // but only while a read is actually still possible. Once the poll
+      // window closes, "reading" forever is a stuck-state lie.
       bits.push('<span class="compact-run-delta">was <b>'
-        + escapeHtml(_compactTokenLabel(before)) + '</b> · reading the new size…</span>');
+        + escapeHtml(_compactTokenLabel(before)) + '</b>'
+        + (run.afterUnread ? ' · new size not reported' : ' · reading the new size…')
+        + '</span>');
     }
     if (took) bits.push('<span class="compact-run-took">took ' + escapeHtml(took) + '</span>');
     if (!bits.length) return '';
@@ -14568,7 +14572,7 @@
   }
   function _compactRunPollAfter(run) {
     if (!run || !run.sid) return;
-    [800, 2500, 6000, 12000, 25000, 45000, 75000].forEach((delay) => {
+    [800, 2500, 6000, 12000, 25000, 45000, 75000, 120000].forEach((delay) => {
       setTimeout(async () => {
         if (_compactRun !== run || run.after) return;
         try {
@@ -14586,6 +14590,15 @@
         } catch (_) {}
       }, delay);
     });
+    // The poll window is finite: settle on an honest "not reported" instead of
+    // leaving "reading the new size…" on the card forever if every read missed
+    // (or the last fetch hung and its callback never ran).
+    setTimeout(() => {
+      if (_compactRun === run && !run.after) {
+        run.afterUnread = true;
+        _compactRunPaint();
+      }
+    }, 125000);
   }
 
   // The context pill is the number the user compacted FOR — leaving it at the
