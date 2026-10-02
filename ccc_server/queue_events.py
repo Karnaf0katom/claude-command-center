@@ -1686,7 +1686,7 @@ def build_codex_wake_status(session_id):
     attempt_epoch = float((attempt or {}).get("epoch") or 0.0)
 
     snap = _codex_wake_rollout_snapshot(session_id)
-    app_state = _core._codex_app_server_thread_state(session_id)
+    app_state = _core._codex_thread_state_resolved(session_id)
     app_transport = _core._codex_app_server_transport_kind()
     ctx_used = snap.get("context_used")
     ctx_win = snap.get("context_window")

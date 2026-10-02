@@ -23640,7 +23640,7 @@ def _session_has_dynamic_conversation_overlay(session_id):
     if _session_has_pending_input(session_id):
         return True
     try:
-        state = _codex_app_server_thread_state(session_id)
+        state = _codex_thread_state_resolved(session_id)
     except Exception:
         state = {}
     if not state:
@@ -23673,7 +23673,7 @@ def _conv_overlay_fingerprint(session_id):
         with _pending_terminal_input_lock:
             tq = list(_pending_terminal_input_queue.get(session_id) or ())
         try:
-            state = _codex_app_server_thread_state(session_id)
+            state = _codex_thread_state_resolved(session_id)
         except Exception:
             state = None
         if state is None:

@@ -342,7 +342,7 @@ def _app_server_facts(sid, now):
         pass
     state = None
     try:
-        state = _core._codex_app_server_thread_state(sid)
+        state = _core._codex_thread_state_resolved(sid)
     except Exception:
         state = None
     if isinstance(state, dict) and state:

@@ -2811,6 +2811,71 @@ def _codex_app_server_thread_state(session_id):
         return dict(_core._CODEX_APP_SERVER_THREAD_STATE.get(session_id) or {})
 
 
+# Short-TTL memo for the routed whole-map fetch. _codex_state_fields runs
+# per row in bulk session paths, so a per-session routed query would be an
+# IPC round-trip per row per sweep. One fetch per window serves them all.
+_CODEX_THREAD_STATE_REMOTE_TTL_S = 1.5
+_codex_thread_state_remote_lock = threading.Lock()
+_codex_thread_state_remote = {"ts": 0.0, "map": {}}
+
+
+def _codex_thread_state_map_resolved():
+    """{session_id: state} merged across this process and the worker."""
+    with _core._CODEX_APP_SERVER_LOCK:
+        local = {
+            str(sid): dict(state)
+            for sid, state in (
+                _core._CODEX_APP_SERVER_THREAD_STATE or {}
+            ).items()
+        }
+    if not _core._control_plane_routes_engines():
+        return local
+    now = time.time()
+    remote = None
+    with _codex_thread_state_remote_lock:
+        if (now - _codex_thread_state_remote["ts"]) < _CODEX_THREAD_STATE_REMOTE_TTL_S:
+            remote = _codex_thread_state_remote["map"]
+    if remote is None:
+        try:
+            routed = _core._control_plane_engine_call(
+                "codex", "thread_states", {}, mutate=False,
+            )
+        except Exception:
+            routed = None
+        remote = {}
+        if isinstance(routed, dict) and routed.get("ok"):
+            states = routed.get("states")
+            if isinstance(states, dict):
+                remote = states
+        with _codex_thread_state_remote_lock:
+            _codex_thread_state_remote["ts"] = time.time()
+            _codex_thread_state_remote["map"] = remote
+    merged = dict(remote)
+    merged.update(local)
+    return merged
+
+
+def _codex_thread_state_resolved(session_id):
+    """Thread state from whichever process owns the app-server connection.
+
+    Engine operations route to the control-plane worker, so daemon
+    notifications land in the worker's thread-state map — the dashboard's
+    local map stays empty for routed threads. Readers that attribute writes
+    (writer gate, diagnostics verdict, wake fast-path) must consult the
+    owner or they misread a fresh rollout written by CCC's own turn as an
+    external writer. Local-first: in the worker (or unrouted mode) the local
+    map is authoritative and this costs nothing extra.
+    """
+    if not session_id:
+        return {}
+    state = _core._codex_app_server_thread_state(session_id)
+    if state:
+        return state
+    remote = _codex_thread_state_map_resolved()
+    state = remote.get(str(session_id))
+    return dict(state) if isinstance(state, dict) else {}
+
+
 def _codex_app_server_int(value):
     if value is None:
         return None
@@ -5760,7 +5825,7 @@ def _codex_thread_writer_snapshot(session_id, now=None, *, rollout=None,
     snap = {"writer": None, "desktop_attached": False, "external_active": False}
     if not session_id:
         return snap
-    state = app_state if app_state is not None else _core._codex_app_server_thread_state(session_id)
+    state = app_state if app_state is not None else _core._codex_thread_state_resolved(session_id)
     state = state or {}
     active_turn_id = state.get("active_turn_id")
     active_status = str(state.get("status") or "").strip().lower() == "active"
@@ -6875,7 +6940,7 @@ def _codex_app_server_thread_fresh(session_id, *, state=None, rollout=None):
     markers — returns False and the caller takes the full resume path, which
     is also the authority that reports a busy thread.
     """
-    state = state if state is not None else _core._codex_app_server_thread_state(session_id)
+    state = state if state is not None else _core._codex_thread_state_resolved(session_id)
     if not state:
         return False
     heard = 0.0
@@ -7135,7 +7200,7 @@ def _codex_resume_or_steer_via_app_server_locked(
     fast_baseline_state = None
     fast_baseline_rollout = None
     if allow_start and app_server_warm:
-        fast_baseline_state = _core._codex_app_server_thread_state(session_id)
+        fast_baseline_state = _core._codex_thread_state_resolved(session_id)
         fast_baseline_rollout = _core._codex_rollout_stat(session_id)
         if _codex_app_server_thread_fresh(
             session_id, state=fast_baseline_state, rollout=fast_baseline_rollout,
@@ -7443,7 +7508,7 @@ def _codex_steer_via_app_server(session_id, text, cwd=None, model=None, image_pa
     # the resume below; an ambiguous transport failure returns immediately —
     # the input may already have been injected, and a retry could double-post.
     try:
-        _state = _core._codex_app_server_thread_state(session_id)
+        _state = _core._codex_thread_state_resolved(session_id)
     except Exception:
         _state = {}
     _fast_turn_id = str((_state or {}).get("active_turn_id") or "").strip()
@@ -11306,7 +11371,7 @@ def _codex_state_fields(
         rollout = {}
     snap = {}
     try:
-        app_state = _core._codex_app_server_thread_state(sid)
+        app_state = _core._codex_thread_state_resolved(sid)
     except Exception:
         app_state = {}
     tail = rollout_tail if isinstance(rollout_tail, dict) else {}

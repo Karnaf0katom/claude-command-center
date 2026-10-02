@@ -13,10 +13,22 @@ import importlib
 import time
 from unittest import mock
 
+import pytest
+
 server = importlib.import_module("server")
 from ccc_server import codex  # noqa: E402
 
 SID = "019e2bbb-d5e0-7df2-a1f7-26fbcf363485"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_worker():
+    """Keep the resolved-state helper hermetic: no live control-plane
+    socket calls, and a fresh remote-map cache per test."""
+    codex._codex_thread_state_remote.update({"ts": 0.0, "map": {}})
+    with mock.patch.object(server, "_control_plane_engine_call", return_value=None):
+        yield
+    codex._codex_thread_state_remote.update({"ts": 0.0, "map": {}})
 
 
 def _state(**over):
@@ -299,3 +311,102 @@ def test_steer_without_known_turn_resumes_first():
 
     assert result["code"] == "codex_no_active_turn"
     assert env.calls == ["thread/resume"]
+
+
+def test_writer_snapshot_uses_worker_state_when_local_map_empty():
+    """The dashboard's local thread map is empty when the worker owns the
+    app-server — CCC's own turn writes then looked like an external writer."""
+    worker_state = {
+        "thread_id": SID,
+        "status": "active",
+        "active_turn_id": "turn-ccc-1",
+        "active_writer": "ccc",
+        "ccc_turn_start_pending": True,
+        "last_event_at": time.time(),
+        "last_activity_at": time.time(),
+    }
+    captured = {}
+
+    def fake_engine_call(engine, operation, args, **kw):
+        captured["operation"] = operation
+        return {"ok": True, "states": {SID: dict(worker_state)}}
+
+    saved = server._CODEX_APP_SERVER_THREAD_STATE.pop(SID, None)
+    try:
+        with mock.patch.object(server, "_codex_app_server_thread_state", return_value={}), \
+             mock.patch.object(server, "_control_plane_engine_call", side_effect=fake_engine_call), \
+             mock.patch.object(codex, "_codex_ccc_exec_child_running", return_value=False), \
+             mock.patch.object(server, "_codex_shared_state_db_holders", return_value=[]), \
+             mock.patch.object(server, "_codex_rollout_stat", return_value=_rollout(time.time())), \
+             mock.patch.object(codex, "_codex_desktop_attached_rollouts", return_value={}):
+            snap = codex._codex_thread_writer_snapshot(SID)
+    finally:
+        if saved is not None:
+            server._CODEX_APP_SERVER_THREAD_STATE[SID] = saved
+
+    assert captured["operation"] == "thread_states"
+    assert snap["writer"] == "ccc"
+    assert snap["external_active"] is False
+
+
+def test_state_fields_writer_comes_from_worker_state():
+    """codex_writer feeds the status pill + steer gating — it must see the
+    worker's thread map, not the dashboard's empty local one."""
+    import types
+
+    now = time.time()
+    worker_state = {
+        "thread_id": SID,
+        "status": "active",
+        "active_turn_id": "turn-ccc-1",
+        "active_writer": "ccc",
+        "last_event_at": now,
+        "last_activity_at": now,
+    }
+    st = types.SimpleNamespace(
+        st_mtime=now, st_size=100, st_mtime_ns=int(now * 1e9),
+    )
+
+    def fake_engine_call(engine, operation, args, **kw):
+        return {"ok": True, "states": {SID: dict(worker_state)}}
+
+    saved = server._CODEX_APP_SERVER_THREAD_STATE.pop(SID, None)
+    try:
+        with mock.patch.object(server, "_codex_app_server_thread_state", return_value={}), \
+             mock.patch.object(server, "_control_plane_engine_call", side_effect=fake_engine_call), \
+             mock.patch.object(codex, "_codex_ccc_exec_child_running", return_value=False), \
+             mock.patch.object(server, "_codex_shared_state_db_holders", return_value=[]), \
+             mock.patch.object(codex, "_codex_desktop_attached_rollouts", return_value={}):
+            fields = server._codex_state_fields(
+                SID, rollout_path="/tmp/rollout.jsonl", rollout_stat=st,
+            )
+    finally:
+        if saved is not None:
+            server._CODEX_APP_SERVER_THREAD_STATE[SID] = saved
+
+    assert fields["codex_writer"] == "ccc"
+
+
+def test_writer_snapshot_local_state_wins_without_routing():
+    """In unrouted mode the local map is authoritative — no engine query."""
+    now = time.time()
+    saved = server._CODEX_APP_SERVER_THREAD_STATE.get(SID)
+    server._CODEX_APP_SERVER_THREAD_STATE[SID] = {
+        "thread_id": SID, "status": "idle",
+        "last_event_at": now, "last_activity_at": now,
+    }
+    try:
+        with mock.patch.object(
+            server, "_control_plane_engine_call",
+            side_effect=AssertionError("must not route when local state exists"),
+        ), mock.patch.object(codex, "_codex_ccc_exec_child_running", return_value=False), \
+             mock.patch.object(server, "_codex_rollout_stat", return_value=_rollout(now)), \
+             mock.patch.object(codex, "_codex_desktop_attached_rollouts", return_value={}):
+            snap = codex._codex_thread_writer_snapshot(SID)
+    finally:
+        if saved is None:
+            server._CODEX_APP_SERVER_THREAD_STATE.pop(SID, None)
+        else:
+            server._CODEX_APP_SERVER_THREAD_STATE[SID] = saved
+
+    assert snap["external_active"] is False

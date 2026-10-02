@@ -561,6 +561,15 @@ class EngineHost:
                         args.get("session_id")
                     ),
                 }
+            if operation == "thread_states":
+                with legacy._CODEX_APP_SERVER_LOCK:
+                    states = {
+                        str(sid): dict(state)
+                        for sid, state in (
+                            legacy._CODEX_APP_SERVER_THREAD_STATE or {}
+                        ).items()
+                    }
+                return {"ok": True, "states": states}
             if operation == "active":
                 return {
                     "ok": True,
