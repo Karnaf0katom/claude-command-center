@@ -1,0 +1,1 @@
+- Codex sends no longer wait out a 5-second confirm window: the delivery-ack matcher now recognizes current Codex's `UserMessage` items (`content[].text`) on notifications and in rollout files, so accepted turns confirm in well under a second instead of always timing out.

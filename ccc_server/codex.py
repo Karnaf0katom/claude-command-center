@@ -2656,8 +2656,8 @@ def _codex_app_server_handle_notification(method, params):
         ):
             _codex_app_server_record_item_notification(state, method, params, now)
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
-            if method == "item/completed" and item.get("type") == "userMessage":
-                delivered_user_text = str(item.get("text") or "").strip()
+            if method == "item/completed":
+                delivered_user_text = _codex_user_message_item_text(item).strip()
                 if delivered_user_text:
                     state["last_delivered_user_text"] = delivered_user_text
                     state["last_delivered_user_turn_id"] = str(turn_id or "")
@@ -2702,6 +2702,24 @@ def _codex_app_server_handle_notification(method, params):
     if pump_after_notification:
         _core._schedule_codex_queue_pump(thread_id)
         _core._schedule_codex_idle_unsubscribe(thread_id)
+
+
+def _codex_user_message_item_text(item):
+    """User text from an item whose type is a user message, any casing/shape.
+
+    Codex versions disagree on the wire shape: older builds emit
+    `userMessage` items carrying `.text`, current builds emit `UserMessage`
+    items carrying `content[].text`. Both mean "the exact user input durably
+    entered the thread" — that is the delivery ack the confirm window waits
+    on, and mismatching either shape leaves every send burning the full
+    confirm timeout.
+    """
+    if not isinstance(item, dict):
+        return ""
+    if str(item.get("type") or "").lower() != "usermessage":
+        return ""
+    from ccc_server.codex_live_events import _item_text
+    return _item_text(item)
 
 
 def _codex_app_server_handle_message(payload):
@@ -4967,12 +4985,23 @@ def _codex_rollout_contains_user_text_since(baseline, session_id, text):
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-                if event.get("type") != "event_msg" or payload.get("type") != "user_message":
+                if event.get("type") != "event_msg":
                     continue
-                actual = _core._strip_ccc_session_state_instruction(
-                    str(payload.get("message") or "")
-                ).strip()
-                if actual == expected:
+                if payload.get("type") == "user_message":
+                    actual = _core._strip_ccc_session_state_instruction(
+                        str(payload.get("message") or "")
+                    ).strip()
+                elif payload.get("type") == "item_completed":
+                    # Current codex records app-server-sent input as an
+                    # item_completed/UserMessage item (content[].text), not a
+                    # user_message event — matching only the legacy shape
+                    # makes the confirm window always time out.
+                    actual = _core._strip_ccc_session_state_instruction(
+                        _codex_user_message_item_text(payload.get("item"))
+                    ).strip()
+                else:
+                    continue
+                if actual and actual == expected:
                     return True
     except OSError:
         return False
