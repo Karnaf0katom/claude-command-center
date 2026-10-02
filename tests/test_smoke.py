@@ -13743,15 +13743,27 @@ class TestRepoContextHelpers(unittest.TestCase):
                 return {"result": {"turn": {"id": "turn-next"}}}
             raise AssertionError(f"unexpected method: {method}")
 
+        telemetry = []
         with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request), \
              mock.patch.object(server, "_codex_rollout_stat", return_value=None), \
+             mock.patch.object(
+                 server, "_codex_telemetry_append",
+                 side_effect=lambda event, **f: telemetry.append((event, f))), \
              mock.patch.dict(os.environ, {"CCC_CODEX_WAKE_CONFIRM_TIMEOUT": "0.1"}):
             result = server._codex_resume_or_steer_via_app_server(sid, "wake")
+            confirmer = server._CODEX_LAST_WAKE_CONFIRMER
+            if confirmer:
+                confirmer.join(10)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["accepted"])
-        self.assertTrue(result["confirmed"])
-        self.assertEqual(result["confirmation_source"], "app-server-notification")
+        # The response returns pending; the daemon-thread confirmer reports
+        # the real result via codex_wake_confirm telemetry.
+        self.assertIsNone(result["confirmed"])
+        self.assertEqual(result["confirmation_source"], "pending")
+        confirm = next(f for e, f in telemetry if e == "codex_wake_confirm")
+        self.assertTrue(confirm["confirmed"])
+        self.assertEqual(confirm["confirmation_source"], "app-server-notification")
         self.assertEqual(calls, ["thread/resume", "turn/start"])
 
     def test_codex_app_server_wake_warns_when_no_events_follow(self):
@@ -13765,15 +13777,32 @@ class TestRepoContextHelpers(unittest.TestCase):
                 return {"result": {"turn": {"id": "turn-next"}}}
             raise AssertionError(f"unexpected method: {method}")
 
+        telemetry = []
+        ledger = []
         with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request), \
              mock.patch.object(server, "_codex_rollout_stat", return_value=None), \
+             mock.patch.object(
+                 server, "_codex_telemetry_append",
+                 side_effect=lambda event, **f: telemetry.append((event, f))), \
+             mock.patch.object(
+                 server, "_resume_ledger_append",
+                 side_effect=lambda event, **f: ledger.append((event, f))), \
              mock.patch.dict(os.environ, {"CCC_CODEX_WAKE_CONFIRM_TIMEOUT": "0"}):
             result = server._codex_resume_or_steer_via_app_server(sid, "wake")
+            confirmer = server._CODEX_LAST_WAKE_CONFIRMER
+            if confirmer:
+                confirmer.join(10)
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["accepted"])
-        self.assertFalse(result["confirmed"])
-        self.assertEqual(result["warning"], "turn accepted but no app-server events observed")
+        self.assertIsNone(result["confirmed"])
+        self.assertEqual(result["confirmation_source"], "pending")
+        self.assertIsNone(result["warning"])
+        confirm = next(f for e, f in telemetry if e == "codex_wake_confirm")
+        self.assertFalse(confirm["confirmed"])
+        self.assertEqual(
+            confirm["warning"], "turn accepted but no app-server events observed")
+        self.assertTrue(any(e == "codex_wake_warn" for e, _ in ledger))
 
     def test_codex_turn_start_alone_does_not_confirm_input_delivery(self):
         server = self.server

@@ -25633,6 +25633,7 @@ _codex_coord_state_loaded = False
 # Test-patched globals kept here; ccc_server/codex.py reads them via _core.
 _CODEX_APP_SERVER_INITIALIZING = False
 _CODEX_LAST_SPAWN_FINALIZER = None
+_CODEX_LAST_WAKE_CONFIRMER = None
 
 _adopt_ccc_module("codex")
 

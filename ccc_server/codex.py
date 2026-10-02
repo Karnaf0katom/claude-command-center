@@ -5142,8 +5142,8 @@ def _codex_finalize_spawn_async(thread_id, turn_id, *, session_name, prompt,
         # observe the answer. Codex writes ~85KB of preamble into a fresh
         # rollout before the user_message row lands, which the old 5s budget
         # regularly lost to -- a confirmation that is almost always "no" cannot
-        # flag a genuinely dropped prompt. The inject path keeps its own 5s
-        # budget, because a human is waiting on that one.
+        # flag a genuinely dropped prompt. The inject path now confirms
+        # asynchronously for the same reason (see _codex_finalize_wake_async).
         try:
             confirm_timeout = float(
                 os.environ.get("CCC_CODEX_SPAWN_CONFIRM_TIMEOUT", "30")
@@ -5238,6 +5238,83 @@ def _codex_finalize_spawn_async(thread_id, turn_id, *, session_name, prompt,
     # Published so tests can join the finalizer instead of racing it; nothing
     # in production reads this.
     _core._CODEX_LAST_SPAWN_FINALIZER = thread
+    thread.start()
+    return thread
+
+
+def _codex_finalize_wake_async(session_id, turn_id, *, expected_text,
+                               baseline_state, baseline_rollout,
+                               model="", cwd=""):
+    """Run the inject-path durability confirmation off the send's critical
+    path.
+
+    Same reasoning as _codex_finalize_spawn_async: once turn/start is
+    accepted the turn is already running inside Codex, and nothing
+    downstream branches on `confirmed` -- the queue transaction only reads
+    ok/queued/disabled/turn_id and the browser only reads `confirmed` for
+    desktop-routed sends. Meanwhile the rollout-echo check costs ~1.5-5s the
+    user counts as send latency (it was the entire stall behind "every send
+    takes a lot of time"). Report the send as accepted-pending and land the
+    answer in telemetry + the wake ledger a few seconds later.
+
+    The default window is 30s not 5s for the same reason as the spawn path:
+    a fresh rollout gets ~85KB of preamble before the user_message row, so a
+    confirmation that almost always reports "no" cannot flag a genuinely
+    dropped input.
+    """
+    def worker():
+        try:
+            confirm_timeout = float(
+                os.environ.get("CCC_CODEX_WAKE_CONFIRM_TIMEOUT", "30")
+            )
+        except ValueError:
+            confirm_timeout = 30.0
+        confirm_at = time.monotonic()
+        confirmation = _core._codex_wait_for_turn_activity(
+            session_id,
+            turn_id,
+            baseline_state=baseline_state,
+            baseline_rollout=baseline_rollout,
+            expected_text=expected_text,
+            timeout=confirm_timeout,
+        )
+        confirm_ms = _codex_elapsed_ms(confirm_at)
+        if not confirmation.get("confirmed"):
+            try:
+                _core._resume_ledger_append(
+                    "codex_wake_warn", sid=session_id,
+                    via="codex-app-turn", turn_id=turn_id,
+                    warning=confirmation.get("warning"),
+                )
+            except Exception:
+                pass
+        _core._codex_telemetry_append(
+            "codex_wake_confirm",
+            ok=True,
+            via="codex-app-turn",
+            session_id=session_id,
+            turn_id=turn_id,
+            confirm_ms=confirm_ms,
+            confirmed=bool(confirmation.get("confirmed")),
+            confirmation_source=confirmation.get("source"),
+            warning=confirmation.get("warning"),
+            transport=_core._codex_app_server_transport_kind(),
+            cwd=cwd,
+            model=model,
+        )
+
+    thread = threading.Thread(
+        target=worker,
+        daemon=True,
+        name=f"ccc-codex-wake-confirm-{str(session_id)[:8]}",
+    )
+    # Published so tests can join the confirmer instead of racing it; nothing
+    # in production reads this. The worker context has no server module to
+    # hold the name, so tolerate that rather than crash a real wake.
+    try:
+        _core._CODEX_LAST_WAKE_CONFIRMER = thread
+    except AttributeError:
+        pass
     thread.start()
     return thread
 
@@ -7016,26 +7093,20 @@ def _codex_resume_or_steer_via_app_server_locked(
             "codex_wake_ok", sid=session_id,
             via="codex-app-turn", turn_id=_turn_id,
         )
-        try:
-            confirm_timeout = float(os.environ.get("CCC_CODEX_WAKE_CONFIRM_TIMEOUT", "5"))
-        except ValueError:
-            confirm_timeout = 5.0
-        confirm_at = time.monotonic()
-        confirmation = _core._codex_wait_for_turn_activity(
+        # The turn is accepted and already running. Proving the prompt durably
+        # landed is diagnostics-only -- nothing downstream branches on
+        # `confirmed`, and the rollout echo costs ~1.5-5s the user counts as
+        # send latency. Same treatment as the spawn path: report pending and
+        # finish the check on a daemon thread (see _codex_finalize_wake_async).
+        _codex_finalize_wake_async(
             session_id,
             _turn_id,
+            expected_text=text,
             baseline_state=baseline_state,
             baseline_rollout=baseline_rollout,
-            expected_text=text,
-            timeout=confirm_timeout,
+            model=model,
+            cwd=cwd,
         )
-        confirm_ms = _codex_elapsed_ms(confirm_at)
-        if not confirmation.get("confirmed"):
-            _core._resume_ledger_append(
-                "codex_wake_warn", sid=session_id,
-                via="codex-app-turn", turn_id=_turn_id,
-                warning=confirmation.get("warning"),
-            )
         total_ms = _codex_elapsed_ms(total_start)
         _core._codex_telemetry_append(
             "codex_wake",
@@ -7044,11 +7115,11 @@ def _codex_resume_or_steer_via_app_server_locked(
             app_server_warm=app_server_warm,
             resume_ms=resume_ms,
             turn_start_ms=turn_start_ms,
-            confirm_ms=confirm_ms,
+            confirm_ms=None,
             total_ms=total_ms,
-            confirmed=bool(confirmation.get("confirmed")),
-            confirmation_source=confirmation.get("source"),
-            warning=confirmation.get("warning"),
+            confirmed=None,
+            confirmation_source="pending",
+            warning=None,
             transport=_core._codex_app_server_transport_kind(),
             session_id=session_id,
             turn_id=_turn_id,
@@ -7059,16 +7130,18 @@ def _codex_resume_or_steer_via_app_server_locked(
             "ok": True,
             "via": "codex-app-turn",
             "accepted": True,
-            "confirmed": bool(confirmation.get("confirmed")),
-            "confirmation_source": confirmation.get("source"),
-            "warning": confirmation.get("warning"),
+            # None (not False) until _codex_finalize_wake_async lands: the turn
+            # was accepted, the durability check just has not reported yet.
+            "confirmed": None,
+            "confirmation_source": "pending",
+            "warning": None,
             "turn_id": _turn_id,
             "session_id": session_id,
             "app_server_transport": _core._codex_app_server_transport_kind(),
             "app_server_warm": app_server_warm,
             "resume_ms": resume_ms,
             "turn_start_ms": turn_start_ms,
-            "confirm_ms": confirm_ms,
+            "confirm_ms": None,
             "latency_ms": total_ms,
         }
     if _core._codex_error_is_not_steerable(started):
