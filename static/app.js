@@ -66160,6 +66160,10 @@
     _captureRailEl(document.getElementById('convStatus'));
     _captureRailEl(document.getElementById('liveBadgeConv'));
     _captureRailEl(document.getElementById('topbarTtsControl'));
+    // Voice mode is global, not session-scoped, but its topbar home is the
+    // same hidden #convToolbar — capture it here so it stays reachable in
+    // the rail on desktop right-mode and returns to the topbar otherwise.
+    _captureRailEl(document.getElementById('voiceModeBtn'));
     _captureRailEl(document.getElementById('launchWrapConv'));
     _captureRailEl(document.getElementById('deployPill'));
     _captureRailEl(document.getElementById('annotationStartBtn'));
