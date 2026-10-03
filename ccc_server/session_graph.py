@@ -3884,7 +3884,14 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     """
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
-    if not _core._is_codex_session(session_id):
+    # Cloud (dot/aeon) threads are codex sessions too — they just live in the
+    # cloud instead of a local rollout. The codex://threads/<id> deep link
+    # resolves them in the app the same way.
+    try:
+        _is_cloud = bool(_core.is_cloud_thread_id(session_id))
+    except Exception:
+        _is_cloud = False
+    if not _core._is_codex_session(session_id) and not _is_cloud:
         return {"ok": False, "error": "Codex launch only handles Codex sessions"}
     if sys.platform != "darwin":
         _core._log_macos_only("desktopDeepLinks")

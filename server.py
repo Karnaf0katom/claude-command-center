@@ -6462,6 +6462,8 @@ def _detect_session_engine_uncached(session_id):
         return spawned.get("engine")
     if _is_codex_session(session_id):
         return "codex"
+    if is_cloud_thread_id(session_id):
+        return "codex"
     if _is_cursor_session(session_id):
         return "cursor"
     if _is_antigravity_session(session_id):
@@ -13951,6 +13953,17 @@ def find_all_conversations(
     except Exception:
         pass
 
+    # Codex cloud (dot/aeon) threads: catalog is cache-served (TTL/disk/local
+    # sidebar cache), so this never blocks the archive on a network fetch.
+    try:
+        out.extend(find_codex_cloud_conversations(
+            include_old=True,
+            repo_only=False,
+            limit=limit_per_folder,
+        ))
+    except Exception:
+        pass
+
     # Add Gemini sessions to the archive too. They live in ~/.gemini/tmp/
     # and have their own JSON format, but find_gemini_conversations returns
     # rows compatible with the archive renderer.
@@ -14639,6 +14652,7 @@ def _archive_codex_extra_keys():
     """
     keys = {str(Path.home() / ".codex" / "sessions"), "ccc-codex-captures"}
     keys.update(str(p) for p in _codex_rollout_day_dirs())
+    keys.add(str(cloud_catalog_signature_path()))
     return keys
 
 
@@ -14785,6 +14799,10 @@ def _archive_corpus_signature_parts():
         # rewrites when the session list actually changes, so its mtime is
         # exactly the add/remove signal the archive needs.
         _devin_sessions_cache_path(),
+        # Codex cloud threads have no local transcript files at all; the
+        # disk catalog rewrites only when the fetched thread set actually
+        # changes, so its mtime is the add/remove signal for cloud rows.
+        cloud_catalog_signature_path(),
         # Devin CLI: NOT sessions.db / its WAL (both flip on every streamed
         # token, which would force a full archive rebuild per poll while a
         # session runs). The CLI creates one lock file per session at start
@@ -15805,6 +15823,10 @@ def _archive_compute_rows(key, cache_options, serve_generation=None):
                                 ),
                             )
                         if "codex" in refresh_engines:
+                            # Cloud rows carry engine="codex" too, so the
+                            # codex merge would otherwise drop them: include
+                            # them in the rebuilt set. Catalog-served, so no
+                            # network wait here.
                             merged = _archive_merge_engine_rows(
                                 merged,
                                 "codex",
@@ -15813,6 +15835,9 @@ def _archive_compute_rows(key, cache_options, serve_generation=None):
                                     repo_only=False,
                                     resolve_pr_states=cache_options.get("resolve_pr_states", False),
                                     resolve_worktree_dirty=cache_options.get("resolve_worktree_dirty", False),
+                                ) + find_codex_cloud_conversations(
+                                    include_old=True,
+                                    repo_only=False,
                                 ),
                             )
                         _archive_response_cache_put(key, merged, signature=sig)
@@ -22450,6 +22475,19 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
             progress("codex", state="error", detail=f"Codex thread scan failed: {exc}")
 
     if progress:
+        progress("codex-cloud", state="running", detail="Reading Codex cloud threads.")
+    try:
+        conversations.extend(find_codex_cloud_conversations(
+            repo_path=repo_path,
+            include_old=include_old,
+            repo_only=True,
+            progress=progress,
+        ))
+    except Exception as exc:
+        if progress:
+            progress("codex-cloud", state="error", detail=f"Codex cloud scan failed: {exc}")
+
+    if progress:
         progress("gemini", state="running", detail="Reading Gemini sessions.")
     try:
         conversations.extend(find_gemini_conversations(
@@ -23515,6 +23553,16 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
     # store (~160ms cold), which every codex/claude open was paying for nothing.
     # _detect_session_engine checks codex first and is cached.
     engine = _detect_session_engine(conversation_id)
+    if engine == "codex" and is_cloud_thread_id(conversation_id):
+        # Cloud (dot/aeon) thread: no local transcript file. Events come from
+        # the cached cloud fetch (thread/turns/list) mapped to the shared
+        # codex event shape. Extra keys (codex_cloud, cloud_thread, …) are
+        # additive API fields the viewer uses for the read-only treatment.
+        result = parse_cloud_conversation(
+            conversation_id, after_line=0 if windowed else after_line)
+        if windowed:
+            result = _window_parsed_conversation_events(result, tail=tail, before=before)
+        return result
     if engine == "gemini":
         result = _parse_gemini_conversation(conversation_id, after_line=after_line)
         _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
@@ -25804,6 +25852,10 @@ _adopt_ccc_module("wire_tail")
 _adopt_ccc_module("kimi_store")
 
 _adopt_ccc_module("codex_parse")
+# Codex cloud ("dot"/aeon) threads: live only in OpenAI's cloud, never in
+# rollout JSONLs or the state DB. Discovery + read-only transcript over the
+# cloud backend's JSON-RPC WebSocket; degrades to the local sidebar cache.
+_adopt_ccc_module("codex_cloud_threads")
 _adopt_ccc_module("codex_log_recovery")
 _adopt_ccc_module("codex_diagnostics")
 # Test-patched globals kept here; ccc_server/pending_inputs.py reads them via _core.
@@ -36675,6 +36727,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             announced_from, announced_from_error = _normalize_announced_from(payload)
             if not sid or (not text and not presentation_bootstrap and verb != "abort"):
                 self.send_json({"ok": False, "error": "missing session_id or text"})
+            elif is_cloud_thread_id(sid):
+                # Codex cloud (dot/aeon) threads are read-only in CCC: the
+                # transcript lives in OpenAI's cloud and the backend protocol
+                # is used for reads only. Nothing may be injected.
+                self.send_json({
+                    "ok": False,
+                    "error": "cloud thread, read-only in CCC",
+                    "cloud_readonly": True,
+                }, 400)
             elif verb_error:
                 self.send_json({"ok": False, "error": verb_error}, 400)
             elif verb == "abort":
@@ -36922,6 +36983,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             sid = payload.get("session_id", "")
             if not sid:
                 self.send_json({"ok": False, "error": "missing session_id"})
+            elif is_cloud_thread_id(sid):
+                self.send_json({"ok": False,
+                                "error": "cloud thread, read-only in CCC",
+                                "cloud_readonly": True}, 400)
             else:
                 _record_interaction(sid)
                 self.send_json(_interrupt_session(sid))
@@ -36929,8 +36994,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # CCC-27: manual escape hatch for a live session that will not
             # take input (Stop only interrupts a running turn).
             sid = path.split("/")[3]
-            _record_interaction(sid)
-            self.send_json(_force_restart_session(sid))
+            if is_cloud_thread_id(sid):
+                self.send_json({"ok": False,
+                                "error": "cloud thread, read-only in CCC",
+                                "cloud_readonly": True}, 400)
+            else:
+                _record_interaction(sid)
+                self.send_json(_force_restart_session(sid))
         elif path == "/api/ask":
             # Synchronous "inject and wait for the next assistant turn".
             # Used by the ccc-orchestration skill so a sibling Claude
@@ -36982,11 +37052,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 for c in (payload.get("post_slash_commands") or [])
                 if str(c or "").strip().startswith("/")
             ]
-            self.send_json(launch_terminal_for_session(
-                sid, cwd, term_app,
-                post_slash_commands=post_cmds or None,
-                stop_headless=bool(payload.get("stop_headless")),
-            ))
+            if is_cloud_thread_id(sid):
+                # Cloud threads have no local rollout to `codex resume`.
+                self.send_json({"ok": False,
+                                "error": "cloud thread, read-only in CCC",
+                                "cloud_readonly": True}, 400)
+            else:
+                self.send_json(launch_terminal_for_session(
+                    sid, cwd, term_app,
+                    post_slash_commands=post_cmds or None,
+                    stop_headless=bool(payload.get("stop_headless")),
+                ))
         elif path == "/api/jump-terminal":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

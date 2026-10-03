@@ -932,6 +932,17 @@ def codex_client_dispatch(action, data):
 
 
 def codex_client_call(action, data):
+    # Codex cloud (dot/aeon) threads are read-only: they live in OpenAI's
+    # cloud, not in the local app-server, so no local action may target one.
+    if isinstance(data, dict):
+        _ctx = data.get("context") or {}
+        _tid = _ctx.get("thread_id") or _ctx.get("session_id") or ""
+        try:
+            if _tid and _core.is_cloud_thread_id(_tid):
+                return {"ok": False, "error": "cloud thread, read-only in CCC",
+                        "cloud_readonly": True}
+        except Exception:
+            pass
     # Engine query dispatch deliberately does not persist the payload. This
     # channel carries OAuth answers and audio as well as ordinary operations.
     # Mutation receipts above prevent a retry from submitting an action twice.

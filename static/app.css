@@ -8575,6 +8575,14 @@
   .conv-signal.pkood-blocked { background: rgba(248,81,73,0.15); color: var(--red); animation: pulse 2s infinite; }
   .conv-signal.pkood-stuck { background: rgba(248,81,73,0.25); color: var(--red); font-weight: 700; }
   .conv-signal.codex-stuck { background: rgba(248,81,73,0.20); color: var(--red); font-weight: 700; }
+  /* Codex cloud (dot/aeon) thread: transcript lives in OpenAI's cloud;
+     sky accent reads "remote" against the muted lifecycle chips. */
+  .conv-signal.codex-cloud {
+    background: rgba(56,189,248,0.14);
+    color: #38bdf8;
+    border: 1px solid rgba(56,189,248,0.30);
+    font-weight: 600;
+  }
   /* Muted "turn finished recently" chip (kimi/codex rows) — calm end state,
    * deliberately quieter than the committed/pushed greens so it reads as
    * lifecycle info, not a git signal. */

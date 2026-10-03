@@ -9471,6 +9471,9 @@
       // be attempted" — opt-in flag on and `devin` binary resolvable. The
       // ACP connection itself is attached lazily by the first steer.
       acp_steer_ready: source === 'devin-cli' ? !!(row && row.devin_acp_ready === true) : false,
+      // Codex cloud (dot/aeon) thread: transcript renders read-only; the
+      // composer is disabled because the cloud backend is never written to.
+      codex_cloud: !!(row && row.codex_cloud === true),
     };
     // Leaving new-session mode (sid set) drops the .is-new-session class
     // so the spawn-cwd picker hides and the workspace pill returns. The
@@ -10154,6 +10157,9 @@
     const activeEffortSelect = activeInputControls.effortSelect;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
+    // Codex cloud (dot/aeon) thread: read-only. Its transcript lives in
+    // OpenAI's cloud and CCC never writes to that backend.
+    const isCodexCloud = isCodex && !!currentSession.codex_cloud;
     const isGemini = currentSession.source === 'gemini';
     const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
@@ -10227,6 +10233,9 @@
       } else if (isPkood) {
         activeInputControls.ttyLabel.textContent = 'pkood';
         if (activeInput) activeInput.placeholder = 'Send to pkood agent...';
+      } else if (isCodexCloud) {
+        activeInputControls.ttyLabel.textContent = 'cloud';
+        if (activeInput) activeInput.placeholder = 'Codex cloud thread, read-only in CCC - reply in the Codex app…';
       } else if (isCodex) {
         activeInputControls.ttyLabel.textContent = live ? (liveStatus.tty || 'codex') : 'codex';
         if (activeInput) activeInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
@@ -10283,7 +10292,7 @@
       // order. Previously we readOnly'd the input when both
       // can_headless_resume and can_app_resume were false, leaving the
       // user with a dead input bar and no way to type a follow-up.
-      const canSend = !isDevin && (!isAntigravity || antigravityCanSendNow);
+      const canSend = !isDevin && !isCodexCloud && (!isAntigravity || antigravityCanSendNow);
       if (activeInput) {
         const blockTyping = !canSend && !isAntigravity;
         activeInput.readOnly = blockTyping;
@@ -10293,7 +10302,9 @@
         const blockSend = !canSend && !isAntigravity;
         activeSendBtn.disabled = blockSend;
         activeSendBtn.title = blockSend
-          ? (isDevin
+          ? (isCodexCloud
+              ? 'Codex cloud thread, read-only in CCC'
+              : isDevin
               ? 'Devin cloud sessions are read-only in CCC'
               : 'Open Antigravity to continue this app session')
           : (devinCliExtOwned
@@ -34601,6 +34612,16 @@
       if (_rowSid && _inGroupChatIds.has(_rowSid)) {
         signals += '<span class="conv-signal in-group-chat is-icon-only" title="In group chat" aria-label="In group chat">💬</span>';
       }
+      // Codex cloud (dot/aeon) thread chip — the transcript lives in
+      // OpenAI's cloud, so the row is read-only here. When the catalog is
+      // degraded the tooltip says why instead of pretending nothing is up.
+      if (c.codex_cloud) {
+        const _cloudTip = 'Codex cloud thread (dot/aeon), read-only in CCC'
+          + (c.thread_source ? ' · ' + String(c.thread_source) : '')
+          + (c.dot_name ? ' · ' + String(c.dot_name) : '')
+          + (c.cloud_degraded ? ' · ' + String(c.cloud_degraded) : '');
+        signals += '<span class="conv-signal codex-cloud" title="' + escapeAttr(_cloudTip) + '">cloud</span>';
+      }
       if (isHermesRow) {
         const hermesPlatform = String(c.source_platform || c.hermes_source || '').trim();
         if (hermesPlatform && hermesPlatform !== 'hermes') {
@@ -44464,6 +44485,8 @@
     if (!$convPanelInput) return;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
+    // Codex cloud (dot/aeon) thread: read-only, same as the main composer.
+    const isCodexCloud = isCodex && !!currentSession.codex_cloud;
     const isGemini = currentSession.source === 'gemini';
     const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
@@ -44478,9 +44501,10 @@
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
       $convPanelInput.classList.add('visible');
-      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (ls.tty || 'codex') : (isGemini ? (ls.tty || 'gemini') : (isCursor ? (ls.tty || 'cursor') : (isAntigravity ? (ls.tty || 'antigravity') : (isHermes ? 'hermes' : (isOpencode ? 'opencode' : (isKimi ? 'kimi' : (ls.tty || (live ? '' : 'offline')))))))));
+      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodexCloud ? 'cloud' : (isCodex ? (ls.tty || 'codex') : (isGemini ? (ls.tty || 'gemini') : (isCursor ? (ls.tty || 'cursor') : (isAntigravity ? (ls.tty || 'antigravity') : (isHermes ? 'hermes' : (isOpencode ? 'opencode' : (isKimi ? 'kimi' : (ls.tty || (live ? '' : 'offline'))))))))));
       if ($cpInput) {
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
+        else if (isCodexCloud) $cpInput.placeholder = 'Codex cloud thread, read-only in CCC - reply in the Codex app…';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
         else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
         else if (isCursor) $cpInput.placeholder = live ? 'Send to Cursor terminal...' : 'Resume Cursor and send...';
@@ -44490,7 +44514,7 @@
         else if (isKimi) $cpInput.placeholder = ls.live ? 'Send to Kimi session…' : 'Resume Kimi and send…';
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
-        const readOnly = isAntigravity && !antigravityCanSendNow;
+        const readOnly = isCodexCloud || (isAntigravity && !antigravityCanSendNow);
         $cpInput.readOnly = readOnly;
         $cpInput.classList.toggle('is-readonly', readOnly);
       }
@@ -53159,6 +53183,14 @@
           _enginePaneEl.classList.toggle('is-webui-session', data.engine === 'kimi' || data.engine === 'codex');
         }
       }
+      // The server's cloud marker is authoritative too: a popout/URL-opened
+      // cloud thread may not have a list row behind it, so its composer flag
+      // arrives here with the transcript payload instead of at select time.
+      if (data && data.codex_cloud === true && currentSession && currentSession.id === id
+          && !currentSession.codex_cloud) {
+        currentSession.codex_cloud = true;
+        try { updateInputBar(); } catch (_) {}
+      }
       // Re-anchor activeIndex to fetchPaneId — the user may have clicked
       // another conv (in either pane) while this fetch was in-flight, shifting
       // splitState.activeIndex away. Mirror the savedIdx/try/finally pattern
@@ -54015,7 +54047,8 @@
       _workspaceDataByPane[pid] = data;
       renderSessionWorkspaceIntoSticky(pid);
       const nativePane = convPaneElById(pid);
-      if (data.cwd && nativePane?.classList.contains('is-codex-session')) {
+      if (data.cwd && nativePane?.classList.contains('is-codex-session')
+          && !(currentSession && currentSession.codex_cloud)) {
         const view = getConvViewForPane(pid);
         if (view?.querySelector('.event')) window.CCCCodexLiveSource?.start(nativePane);
       }
@@ -61408,6 +61441,13 @@
           div.innerHTML = '<span class="ccoord-icon" aria-hidden="true">' + _icon + '</span>'
             + '<span class="ccoord-text">' + escapeHtml(ev.text || '') + '</span>'
             + tsSpan(ev.ts);
+        } else if (ev.subtype === 'cloud_unavailable') {
+          // Codex cloud thread whose transcript could not be fetched — show
+          // the typed reason instead of an empty pane.
+          div.classList.add('system-compact', 'codex-cloud-note');
+          div.innerHTML = '<span class="ccoord-icon" aria-hidden="true">☁</span>'
+            + '<span class="ccoord-text">' + escapeHtml(ev.text || 'cloud thread, transcript unavailable') + '</span>'
+            + tsSpan(ev.ts);
         } else if (String(ev.subtype || '').indexOf('grok_') === 0) {
           // Grok ACP status updates (failed hook runs, image-dropped notes,
           // retries, plan/task/subagent/compaction lifecycle) are meta, not
@@ -62580,6 +62620,10 @@
         // This is the main trigger point: it fires on every rollout render
         // for a Codex pane (initial open and every poll tick alike), which
         // is exactly the cadence a freshly-started or resumed turn needs.
+        // Cloud threads have no local app-server overlay, so skip them.
+        const _liveRow = (conversationsData || []).find(x => x && (x.id === renderedConversationId || x.session_id === renderedConversationId))
+          || (Array.isArray(archiveData) ? archiveData.find(x => x && (x.id === renderedConversationId || x.session_id === renderedConversationId)) : null);
+        if (_liveRow && _liveRow.codex_cloud) return;
         window.CCCCodexLiveSource?.start(paneEl);
       });
     }
