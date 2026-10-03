@@ -76800,8 +76800,24 @@
       localStorage.setItem('ccc-conv-view', mode);
       localStorage.setItem('ccc-conv-verbose', on ? '1' : '0');
     } catch (_) {}
+    // Keep the reader's place: remember the top visible message in each
+    // transcript and put it back at the same offset after the reflow.
+    const anchors = [];
+    document.querySelectorAll('.conversations-view').forEach((view) => {
+      if (!view.scrollTop) return;
+      const top = view.getBoundingClientRect().top;
+      const el = Array.from(view.querySelectorAll('.event, .assistant-text, .user-message'))
+        .find(n => n.getBoundingClientRect().bottom > top + 1);
+      if (el) anchors.push({ view, el, off: el.getBoundingClientRect().top - top });
+    });
+    const restoreAnchors = () => anchors.forEach(({ view, el, off }) => {
+      if (!el.isConnected) return;
+      view.scrollTop += el.getBoundingClientRect().top - view.getBoundingClientRect().top - off;
+    });
     _syncConvViewSegs(mode);
     applyConvVerbose(on);
+    restoreAnchors();
+    requestAnimationFrame(() => { restoreAnchors(); setTimeout(restoreAnchors, 150); });
     document.querySelectorAll('.conv-pane[data-pane-id]').forEach(pane => {
       if (normalizePresentationMode(pane.dataset.presentationMode) !== 'off') {
         refreshPresentationForPane(pane.dataset.paneId, { preserveCursor: true });
