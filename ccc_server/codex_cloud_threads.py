@@ -1032,11 +1032,71 @@ def _thread_cache_write(thread_id, updated_at, meta, turns):
         pass
 
 
+# Thread ids with a background turn refetch in flight (single-flight per id).
+_THREAD_REFRESHING = set()
+_THREAD_REFRESH_LOCK = threading.Lock()
+
+
+def _cached_result(cached, *, degraded=None, refreshing=False):
+    out = {
+        "meta": cached.get("meta") or {},
+        "turns": cached.get("turns") or [],
+        "updated_at": _epoch_seconds(cached.get("updated_at")),
+        "from_cache": True,
+        "degraded": degraded,
+    }
+    if refreshing:
+        out["refreshing"] = True
+    return out
+
+
+def _fetch_thread_live(thread_id, catalog_updated):
+    """Open the socket, pull every turn, strip blobs, write the cache."""
+    with CodexCloudClient() as client:
+        meta = client.read_thread_meta(thread_id)
+        turns = list(client.iter_turns(thread_id))
+    updated_at = _epoch_seconds(meta.get("updatedAt")) or catalog_updated or time.time()
+    meta = _strip_blobs(meta)
+    turns = [_shrink_turn_items(_strip_blobs(t)) for t in turns]
+    _thread_cache_write(thread_id, updated_at, meta, turns)
+    return {
+        "meta": meta, "turns": turns, "updated_at": updated_at,
+        "from_cache": False, "degraded": None,
+    }
+
+
+def _background_thread_refresh(thread_id, catalog_updated):
+    try:
+        _fetch_thread_live(thread_id, catalog_updated)
+    except Exception:  # stale cache keeps serving; next stale open retries
+        pass
+    finally:
+        with _THREAD_REFRESH_LOCK:
+            _THREAD_REFRESHING.discard(thread_id)
+
+
+def _schedule_thread_refresh(thread_id, catalog_updated):
+    """Kick a background turn refetch for `thread_id`. Never blocks."""
+    with _THREAD_REFRESH_LOCK:
+        if thread_id in _THREAD_REFRESHING:
+            return False
+        _THREAD_REFRESHING.add(thread_id)
+    threading.Thread(
+        target=_background_thread_refresh, args=(thread_id, catalog_updated),
+        daemon=True, name=f"codex-cloud-thread-{thread_id[:8]}").start()
+    return True
+
+
 def fetch_cloud_thread(thread_id, *, force=False):
     """{meta, turns, updated_at, from_cache, degraded} for one open.
 
-    The ONLY path that opens a WebSocket for turn bodies, and only on a cache
-    miss keyed by the catalog's updatedAt. Blobs are stripped before caching.
+    The ONLY path that opens a WebSocket for turn bodies. A cold miss (no
+    cache) fetches inline; a stale cache (catalog updatedAt moved past it)
+    is served immediately while a single-flight background refetch rewrites
+    the cache. Inline refetch of an active multi-MB thread blocked conv
+    opens for 8-13s (CCC-1254); the cache file's (mtime, size) change makes
+    the next ?after= poll pick up the new turns. Blobs are stripped before
+    caching.
     """
     if not valid_thread_id(thread_id):
         raise CloudError("invalid thread id", reason="invalid_thread_id")
@@ -1045,47 +1105,22 @@ def fetch_cloud_thread(thread_id, *, force=False):
     if cached is not None and not force:
         cached_updated = _epoch_seconds(cached.get("updated_at"))
         if not catalog_updated or cached_updated >= catalog_updated:
-            return {
-                "meta": cached.get("meta") or {},
-                "turns": cached.get("turns") or [],
-                "updated_at": cached_updated,
-                "from_cache": True,
-                "degraded": None,
-            }
-    if test_isolation_active() and not os.environ.get("CCC_CODEX_CLOUD_WS_URL"):
+            return _cached_result(cached)
+    test_offline = (test_isolation_active()
+                    and not os.environ.get("CCC_CODEX_CLOUD_WS_URL"))
+    if test_offline:
         if cached is not None:
-            return {
-                "meta": cached.get("meta") or {},
-                "turns": cached.get("turns") or [],
-                "updated_at": _epoch_seconds(cached.get("updated_at")),
-                "from_cache": True,
-                "degraded": "cloud fetch disabled in tests",
-            }
+            return _cached_result(cached, degraded="cloud fetch disabled in tests")
         raise CloudUnreachable("cloud fetch disabled in tests")
+    if cached is not None and not force:
+        _schedule_thread_refresh(thread_id, catalog_updated)
+        return _cached_result(cached, refreshing=True)
     try:
-        meta = {}
-        turns = []
-        with CodexCloudClient() as client:
-            meta = client.read_thread_meta(thread_id)
-            for turn in client.iter_turns(thread_id):
-                turns.append(turn)
-        updated_at = _epoch_seconds(meta.get("updatedAt")) or catalog_updated or time.time()
-        meta = _strip_blobs(meta)
-        turns = [_shrink_turn_items(_strip_blobs(t)) for t in turns]
-        _thread_cache_write(thread_id, updated_at, meta, turns)
-        return {
-            "meta": meta, "turns": turns, "updated_at": updated_at,
-            "from_cache": False, "degraded": None,
-        }
+        return _fetch_thread_live(thread_id, catalog_updated)
     except CloudError as exc:
         if cached is not None:
-            return {
-                "meta": cached.get("meta") or {},
-                "turns": cached.get("turns") or [],
-                "updated_at": _epoch_seconds(cached.get("updated_at")),
-                "from_cache": True,
-                "degraded": f"stale transcript ({_catalog_reason(exc)})",
-            }
+            return _cached_result(
+                cached, degraded=f"stale transcript ({_catalog_reason(exc)})")
         raise
 
 

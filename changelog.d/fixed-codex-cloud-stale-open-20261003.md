@@ -1,0 +1,1 @@
+- Opening an active Codex cloud thread no longer stalls for 8-13s while its transcript refetches; the cached copy shows immediately and new turns appear when the background refresh lands.

@@ -268,6 +268,7 @@ class _ResetState(unittest.TestCase):
         })
         cloud._SIDEBAR_CACHE.update({"key": None, "threads": []})
         cloud._THREAD_MEMO.clear()
+        cloud._THREAD_REFRESHING.clear()
         self._server = None
 
     def tearDown(self):
@@ -281,6 +282,7 @@ class _ResetState(unittest.TestCase):
             "live_ok": False,
         })
         cloud._THREAD_MEMO.clear()
+        cloud._THREAD_REFRESHING.clear()
 
     def start_server(self, rpc=None, **kw):
         self._server = FakeCloudServer(rpc, **kw)
@@ -597,6 +599,39 @@ class TestFetchAndCache(_ResetState):
             cached = json.loads(
                 (cloud._thread_cache_path(TID_CHILD)).read_text())
             self.assertNotIn(FAKE_TOKEN, json.dumps(cached))
+
+    def test_stale_cache_serves_now_and_refreshes_in_background(self):
+        """CCC-1254: a stale cache must not refetch on the open's thread."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as state:
+            os.environ["CCC_CODEX_CLOUD_STATE_DIR"] = state
+            srv = self.start_server(self._rpc())
+            cloud._thread_cache_write(TID_CHILD, 1700000000, {}, [])
+            cloud._CATALOG["threads"] = [{"id": TID_CHILD,
+                                          "updatedAt": 1700000300}]
+            cloud._CATALOG["ts"] = time.time()
+            gate = threading.Event()
+            real = cloud._fetch_thread_live
+
+            def slow_live(*a, **kw):
+                gate.wait(5)
+                return real(*a, **kw)
+            with mock.patch.object(cloud, "_fetch_thread_live", slow_live):
+                fetched = cloud.fetch_cloud_thread(TID_CHILD)
+                self.assertTrue(fetched["from_cache"])
+                self.assertTrue(fetched.get("refreshing"))
+                self.assertEqual(fetched["turns"], [])
+                # Second stale open while in flight: no second refetch.
+                self.assertFalse(cloud._schedule_thread_refresh(TID_CHILD, 0))
+                gate.set()
+                deadline = time.time() + 5
+                while cloud._THREAD_REFRESHING and time.time() < deadline:
+                    time.sleep(0.02)
+            self.assertEqual(srv.connections, 1)
+            fresh = cloud.fetch_cloud_thread(TID_CHILD)
+            self.assertTrue(fresh["from_cache"])
+            self.assertFalse(fresh.get("refreshing"))
+            self.assertEqual(len(fresh["turns"]), 3)
 
     def test_fetch_failure_serves_stale_cache(self):
         import tempfile
