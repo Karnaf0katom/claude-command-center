@@ -76642,12 +76642,26 @@
     return units;
   }
   let _ccRunSeq = 0;
+  // Where a folded run's chip goes: the end of the last paragraph / list
+  // item of the text message right before the run.
+  function _ccChipHost(text) {
+    let host = text;
+    while (host.lastElementChild && /^(P|UL|OL|LI|BLOCKQUOTE|DIV)$/.test(host.lastElementChild.tagName)
+      && !host.lastElementChild.classList.contains('cc-run-chip')) {
+      host = host.lastElementChild;
+    }
+    return host;
+  }
   function _ccMarkRuns(view) {
     const stale = new Set(view.querySelectorAll('[data-cc-run]'));
+    const staleChips = new Set(view.querySelectorAll('.cc-run-chip'));
     let run = [];
+    let prevText = null;
     const flush = () => {
       const active = run.filter(u => u.kind !== 'passive');
-      if (active.length >= 2) {
+      // A chip costs no row, so with a preceding text even one step folds;
+      // a standalone head line only pays off for two or more.
+      if (active.length >= 2 || (active.length && prevText)) {
         const head = active[0].el;
         const calls = active.reduce((n, u) => n + (u.calls || 0), 0);
         const thoughts = active.filter(u => u.kind === 'think').length;
@@ -76667,17 +76681,45 @@
         const labelEl = head.classList.contains('tool-call-group')
           ? head.querySelector(':scope > .tool-call-group-header') : head;
         if (labelEl && labelEl.dataset.ccRunLabel !== label) labelEl.dataset.ccRunLabel = label;
+        // Chip at the end of the preceding text, so the fold line doesn't
+        // take a row between sentences (CSS exempts chip-bearing text from
+        // the two-line clamp so the chip is never cut off). No preceding
+        // text (run follows a user turn): the standalone head line stays.
+        let chip = null;
+        if (prevText) {
+          chip = prevText.querySelector('.cc-run-chip[data-cc-chip-for="' + id + '"]');
+          if (!chip) {
+            chip = document.createElement('span');
+            chip.className = 'cc-run-chip';
+            chip.dataset.ccChipFor = id;
+            _ccChipHost(prevText).appendChild(chip);
+          }
+        }
+        if (chip) {
+          staleChips.delete(chip);
+          if (chip.dataset.ccRunLabel !== label) chip.dataset.ccRunLabel = label;
+          chip.classList.toggle('cc-run-open', open);
+        }
+        head.classList.toggle('cc-run-chipped', !!chip);
       }
       run = [];
     };
     for (const u of _ccUnitsOf(view)) {
-      if (u.kind === 'break') flush(); else run.push(u);
+      if (u.kind === 'break') {
+        flush();
+        prevText = u.el.classList.contains('assistant-text') ? u.el
+          : (u.el.classList.contains('event') && u.el.classList.contains('assistant')
+            ? u.el.querySelector(':scope > .assistant-text') : null);
+      } else {
+        run.push(u);
+      }
     }
     flush();
     stale.forEach(el => {
-      el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open');
+      el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open', 'cc-run-chipped');
       delete el.dataset.ccRun;
     });
+    staleChips.forEach(c => c.remove());
   }
   let _ccRunsRaf = 0;
   function _ccScheduleRuns() {
@@ -76706,14 +76748,17 @@
   document.addEventListener('click', (ev) => {
     if (!document.body.classList.contains('conv-compact')) return;
     const t = ev.target;
-    const head = t && t.closest ? t.closest('.cc-run-head') : null;
-    if (!head) return;
-    if (head.classList.contains('tool-call-group') && !t.closest('.tool-call-group-header')) return;
-    const view = head.closest('.conversations-view');
+    if (!t || !t.closest) return;
+    const chip = t.closest('.cc-run-chip');
+    const head = chip ? null : t.closest('.cc-run-head');
+    if (!chip && !head) return;
+    if (head && head.classList.contains('tool-call-group') && !t.closest('.tool-call-group-header')) return;
+    const view = (chip || head).closest('.conversations-view');
     if (!view) return;
     ev.stopImmediatePropagation();
-    const open = !head.classList.contains('cc-run-open');
-    view.querySelectorAll('[data-cc-run="' + head.dataset.ccRun + '"]')
+    const id = chip ? chip.dataset.ccChipFor : head.dataset.ccRun;
+    const open = !(chip || head).classList.contains('cc-run-open');
+    view.querySelectorAll('[data-cc-run="' + id + '"], .cc-run-chip[data-cc-chip-for="' + id + '"]')
       .forEach(el => el.classList.toggle('cc-run-open', open));
   }, true);
 
