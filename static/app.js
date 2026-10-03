@@ -83075,7 +83075,7 @@
       if (backendDesc) {
         const backend = data.backend === 'keychain' ? 'macOS Keychain' : 'encrypted local file';
         backendDesc.textContent = 'Keys for OpenRouter, TokenRouter, and other providers, stored in the ' +
-          backend + ' on this machine. Spawns pick a profile via "key_profile".';
+          backend + ' on this machine. Spawns pick a profile via "key_profile". Other keys (non-LLM) belong in Settings > Vault.';
       }
       if (providerSelect && !providerSelect.dataset.filled) {
         providerSelect.innerHTML = Object.keys(_byokProviders).map((id) =>
@@ -83138,6 +83138,262 @@
       } finally {
         btn.disabled = false;
         btn.textContent = 'Save key';
+      }
+    });
+  }
+
+  // ── Vault section: any kind of secret (API keys, tokens, logins) ──
+  // Write-only: GET /api/vault returns metadata (name, kind, service,
+  // username, env var, timestamps, a last-4 hint for long API keys/tokens)
+  // and never a value. One form serves add / edit / import-from-BYOK.
+  // Server side: ccc_server/vault.py; agents read values via `ccc vault`.
+  let _vaultKinds = { api_key: 'API key', token: 'Token', login: 'Login', other: 'Other' };
+  let _vaultForm = { mode: 'add' };
+  const _vaultFieldIds = {
+    name: 'vaultNameInput', kind: 'vaultKindSelect', service: 'vaultServiceInput',
+    username: 'vaultUsernameInput', env_var: 'vaultEnvVarInput',
+    website: 'vaultWebsiteInput', notes: 'vaultNotesInput', value: 'vaultValueInput',
+  };
+  function _vaultEl(field) { return document.getElementById(_vaultFieldIds[field]); }
+  function _vaultAgo(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+  function _vaultSlug(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^[^a-z0-9]+/, '').replace(/-+$/, '').slice(0, 64);
+  }
+  function _vaultSetStatus(text) {
+    const el = document.getElementById('vaultFormStatus');
+    if (el) el.textContent = text || '';
+  }
+  function _vaultResetForm() {
+    _vaultForm = { mode: 'add' };
+    Object.keys(_vaultFieldIds).forEach((f) => {
+      const el = _vaultEl(f);
+      if (!el) return;
+      if (f === 'kind') el.value = 'api_key'; else el.value = '';
+    });
+    const nameEl = _vaultEl('name');
+    if (nameEl) nameEl.readOnly = false;
+    const valueEl = _vaultEl('value');
+    if (valueEl) { valueEl.hidden = false; valueEl.placeholder = 'Secret value'; }
+    const title = document.getElementById('vaultFormTitle');
+    if (title) title.textContent = 'Add a secret';
+    const cancel = document.getElementById('vaultCancelBtn');
+    if (cancel) cancel.hidden = true;
+    const save = document.getElementById('vaultSaveBtn');
+    if (save) save.textContent = 'Save';
+  }
+  function _vaultOpenForm(mode, fields, opts) {
+    _vaultResetForm();
+    _vaultForm = Object.assign({ mode }, opts || {});
+    Object.keys(fields || {}).forEach((f) => {
+      const el = _vaultEl(f);
+      if (el && fields[f] != null) el.value = fields[f];
+    });
+    const title = document.getElementById('vaultFormTitle');
+    const nameEl = _vaultEl('name');
+    const valueEl = _vaultEl('value');
+    if (mode === 'edit') {
+      if (title) title.textContent = 'Edit ' + fields.name;
+      if (nameEl) nameEl.readOnly = true;
+      if (valueEl) valueEl.placeholder = 'New value (leave blank to keep the saved one)';
+    } else if (mode === 'import') {
+      if (title) title.textContent = 'Import BYOK key ' + opts.profile + ' / ' + opts.providerLabel;
+      if (valueEl) valueEl.hidden = true;
+    }
+    const cancel = document.getElementById('vaultCancelBtn');
+    if (cancel) cancel.hidden = false;
+    const save = document.getElementById('vaultSaveBtn');
+    if (save) save.textContent = mode === 'import' ? 'Import to Vault' : 'Save';
+    _vaultSetStatus(mode === 'import' ? 'The value is copied from BYOK; the BYOK key stays where it is.' : '');
+    const row = document.getElementById('vaultFormRow');
+    if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+    if (nameEl && !nameEl.readOnly) nameEl.focus();
+    else { const svc = _vaultEl('service'); if (svc) svc.focus(); }
+  }
+  let _vaultEntriesByName = {};
+  function _vaultRenderEntries(entries) {
+    const el = document.getElementById('vaultEntriesList');
+    if (!el) return;
+    _vaultEntriesByName = {};
+    (entries || []).forEach((e) => { _vaultEntriesByName[e.name] = e; });
+    if (!entries || !entries.length) {
+      el.textContent = 'Nothing in the vault yet.';
+      return;
+    }
+    el.innerHTML = entries.map((e) => {
+      const bits = [];
+      if (e.service) bits.push(escapeHtml(e.service));
+      if (e.username) bits.push('user ' + escapeHtml(e.username));
+      if (e.env_var) bits.push('<code>' + escapeHtml(e.env_var) + '</code>');
+      if (e.website) bits.push(escapeHtml(e.website));
+      if (e.source && e.source.type === 'byok') bits.push('from BYOK ' + escapeHtml(e.source.profile + '/' + e.source.provider));
+      const saved = 'saved' + (e.value_updated_at ? ' ' + _vaultAgo(e.value_updated_at) : '') +
+        (e.hint ? ' · ••••' + escapeHtml(e.hint) : '');
+      return '<div class="vault-entry">' +
+        '<div class="vault-entry-main">' +
+          '<strong>' + escapeHtml(e.name) + '</strong>' +
+          '<span class="vault-kind-chip">' + escapeHtml(_vaultKinds[e.kind] || e.kind || '') + '</span>' +
+          '<span class="vault-saved" title="' + escapeHtml(e.value_updated_at ? new Date(e.value_updated_at * 1000).toLocaleString() : '') + '">' + saved + '</span>' +
+          (bits.length ? '<div class="vault-entry-meta">' + bits.join(' · ') + '</div>' : '') +
+          (e.notes ? '<div class="vault-entry-meta">' + escapeHtml(e.notes) + '</div>' : '') +
+        '</div>' +
+        '<div class="vault-entry-actions">' +
+          '<button type="button" class="settings-action-btn" data-vault-edit="' + escapeHtml(e.name) + '">Edit</button>' +
+          '<button type="button" class="settings-action-btn vault-danger" data-vault-delete="' + escapeHtml(e.name) + '">Delete</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    el.querySelectorAll('[data-vault-edit]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const e = _vaultEntriesByName[btn.getAttribute('data-vault-edit')];
+        if (!e) return;
+        _vaultOpenForm('edit', {
+          name: e.name, kind: e.kind, service: e.service, username: e.username,
+          env_var: e.env_var, website: e.website, notes: e.notes,
+        });
+      });
+    });
+    el.querySelectorAll('[data-vault-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const name = btn.getAttribute('data-vault-delete');
+        if (!window.confirm('Delete "' + name + '" from the Vault? The saved value is removed from this machine.')) return;
+        try {
+          const res = await fetch('/api/vault/entries/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!data.ok) _vaultSetStatus('Could not delete: ' + (data.error || 'unknown error'));
+          else if (_vaultForm.mode === 'edit' && _vaultForm.name === name) _vaultResetForm();
+        } catch (err) {
+          _vaultSetStatus('Delete failed: ' + ((err && err.message) || 'network'));
+        }
+        refreshVaultSettings();
+      });
+    });
+  }
+  function _vaultRenderByok(rows) {
+    const el = document.getElementById('vaultByokList');
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.textContent = 'No BYOK keys.';
+      return;
+    }
+    el.innerHTML = rows.map((r, i) => {
+      const imported = (r.imported_as || []).length
+        ? '<span class="vault-saved">imported as ' + r.imported_as.map(escapeHtml).join(', ') + '</span>' : '';
+      return '<div class="vault-entry">' +
+        '<div class="vault-entry-main">' +
+          '<strong>' + escapeHtml(r.profile) + ' / ' + escapeHtml(r.provider_label || r.provider) + '</strong>' +
+          '<span class="vault-kind-chip">BYOK</span>' + imported +
+          ((r.env_vars || []).length ? '<div class="vault-entry-meta">' + r.env_vars.map((v) => '<code>' + escapeHtml(v) + '</code>').join(' ') + '</div>' : '') +
+        '</div>' +
+        '<div class="vault-entry-actions">' +
+          '<button type="button" class="settings-action-btn" data-vault-import="' + i + '">Import to Vault</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    el.querySelectorAll('[data-vault-import]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const r = rows[Number(btn.getAttribute('data-vault-import'))];
+        if (!r) return;
+        _vaultOpenForm('import', {
+          name: _vaultSlug(r.provider + '-' + r.profile),
+          kind: 'api_key',
+          service: r.provider_label || r.provider,
+          env_var: (r.env_vars || [])[0] || '',
+        }, { profile: r.profile, provider: r.provider, providerLabel: r.provider_label || r.provider });
+      });
+    });
+  }
+  async function refreshVaultSettings() {
+    const backendDesc = document.getElementById('vaultBackendDesc');
+    if (!backendDesc) return;
+    try {
+      const res = await fetch('/api/vault', { cache: 'no-store' });
+      const data = await res.json();
+      if (data.kinds) _vaultKinds = data.kinds;
+      const backend = data.backend === 'keychain'
+        ? 'the macOS Keychain (service "ccc-vault")' : 'an encrypted file';
+      backendDesc.textContent = 'API keys, tokens and logins for any service, stored in ' + backend +
+        ' on this machine only. Never synced, never sent anywhere.';
+      _vaultRenderEntries(data.entries || []);
+      _vaultRenderByok(data.byok || []);
+    } catch (err) {
+      backendDesc.textContent = 'Could not load the Vault: ' + ((err && err.message) || 'network');
+    }
+  }
+  if (document.getElementById('vaultSaveBtn')) {
+    const nameEl = _vaultEl('name');
+    if (nameEl) nameEl.addEventListener('input', () => {
+      const pos = nameEl.selectionStart;
+      const lower = nameEl.value.toLowerCase();
+      if (lower !== nameEl.value) { nameEl.value = lower; try { nameEl.setSelectionRange(pos, pos); } catch (_) {} }
+    });
+    document.getElementById('vaultCancelBtn').addEventListener('click', () => {
+      _vaultResetForm();
+      _vaultSetStatus('');
+    });
+    document.getElementById('vaultSaveBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('vaultSaveBtn');
+      const payload = {};
+      ['name', 'kind', 'service', 'username', 'env_var', 'website', 'notes'].forEach((f) => {
+        const el = _vaultEl(f);
+        payload[f] = el ? el.value.trim() : '';
+      });
+      const valueEl = _vaultEl('value');
+      const value = valueEl ? valueEl.value : '';
+      const mode = _vaultForm.mode;
+      let url = '/api/vault/entries';
+      if (mode === 'add') {
+        if (!payload.name || !value.trim()) { _vaultSetStatus('Name and secret value are required.'); return; }
+        payload.value = value;
+      } else if (mode === 'edit') {
+        url = '/api/vault/entries/update';
+        payload.name = _vaultForm.name || payload.name;
+        if (value.trim()) payload.value = value;
+      } else {
+        url = '/api/vault/import-byok';
+        if (!payload.name) { _vaultSetStatus('Pick a name for the vault entry.'); return; }
+        payload.profile = _vaultForm.profile;
+        payload.provider = _vaultForm.provider;
+      }
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) {
+          const where = data.backend === 'keychain' ? 'Keychain' : 'encrypted file';
+          const done = mode === 'edit'
+            ? (payload.value ? 'Value replaced in ' + where + '.' : 'Details updated.')
+            : (mode === 'import' ? 'Imported as ' + data.entry.name + '.' : 'Saved to ' + where + '.');
+          _vaultResetForm();
+          _vaultSetStatus(done);
+          showSettingsSavedPulse(btn.closest('.settings-row'));
+          refreshVaultSettings();
+        } else {
+          _vaultSetStatus('Could not save: ' + ((data && data.error) || 'unknown error'));
+        }
+      } catch (err) {
+        _vaultSetStatus('Save failed: ' + ((err && err.message) || 'network'));
+      } finally {
+        if (valueEl) valueEl.value = '';
+        btn.disabled = false;
+        if (btn.textContent === 'Saving…') btn.textContent = label;
       }
     });
   }
@@ -83473,6 +83729,7 @@
     refreshSpawnEngineValue();
     refreshEngineUpdateStatus();
     refreshByokSettings();
+    refreshVaultSettings();
     const $phoneRow = document.getElementById('phoneAccessRow');
     if ($phoneRow) $phoneRow.hidden = false;
     setActiveSettingsRailSection(_settingsCurrentSection || 'appearance', { scroll: false });
@@ -83772,6 +84029,7 @@
       if (!item) return;
       const sid = item.getAttribute('data-section-target');
       if (sid) setActiveSettingsRailSection(sid);
+      if (sid === 'vault') refreshVaultSettings();
     });
   }
   // Scroll-spy removed: the pane shows one section at a time (single-panel

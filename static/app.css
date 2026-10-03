@@ -26881,6 +26881,36 @@ button.eng-default-chip:hover, button.eng-default-chip:focus-visible {
 }
 .byok-profile-chip .byok-chip-delete:hover { color: var(--red); }
 
+/* Vault (Settings → Vault): add/edit/import form + entry rows */
+.vault-form {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px; margin-top: 8px;
+}
+.vault-form .settings-text-input, .vault-form .settings-select { width: 100%; box-sizing: border-box; }
+.vault-form .vault-form-wide, .vault-form .vault-form-actions { grid-column: 1 / -1; }
+.vault-form .settings-text-input[readonly] { opacity: 0.7; }
+.vault-form-actions { display: flex; gap: 6px; }
+.vault-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.vault-entry {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2);
+}
+.vault-entry-main { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.vault-entry-main strong { color: var(--text); font-weight: 600; }
+.vault-entry-meta { flex-basis: 100%; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+.vault-kind-chip {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-muted);
+}
+.vault-saved { font-size: 12px; color: var(--text-muted); }
+.vault-entry-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.vault-entry-actions .vault-danger:hover { color: var(--red); border-color: var(--red); }
+@media (max-width: 640px) {
+  .vault-form { grid-template-columns: 1fr; }
+  .vault-entry { flex-direction: column; }
+}
+
 /* Launcher rows ("Open ↗") */
 .settings-launcher-btn {
   display: inline-flex; align-items: center;
