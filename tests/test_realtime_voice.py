@@ -490,3 +490,18 @@ def test_ccc_session_falls_back_to_archive_row_for_non_claude_ids(monkeypatch):
     assert "not found" in vs._tool_session({"session_id": "nope"})
     inv = vs._tool_sessions({})
     assert "session=session_abc" in inv
+
+
+def test_ccc_session_and_sessions_resolve_by_title(monkeypatch):
+    """OPS-1342: voice users say a session's display name, not its id."""
+    monkeypatch.setattr(server, "compute_session_detail",
+                        lambda sid: ({"ok": False, "error": "session not found"}, 404))
+    rows = [{"session_id": "session_abc", "engine": "kimi", "is_live": True,
+             "title": "Build Two-way Realtime Voice Mode", "folder_label": "repo"},
+            {"session_id": "session_def", "engine": "claude", "is_live": False,
+             "title": "Other thing", "folder_label": "repo"}]
+    monkeypatch.setattr(server, "_archive_all_rows_cached", lambda opts: (rows, True))
+    vs = object.__new__(rv.VoiceSession)
+    assert "session_abc" in vs._tool_session({"session_id": "Build Two-way Realtime Voice Mode"})
+    inv = vs._tool_sessions({"query": "realtime voice"})
+    assert "session=session_abc" in inv and "session_def" not in inv

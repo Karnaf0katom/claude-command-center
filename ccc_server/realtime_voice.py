@@ -721,7 +721,14 @@ class VoiceSession:
             # the same archive rows the feed is built from.
             row = self._archive_row(sid)
             if not row:
-                return f"session {sid} not found"
+                # Not an id: the user may have said a display name.
+                hits = self._match_title(sid)
+                if len(hits) > 1:
+                    return "multiple matches, pick one:\n" + "\n".join(
+                        f"- {r.get('title')} session={r.get('session_id')}" for r in hits[:8])
+                if not hits:
+                    return f"session {sid} not found"
+                return self._tool_session({"session_id": hits[0].get("session_id")})
             parts = [f"session {row.get('session_id') or sid}:"]
             for key in ("title", "engine", "folder_label"):
                 if row.get(key):
@@ -761,13 +768,25 @@ class VoiceSession:
                 return row
         return None
 
+    def _match_title(self, query):
+        """Archive rows whose title contains every word of query (live first)."""
+        words = query.lower().split()
+        rows = [r for r in self._archive_rows()
+                if all(w in (r.get("title") or "").lower() for w in words)]
+        rows.sort(key=lambda r: (not r.get("is_live"), -(r.get("modified") or r.get("mtime") or 0)))
+        return rows
+
     def _tool_sessions(self, args):
         try:
             limit = max(1, min(30, int(args.get("limit") or 15)))
         except (TypeError, ValueError):
             limit = 15
-        rows = [r for r in self._archive_rows() if r.get("is_live")]
-        if not args.get("live_only", True):
+        query = str(args.get("query") or "").strip()
+        if query:
+            rows = self._match_title(query)
+        elif args.get("live_only", True):
+            rows = [r for r in self._archive_rows() if r.get("is_live")]
+        else:
             rows = self._archive_rows()
         rows.sort(key=lambda r: -(r.get("modified") or r.get("mtime") or 0))
         if not rows:
@@ -1363,7 +1382,7 @@ def _tool_specs():
         {
             "type": "function",
             "name": "ccc_session",
-            "description": "Summarize one CCC session by session_id. Read-only.",
+            "description": "Summarize one CCC session by session_id or by its display name/title. Read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"session_id": {"type": "string"}},
@@ -1375,13 +1394,14 @@ def _tool_specs():
             "name": "ccc_sessions",
             "description": (
                 "List open (live) CCC sessions across all engines with their "
-                "session_ids. Set live_only=false for recent history. Read-only."
+                "session_ids. Pass query to search by title words; live_only=false for recent history. Read-only."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "max items, default 15"},
                     "live_only": {"type": "boolean"},
+                    "query": {"type": "string", "description": "title words to search for"},
                 },
             },
         },
