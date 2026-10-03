@@ -10158,8 +10158,10 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     // Codex cloud (dot/aeon) thread: read-only. Its transcript lives in
-    // OpenAI's cloud and CCC never writes to that backend.
-    const isCodexCloud = isCodex && !!currentSession.codex_cloud;
+    // OpenAI's cloud and CCC never writes to that backend. The flag is not
+    // gated on source: popout/synthetic rows default source to 'interactive'
+    // while the marker arrives with the transcript payload.
+    const isCodexCloud = !!currentSession.codex_cloud;
     const isGemini = currentSession.source === 'gemini';
     const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
@@ -35076,7 +35078,7 @@
       // cloud rows are excluded too: their transcripts live in the cloud
       // (fetched on open), so a missing local first_message says nothing
       // about usage. Devin CLI rows carry first_message from the SQLite DB.
-      const emptySessionChipHtml = (!isBacklogRow && !isGithubPrRow && !c.pending_spawn && !c.first_message && !c.spawn_recent && c.source !== 'devin')
+      const emptySessionChipHtml = (!isBacklogRow && !isGithubPrRow && !c.pending_spawn && !c.first_message && !c.spawn_recent && c.source !== 'devin' && !c.codex_cloud)
         ? '<span class="conv-empty-session-chip" title="This session has no transcript messages">[EMPTY]</span>'
         : '';
       const historySnippetHtml = c._historySnippet
@@ -44486,7 +44488,8 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     // Codex cloud (dot/aeon) thread: read-only, same as the main composer.
-    const isCodexCloud = isCodex && !!currentSession.codex_cloud;
+    // Not gated on source: popout rows can carry 'interactive'.
+    const isCodexCloud = !!currentSession.codex_cloud;
     const isGemini = currentSession.source === 'gemini';
     const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
@@ -70341,6 +70344,16 @@
         hermes_source: c.hermes_source || '',
         hermes_tool_calls: Number(c.hermes_tool_calls || c.tool_call_count || 0),
         all_lane_override: c.all_lane_override || '',
+        // Codex cloud (dot/aeon) threads: the row renderer reads codex_cloud
+        // for the "cloud" signal chip and the dot/degraded fields for its
+        // tooltip. Same allowlist trap as goal below -- unnamed fields are
+        // silently dropped by this shaping.
+        codex_cloud: !!c.codex_cloud,
+        cloud: !!c.cloud,
+        dot_name: c.dot_name || '',
+        dot_root_id: c.dot_root_id || '',
+        cloud_degraded: c.cloud_degraded || '',
+        cloud_status: c.cloud_status || '',
         // Codex current-goal (server reads ~/.codex/goals_1.sqlite). The shaped
         // object is an explicit allowlist, so goal must be copied through or the
         // goal chip never renders.

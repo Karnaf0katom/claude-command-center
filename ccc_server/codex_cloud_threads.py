@@ -752,7 +752,7 @@ def cloud_catalog_signature_path():
 _CATALOG = {
     "ts": 0.0,
     "threads": None,
-    "degraded": "no data yet",
+    "degraded": "cloud catalog still loading",
     "failures": 0,
     "next_retry": 0.0,
     "refreshing": False,
@@ -799,6 +799,23 @@ def _catalog_refresh():
         with CodexCloudClient() as client:
             threads = client.list_threads()
         threads = [_strip_blobs(t) for t in threads]
+        # thread/list carries no dot/parent linkage; the desktop's local
+        # sidebar atom does (profile -> active_root_thread_id). Merge it so
+        # rows can nest under their dot root without a per-thread thread/read.
+        sidebar_by_id = {t.get("id"): t for t in _sidebar_threads()
+                         if isinstance(t, dict) and t.get("id")}
+        for th in threads:
+            if not isinstance(th, dict):
+                continue
+            sb = sidebar_by_id.get(th.get("id"))
+            if not sb:
+                continue
+            if not th.get("parentThreadId") and sb.get("parentThreadId"):
+                th["parentThreadId"] = sb["parentThreadId"]
+            if sb.get("dotName"):
+                th["dotName"] = sb["dotName"]
+            if sb.get("dotRootId"):
+                th["dotRootId"] = sb["dotRootId"]
         _catalog_disk_write(threads)
         with _CATALOG_LOCK:
             _CATALOG.update({
@@ -876,8 +893,8 @@ def _normalize_live_thread(th):
         "status": th.get("status"),
         "source": th.get("source"),
         "environments": th.get("environments"),
-        "dotName": "",
-        "dotRootId": "",
+        "dotName": th.get("dotName") or "",
+        "dotRootId": th.get("dotRootId") or "",
     }
 
 

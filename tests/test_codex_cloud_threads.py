@@ -262,7 +262,7 @@ class _ResetState(unittest.TestCase):
     def setUp(self):
         self._saved_env = dict(os.environ)
         cloud._CATALOG.update({
-            "ts": 0.0, "threads": None, "degraded": "no data yet",
+            "ts": 0.0, "threads": None, "degraded": "cloud catalog still loading",
             "failures": 0, "next_retry": 0.0, "refreshing": False,
             "live_ok": False,
         })
@@ -276,7 +276,7 @@ class _ResetState(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self._saved_env)
         cloud._CATALOG.update({
-            "ts": 0.0, "threads": None, "degraded": "no data yet",
+            "ts": 0.0, "threads": None, "degraded": "cloud catalog still loading",
             "failures": 0, "next_retry": 0.0, "refreshing": False,
             "live_ok": False,
         })

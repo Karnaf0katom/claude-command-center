@@ -15138,6 +15138,9 @@ def _archive_all_rows_cached(cache_options):
 # while /list must not serialize transcripts, parser/debug state, or JSONL paths.
 _ARCHIVE_LIST_FIELDS = (
     "id", "session_id", "source", "engine", "source_platform", "thread_source",
+    # Codex cloud (dot/aeon) markers — additive; absent on local rows.
+    "codex_cloud", "cloud", "cloud_degraded", "cloud_status",
+    "dot_name", "dot_root_id",
     "hermes_source", "hermes_origin", "hermes_profile", "hermes_chat_type",
     "hermes_tool_calls", "folder_label", "folder_path", "slug", "pinned_repo",
     "session_cwd", "session_cwd_exists", "session_cwd_is_worktree", "mtime",
@@ -23501,12 +23504,17 @@ def _window_parsed_conversation_events(result, tail=None, before=None):
         candidates = all_events
     events = candidates[-window:]
     first_line = int(events[0].get("line") or 0) if events else 0
-    return {
+    # Preserve the parser's extra top-level keys (engine, codex_cloud, meta
+    # fields) — rebuilding a bare dict here would silently strip markers the
+    # viewer needs on windowed opens, e.g. the cloud-thread read-only flag.
+    out = dict(result)
+    out.update({
         "events": events,
         "last_line": last_line,
         "first_line": first_line,
         "truncated_before": bool(first_line > 1 and len(candidates) > len(events)),
-    }
+    })
+    return out
 
 
 def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=True,
