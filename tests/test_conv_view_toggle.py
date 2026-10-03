@@ -50,6 +50,17 @@ class ConvViewToggleTest(unittest.TestCase):
         self.assertIn("t.closest('.assistant-text, .event.user_text, .thinking-block, .tool-call')", js)
         self.assertIn("el.classList.toggle('cc-open')", js)
 
+    def test_tool_runs_fold_between_text_messages(self):
+        js = _read("static/app.js")
+        css = _read("static/app.css")
+        self.assertIn("function _ccMarkRuns(view)", js)
+        self.assertIn("if (groups.length >= 2)", js)
+        # The observer is only live while compact is on.
+        self.assertIn("_ccSyncRunsObserver(mode === 'compact');", js)
+        # Declared before the boot-time sync call (const TDZ).
+        self.assertLess(js.index("const _ccRunsObserver"), js.index("_syncConvViewSegs(convViewMode());"))
+        self.assertIn(".cc-run-tail:not(.cc-run-open) { display: none !important; }", css)
+
 
 if __name__ == "__main__":
     unittest.main()

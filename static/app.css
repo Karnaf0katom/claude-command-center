@@ -30492,6 +30492,18 @@ body.conv-compact.conv-compact .conversations-view .tool-call-group { margin: 0;
 body.conv-compact.conv-compact .conversations-view .tool-call-group-header { padding: 1px 8px; }
 body.conv-compact.conv-compact .conversations-view .tool-call-group-body { padding: 0 8px 2px; }
 
+/* Folded runs: the tool rows between two text messages collapse into one
+   "N tool calls" line (marked by _ccMarkRuns in app.js). */
+body.conv-compact.conv-compact .conversations-view .cc-run-tail:not(.cc-run-open) { display: none !important; }
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-body { display: none; }
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header > * { display: none; }
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header::before {
+  content: "\25B8  " attr(data-cc-run-label);
+}
+body.conv-compact.conv-compact .conversations-view .cc-run-head.cc-run-open > .tool-call-group-header::after {
+  content: "\25BE  fold " attr(data-cc-run-label); margin-left: auto; opacity: 0.6; font-size: 0.9em;
+}
+
 /* Transcript view segmented control: Compact | Normal | Verbose, all
    visible, one tap. Selected segment follows body[data-conv-view]. */
 .conv-view-seg {

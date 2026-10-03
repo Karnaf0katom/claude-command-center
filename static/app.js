@@ -76608,6 +76608,79 @@
     clearPaneScreenForVideo(paneId);
   });
 
+  // Compact view: the tool rows between two text messages fold into one
+  // "N tool calls" line (the narration stays, the work between it folds).
+  // Runs are re-marked after every DOM change while compact is on; the
+  // marks are inert outside body.conv-compact. Tap the line to unfold.
+  function _ccIsRunItem(el) {
+    if (el.classList.contains('tool-call-group')) return true;
+    if (el.matches('details.spawn-stats')) return true;
+    return el.classList.contains('event') && el.classList.contains('assistant')
+      && !el.querySelector('.assistant-text');
+  }
+  function _ccMarkRuns(view) {
+    let run = [];
+    const flush = () => {
+      const groups = run.filter(el => el.classList.contains('tool-call-group'));
+      if (groups.length >= 2) {
+        const head = groups[0];
+        const calls = groups.reduce((n, g) => n + Math.max(1, g.querySelectorAll('.tool-call').length), 0);
+        const open = run.some(el => el.classList.contains('cc-run-open'));
+        run.forEach(el => {
+          el.classList.toggle('cc-run-head', el === head);
+          el.classList.toggle('cc-run-tail', el !== head);
+          el.classList.toggle('cc-run-open', open);
+        });
+        const hdr = head.querySelector(':scope > .tool-call-group-header');
+        if (hdr) hdr.dataset.ccRunLabel = calls + ' tool call' + (calls === 1 ? '' : 's');
+      } else {
+        run.forEach(el => el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open'));
+      }
+      run = [];
+    };
+    for (const el of view.children) {
+      if (_ccIsRunItem(el)) run.push(el); else flush();
+    }
+    flush();
+  }
+  let _ccRunsRaf = 0;
+  function _ccScheduleRuns() {
+    if (_ccRunsRaf) return;
+    _ccRunsRaf = requestAnimationFrame(() => {
+      _ccRunsRaf = 0;
+      document.querySelectorAll('.conversations-view').forEach(_ccMarkRuns);
+    });
+  }
+  const _ccRunsObserver = new MutationObserver((records) => {
+    for (const r of records) {
+      const t = r.target;
+      if (t && t.closest && t.closest('.conversations-view')) { _ccScheduleRuns(); return; }
+      if (t && t.querySelector && t.querySelector('.conversations-view')) { _ccScheduleRuns(); return; }
+    }
+  });
+  function _ccSyncRunsObserver(on) {
+    _ccRunsObserver.disconnect();
+    if (on) {
+      _ccRunsObserver.observe(document.body, { childList: true, subtree: true });
+      _ccScheduleRuns();
+    }
+  }
+  // A tap on a folded run's line unfolds the whole run; a tap on the head's
+  // header while unfolded folds it back.
+  document.addEventListener('click', (ev) => {
+    if (!document.body.classList.contains('conv-compact')) return;
+    const hdr = ev.target && ev.target.closest ? ev.target.closest('.tool-call-group.cc-run-head > .tool-call-group-header') : null;
+    if (!hdr) return;
+    const head = hdr.parentElement;
+    ev.stopPropagation();
+    const open = !head.classList.contains('cc-run-open');
+    let el = head;
+    while (el && (el === head || el.classList.contains('cc-run-tail'))) {
+      el.classList.toggle('cc-run-open', open);
+      el = el.nextElementSibling;
+    }
+  }, true);
+
   // CCC-454: transcript view segmented control (rail topbar + per-pane
   // menu copies, incl. cloned split panes, hence querySelectorAll at sync
   // time). Picking a mode persists it and re-applies expansion state to the
@@ -76617,6 +76690,7 @@
     // cloned later render the right segment without a re-sync.
     document.body.dataset.convView = mode;
     document.body.classList.toggle('conv-compact', mode === 'compact');
+    _ccSyncRunsObserver(mode === 'compact');
     document.querySelectorAll('.conv-view-seg [data-conv-view]').forEach((b) => {
       b.setAttribute('aria-checked', b.dataset.convView === mode ? 'true' : 'false');
     });
