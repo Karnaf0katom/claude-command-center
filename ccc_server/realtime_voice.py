@@ -721,8 +721,9 @@ class VoiceSession:
             # the same archive rows the feed is built from.
             row = self._archive_row(sid)
             if not row:
-                # Not an id: the user may have said a display name.
-                hits = self._match_title(sid)
+                # Not a full id: try an id prefix (voice users dictate the first
+                # 8 chars), then a display name.
+                hits = self._match_prefix(sid) or self._match_title(sid)
                 if len(hits) > 1:
                     return "multiple matches, pick one:\n" + "\n".join(
                         f"- {r.get('title')} session={r.get('session_id')}" for r in hits[:8])
@@ -767,6 +768,20 @@ class VoiceSession:
             if row.get("session_id") in want:
                 return row
         return None
+
+    def _match_prefix(self, query):
+        """Archive rows whose session id starts with query (>=6 chars, spaces/dashes ignored)."""
+        q = query.lower().replace(" ", "")
+        if len(q) < 6 or not all(c in "0123456789abcdef-_session" for c in q):
+            return []
+        bare = q[len("session_"):] if q.startswith("session_") else q
+        rows = []
+        for r in self._archive_rows():
+            sid = str(r.get("session_id") or "").lower()
+            if sid.startswith(bare) or sid.startswith(q) or sid.startswith("session_" + bare):
+                rows.append(r)
+        rows.sort(key=lambda r: (not r.get("is_live"), -(r.get("modified") or r.get("mtime") or 0)))
+        return rows
 
     def _match_title(self, query):
         """Archive rows whose title contains every word of query (live first)."""

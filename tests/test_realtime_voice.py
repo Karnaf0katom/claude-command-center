@@ -505,3 +505,21 @@ def test_ccc_session_and_sessions_resolve_by_title(monkeypatch):
     assert "session_abc" in vs._tool_session({"session_id": "Build Two-way Realtime Voice Mode"})
     inv = vs._tool_sessions({"query": "realtime voice"})
     assert "session=session_abc" in inv and "session_def" not in inv
+
+
+def test_ccc_session_resolves_eight_char_id_prefix(monkeypatch):
+    """OPS-1343: voice users dictate only the first 8 chars of a session id."""
+    monkeypatch.setattr(server, "compute_session_detail",
+                        lambda sid: ({"ok": False, "error": "session not found"}, 404))
+    rows = [{"session_id": "01a103a3-1111-2222-3333-444444444444", "engine": "claude",
+             "is_live": True, "title": "Alpha", "folder_label": "repo"},
+            {"session_id": "01a103b9-1111-2222-3333-444444444444", "engine": "claude",
+             "is_live": True, "title": "Beta", "folder_label": "repo"},
+            {"session_id": "01a103b9-aaaa-2222-3333-444444444444", "engine": "claude",
+             "is_live": False, "title": "Gamma", "folder_label": "repo"}]
+    monkeypatch.setattr(server, "_archive_all_rows_cached", lambda opts: (rows, True))
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_session({"session_id": "01a103a3"})
+    assert "01a103a3-1111" in out and "Alpha" in out
+    amb = vs._tool_session({"session_id": "01a103b9"})
+    assert "multiple matches" in amb and "Beta" in amb and "Gamma" in amb
