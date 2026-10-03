@@ -731,7 +731,10 @@ class VoiceSession:
                     return f"session {sid} not found"
                 return self._tool_session({"session_id": hits[0].get("session_id")})
             parts = [f"session {row.get('session_id') or sid}:"]
-            for key in ("title", "engine", "folder_label"):
+            title = row.get("title") or row.get("display_name")
+            if title:
+                parts.append(f"title={title}")
+            for key in ("engine", "folder_label"):
                 if row.get(key):
                     parts.append(f"{key}={row[key]}")
             parts.append("live" if row.get("is_live") else "not live")
