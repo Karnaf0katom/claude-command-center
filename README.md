@@ -336,6 +336,7 @@ ccc models                # every engine's models, effort ladders, cost,
                           # release dates where the id carries one
 ccc quota                 # weekly quota left per engine + when it resets
 ccc doctor                # per-engine CLI/auth/BYOK health, dry-run only
+ccc vault exec --env VAR=<name> -- <cmd>   # run with a Vault secret, redacted from output
 ccc spawn "fix the flaky login test" --engine claude --model opus-5
 ccc spawn "drain the queue" --report-to <your-session-id>   # reports back
 
@@ -640,6 +641,38 @@ Keys are stored per **profile** (name them however you like — `work`,
   launched and no tokens are spent.
 
 ![Settings → Engines: BYOK panel with an add-key form, profile list, and a 30-day spend summary](docs/images/byok-settings.png)
+
+### Vault: any other secret
+
+BYOK is for LLM provider keys that CCC injects into engine spawns. For
+everything else (a Stripe key, a Meta app token, a website login) use
+**Settings → Vault**.
+
+- **Entries**: a unique name (`stripe-live`), a kind (`api_key`, `token`,
+  `login`, `other`), a service label, and optional username, env var,
+  website and notes. Edit details, replace the value, or delete.
+- **Storage**: values in the macOS Keychain (service `ccc-vault`, account =
+  entry name), or off macOS the same encrypted-file fallback BYOK uses
+  (`~/.claude/command-center/vault/secrets.enc.json`). Metadata lives in
+  `~/.claude/command-center/vault/index.json` (mode 0600) and never holds a
+  value.
+- **Write-only**: no API returns a value. The UI shows "saved" and when,
+  plus a last-4 hint for long API keys and tokens.
+- **BYOK keys** are listed in the Vault tab too, with **Import to Vault**:
+  it copies the value into a new entry and leaves the BYOK key in place.
+- **Agents and scripts** read values locally via the CLI (no server
+  needed). Prefer `exec`, which keeps the value out of the transcript and
+  redacts it from the command's stdout/stderr:
+
+  ```bash
+  ccc vault list [--json]                      # names, kinds, services, env vars, never values
+  ccc vault exec --env STRIPE_API_KEY=stripe-live -- ./deploy.sh
+  ccc vault exec --env stripe-live -- ./deploy.sh   # uses the entry's stored env var
+  ccc vault get stripe-live                    # exit 0 if saved; --reveal prints the value
+  ```
+- **API**: `GET /api/vault` (metadata + BYOK rows), `POST /api/vault/entries`,
+  `/api/vault/entries/update`, `/api/vault/entries/delete`,
+  `/api/vault/import-byok`. Same same-origin rule as every other POST.
 
 ## Features
 
