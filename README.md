@@ -160,6 +160,7 @@ The whole fleet on your phone — monitor sessions, answer agents, and steer fro
 
 - **More queue tooling** — per-queue AI status briefs, GitHub-backed queues synced from issues, and one-click "create a queue for this session".
 - **Answer permission prompts from the dashboard** — Claude Code's approve/deny prompts surface inline; CCC never interrupts a possibly-mid-turn session without your Approve.
+- **Voice mode** — talk to the board hands-on through the Codex realtime lane (experimental): the browser's mic and speakers peer with the local voice host over WebRTC, the voice answers from a read-only view of your sessions and queues, and anything that would change state lands as a card you confirm by click. Needs an OpenAI API key in BYOK. See `docs/realtime-voice.md`.
 - **Board view (kanban, optional)** — drag-drop columns derived from session state, with rubber-band multi-select. The list is the primary surface; the board is an opt-in lens.
 - **System status** — a health modal over the whole fleet: restart-all, spawned-process cleanup, delivery receipts.
 - **Cost-aware cold-session composer** — ranked cheaper routes (continue fresh on a lower tier, search history) instead of a blind expensive resume.

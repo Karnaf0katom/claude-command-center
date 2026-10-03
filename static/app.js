@@ -77829,7 +77829,7 @@
       kind.textContent = 'Confirm action: ' + (a.kind || 'action');
       const sum = document.createElement('div');
       sum.className = 'voice-action-summary';
-      sum.textContent = (a.effect || '') + (a.detail ? ' — ' + a.detail : '');
+      sum.textContent = (a.effect || '') + (a.detail ? ': ' + a.detail : '');
       const btns = document.createElement('div');
       btns.className = 'voice-action-btns';
       const ok = document.createElement('button');
@@ -77850,7 +77850,7 @@
       card.innerHTML = '';
       const sum = document.createElement('div');
       sum.className = 'voice-action-summary';
-      sum.textContent = label + ' — ' + (a.effect || '');
+      sum.textContent = label + ': ' + (a.effect || '');
       card.appendChild(sum);
       card.style.opacity = '0.7';
     }
@@ -77966,7 +77966,7 @@
     } catch (err) {
       voiceSetState('idle');
       const name = err && err.name;
-      voiceShowError(name === 'NotAllowedError' ? 'Microphone permission denied — allow mic access and try again.'
+      voiceShowError(name === 'NotAllowedError' ? 'Microphone permission denied. Allow mic access and try again.'
         : name === 'NotFoundError' ? 'No microphone found on this machine.'
         : 'Could not open the microphone (' + (name || 'unknown') + ').');
       return;
@@ -78032,7 +78032,7 @@
       }, VOICE_HEARTBEAT_MS);
       Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
       voiceUpdateElapsed();
-      voiceMsg('system', 'Voice is live — billing to your OpenAI key. Speak now.');
+      voiceMsg('system', 'Voice is live, billing to your OpenAI key. Speak now.');
     } catch (err) {
       const orphan = Voice.sessionId;
       voiceTeardownLocal();

@@ -33,7 +33,9 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ccc_server import core as _core
+import tempfile
+
+from ccc_server import core as _core, test_isolation_active
 from ccc_server.paths import COMMAND_CENTER_STATE_DIR
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,10 @@ from ccc_server.paths import COMMAND_CENTER_STATE_DIR
 # ---------------------------------------------------------------------------
 
 VOICE_STATE_DIR = COMMAND_CENTER_STATE_DIR / "voice"
+if test_isolation_active():
+    # Keep test writes (config, opt-in transcripts, scratch) out of the
+    # user's real state dir — same redirect convention as server.py.
+    VOICE_STATE_DIR = Path(tempfile.gettempdir()) / f"ccc-test-voice-{os.getpid()}"
 VOICE_CONFIG_FILE = VOICE_STATE_DIR / "voice.json"
 VOICE_TRANSCRIPT_DIR = VOICE_STATE_DIR / "transcripts"
 VOICE_SCRATCH_DIR = VOICE_STATE_DIR / "scratch"
@@ -347,6 +353,8 @@ class VoiceSession:
         self._sdp_answer = None
         self._stderr_tail = deque(maxlen=40)
         self._closed_once = False
+        self._close_lock = threading.Lock()   # atomic _closed_once check-and-set
+        self._close_done = threading.Event()  # bookkeeping fully finished
         self._key = None              # held only to redact accidents; never read
         self._watchdog_stop = threading.Event()
 
@@ -756,8 +764,12 @@ class VoiceSession:
     # -- close / teardown -------------------------------------------------
 
     def stop(self, reason="user"):
-        """Graceful stop: realtime/stop, then kill the child. Idempotent."""
-        if self.state in ("closed", "error"):
+        """Graceful stop: realtime/stop, then kill the child. Idempotent,
+        and synchronous: waits for whichever thread is running close() —
+        the app-server's `closed` notification routinely wins the race —
+        so callers only return once bookkeeping is finished."""
+        if self._closed_once:
+            self._close_done.wait(timeout=8)
             return
         self.reason = self.reason or reason
         self.set_state("stopping", reason)
@@ -768,6 +780,7 @@ class VoiceSession:
                 pass
         self._kill_proc()
         self.close(reason=self.reason or reason)
+        self._close_done.wait(timeout=8)
 
     def _kill_proc(self):
         proc = self.proc
@@ -791,18 +804,22 @@ class VoiceSession:
             pass
 
     def close(self, reason="closed"):
-        if self._closed_once:
-            return
-        self._closed_once = True
+        with self._close_lock:
+            if self._closed_once:
+                return
+            self._closed_once = True
         self._key = None  # redaction handle ends with the child
         self._watchdog_stop.set()
         self.closed_at = time.time()
         self.reason = self.reason or reason
-        self._kill_proc()
-        self._finish_bookkeeping()
-        if self.state not in ("error",):
-            self.set_state("closed", self.reason)
-        _manager_clear(self)
+        try:
+            self._kill_proc()
+            self._finish_bookkeeping()
+            if self.state not in ("error",):
+                self.set_state("closed", self.reason)
+            _manager_clear(self)
+        finally:
+            self._close_done.set()
 
     def _finish_bookkeeping(self):
         dur = self.closed_at - self.started_at

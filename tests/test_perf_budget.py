@@ -4600,3 +4600,37 @@ def test_conversation_path_skips_projects_walk_for_known_non_claude(monkeypatch,
 
     assert server._resolve_conversation_path(claude_sid).is_file()
     assert len(iterdirs) == 1
+
+
+def test_voice_briefing_is_bounded_and_subprocess_free(monkeypatch):
+    """The realtime-voice seed builds from cached feeds only: one attention
+    feed call + one queue rollup, zero per-row work, zero subprocesses —
+    even on repeated builds (no hidden all-sessions scan)."""
+    import ccc_server.realtime_voice as rv
+
+    feed_calls, roll_calls, proc_calls = [], [], []
+
+    def feed(**kw):
+        feed_calls.append(kw)
+        # A heavy feed still only costs the one cached call.
+        return {"items": [{"kind": "question", "where": f"s{i}",
+                           "session_id": f"sess_{i}",
+                           "question_text": "q"} for i in range(50)]}
+
+    def roll():
+        roll_calls.append(1)
+        return {"open_total": 9, "queues_total": 3,
+                "workers_live": 2, "stuck_total": 1}
+
+    def no_popen(*a, **k):
+        proc_calls.append((a, k))
+        raise AssertionError("briefing spawned a subprocess")
+
+    monkeypatch.setattr(rv.subprocess, "Popen", no_popen)
+    for _ in range(3):
+        text = rv.build_briefing(feed_fn=feed, rollup_fn=roll)
+        assert "need attention" in text
+        assert len(text) <= 3500
+    assert feed_calls and len(feed_calls) == 3, "briefing did not use exactly one feed call each"
+    assert len(roll_calls) == 3
+    assert proc_calls == []
