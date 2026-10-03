@@ -74,7 +74,7 @@ class ConvViewToggleTest(unittest.TestCase):
         self.assertIn('.cc-run-chip::before { content: "\\25B8 " attr(data-cc-run-label); }', css)
         self.assertIn(".cc-run-head.cc-run-chipped:not(.cc-run-open) { display: none !important; }", css)
         # Chip-bearing text is never two-line clamped (chip would be cut).
-        self.assertIn(".assistant-text:not(.cc-open):not(:has(.cc-run-chip)),", css)
+        self.assertIn(".assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),", css)
 
     def test_turn_final_summary_keeps_card(self):
         js = _read("static/app.js")
