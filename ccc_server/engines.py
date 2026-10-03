@@ -5283,15 +5283,17 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
     cursor / antigravity since none of them need a special channel — they all
     can run the curl. No-op when `report_to` is falsy.
 
-    Claude children report back over native peer messaging (SendMessage to
-    CCC's own peer identity) instead, but ONLY when the uds gate is on AND
-    CCC's own peer socket is actually listening (checked via
-    _CCC_PEER_STATE, not just the env flag) -- a footer telling a child to
-    SendMessage a receiver that doesn't exist would silently black-hole the
-    report. Every other case (gate off, non-Claude engine, or the gate on
-    but CCC's own listener didn't start) keeps the curl footer byte-for-byte,
-    so this is a strict opt-in with automatic fallback, not a behavior
-    change for anyone not on the flag.
+    The curl footer is the ONLY path instructed as primary, for every engine
+    including Claude. SendMessage(agent="ccc") to CCC's own peer identity used
+    to be the primary instruction for Claude children (when the uds gate was
+    on and CCC's peer socket was listening), demoted to a best-effort mention
+    2026-10-03 (OPS-1250): CCC's own registry row publishes "kind":
+    "background", and ListAgents never lists background-kind peers, so
+    SendMessage to "ccc" reliably fails with "No agent named ... is
+    reachable" regardless of gate/socket state -- reproduced repeatedly, not
+    a flaky edge case. The gate still guards whether the best-effort mention
+    is shown at all, so a child on an engine/state where it's truly
+    unavailable isn't told to try it.
 
     `route_id` (CCC-1202): when set, the report is addressed to that route id
     instead of the dispatcher's sid, and CCC resolves it to the route's
@@ -5313,38 +5315,19 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
         "session_id": addr, "mode": "steer",
         "announced_from": "<your session name or id>", "text": "<your report>",
     })
-    use_sendmessage = (
+    sendmessage_hint_available = (
         engine == "claude"
         and _core._uds_messaging_enabled()
         and bool(_core._CCC_PEER_STATE.get("socket_path"))
     )
-    if use_sendmessage:
-        return prompt + (
-            "\n\n---\n"
-            "## Return address — report back when done\n"
-            f"You were dispatched by another CCC session (id `{rid}`). When this "
-            "task is fully complete — whether it SUCCEEDED or FAILED — send exactly "
-            "ONE completion report back via Claude Code's native peer messaging.\n\n"
-            "RECIPIENT: call SendMessage with agent=\"ccc\" — CCC's own peer name "
-            "(run ListAgents and it appears as `ccc`). NEVER address SendMessage "
-            "to a session id/UUID or to the dispatcher's session name: peers are "
-            "addressed by their registered peer name only, and anything else fails "
-            "with \"No agent named ... is reachable\". The dispatcher's session id "
-            "belongs INSIDE the message JSON below, not in the address.\n\n"
-            f"{route_note}"
-            "The message's ENTIRE content must be exactly this JSON (fill in your "
-            "own values, keep it valid JSON, escape quotes/newlines in \"text\"):\n\n"
-            f"```\n{envelope}\n```\n\n"
-            "The report text must contain, in this order:\n"
-            "- STATUS: SUCCEEDED or FAILED\n"
-            "- SUMMARY: 1-3 sentence summary of what you did\n"
-            "- FILES: relevant file paths touched/created (or \"none\")\n"
-            "- REASON: if FAILED, the reason and what blocked you (omit if succeeded)\n\n"
-            "Send the report once, at the very end — not progress updates mid-task. "
-            "If SendMessage to \"ccc\" still fails after one retry, fall back to "
-            f"curl POST http://127.0.0.1:{port or _core.PORT}/api/inject-input with "
-            "the same JSON as the request body.\n"
-        )
+    sendmessage_hint = (
+        "As a best-effort shortcut, you may first try Claude Code's native "
+        "peer messaging: SendMessage with agent=\"ccc\". This often fails "
+        "with \"No agent named ... is reachable\" (CCC's own peer identity "
+        "is not always visible to ListAgents) -- if it does, do NOT retry "
+        "it, just use the curl command below, which always works.\n\n"
+        if sendmessage_hint_available else ""
+    )
     p = port or _core.PORT
     footer = (
         "\n\n---\n"
@@ -5352,6 +5335,7 @@ def _wrap_prompt_with_return_address(prompt, report_to, port=None, engine="claud
         f"You were dispatched by another CCC session (id `{rid}`). When this "
         "task is fully complete — whether it SUCCEEDED or FAILED — send exactly "
         "ONE completion report back to that session via CCC's inject-input API. "
+        f"{sendmessage_hint}"
         "Run the curl with the network sandbox disabled (localhost IPC):\n\n"
         f"{route_note}"
         "```bash\n"
