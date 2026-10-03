@@ -30445,32 +30445,19 @@ body.has-mobile-bottom-nav .jobs-add-actions button { min-height: 40px; padding:
   .model-routing-entry select { flex: 1 1 140px; min-width: 0; }
 }
 
-/* Compact transcript view (3rd state of the Default / Verbose / Compact
-   toggle). Maximum density: no per-message metadata rows, token chips or
-   tool Input/View-command disclosures; small type, near-zero spacing;
-   thinking clamped to one line (click still unfolds). */
-/* !important + doubled class: the conv-bg themes (e.g. stitch) pad these
-   with !important at 0,6,0 specificity; compact has to win over them. */
+/* Compact transcript view (Compact | Normal | Verbose). Collapses rather
+   than shrinks: every message clamps to two lines, thinking and tool
+   commands to one, and a tap on any of them expands it (.cc-open, toggled
+   in app.js). The newest assistant reply stays fully open. Per-message
+   chrome (timestamps, line numbers, token chips, Input/View disclosures)
+   is hidden. !important + doubled class: the conv-bg themes (e.g. stitch)
+   pad these with !important at 0,6,0 specificity. */
 body.conv-compact.conv-compact .conversations-view .event { margin: 0 !important; padding: 1px 8px !important; }
 body.conv-compact.conv-compact .conversations-view .event.assistant { padding: 1px 0 !important; margin: 0 !important; }
-body.conv-compact.conv-compact .conversations-view .event.assistant .assistant-text,
-body.conv-compact.conv-compact .conversations-view .stream-bubble .assistant-text {
-  font-size: 13px !important; line-height: 1.3 !important; letter-spacing: 0 !important;
-  padding: 2px 8px !important; margin: 0 !important;
+body.conv-compact.conv-compact .conversations-view .event.assistant .assistant-text {
+  padding: 3px 10px !important; margin: 0 !important;
 }
-body.conv-compact.conv-compact .conversations-view .assistant-text p,
-body.conv-compact.conv-compact .conversations-view .assistant-text ul,
-body.conv-compact.conv-compact .conversations-view .assistant-text ol,
-body.conv-compact.conv-compact .conversations-view .assistant-text pre { margin: 0 0 2px; }
-body.conv-compact.conv-compact .conversations-view .assistant-text li { margin: 0; }
-body.conv-compact.conv-compact .conversations-view .assistant-text h1,
-body.conv-compact.conv-compact .conversations-view .assistant-text h2,
-body.conv-compact.conv-compact .conversations-view .assistant-text h3,
-body.conv-compact.conv-compact .conversations-view .assistant-text h4 { font-size: 13px; margin: 2px 0 0; }
-body.conv-compact.conv-compact .conversations-view .assistant-text code,
-body.conv-compact.conv-compact .conversations-view .assistant-text pre { font-size: 11px; }
-body.conv-compact.conv-compact .conversations-view .event.user_text { padding: 2px 8px !important; margin: 1px 0 !important; }
-body.conv-compact.conv-compact .conversations-view .event.user_text :not(img):not(pre):not(code) { font-size: 13px !important; line-height: 1.3 !important; margin-top: 0 !important; margin-bottom: 0 !important; }
+body.conv-compact.conv-compact .conversations-view .event.user_text { padding: 3px 10px !important; margin: 2px 0 !important; }
 body.conv-compact.conv-compact .conversations-view .kimi-answer-meta,
 body.conv-compact.conv-compact .conversations-view .event-model-meta,
 body.conv-compact.conv-compact .conversations-view .event-token-chips,
@@ -30478,15 +30465,32 @@ body.conv-compact.conv-compact .conversations-view .msg-ts,
 body.conv-compact.conv-compact .conversations-view .line-num,
 body.conv-compact.conv-compact .conversations-view .assistant-message-actions,
 body.conv-compact.conv-compact .conversations-view details.tool-command-disclosure { display: none !important; }
-body.conv-compact.conv-compact .conversations-view .thinking-block { font-size: 11px; padding: 0 6px; margin: 0; line-height: 1.25; }
-body.conv-compact.conv-compact .conversations-view .thinking-toggle { font-size: 10px; }
-body.conv-compact.conv-compact .conversations-view .t-body.is-clamped { -webkit-line-clamp: 1; }
-body.conv-compact.conv-compact .conversations-view .t-body:not(.is-clamped) { max-height: 120px; }
-body.conv-compact.conv-compact .conversations-view .tool-call-group { margin: 0; border-radius: 3px; }
-body.conv-compact.conv-compact .conversations-view .tool-call-group-header { padding: 0 6px; font-size: 11px; gap: 4px; }
-body.conv-compact.conv-compact .conversations-view .tool-call-group-body { padding: 0 6px 2px; font-size: 11px; }
-body.conv-compact.conv-compact .conversations-view .tool-call { padding: 0 !important; font-size: 11px; }
-body.conv-compact.conv-compact .conversations-view pre.tool-result-output { margin: 0 0 0 18px; padding: 1px 6px; font-size: 11px; }
+/* Two-line clamp on messages (all but the newest assistant reply). */
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open),
+body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) .user-msg {
+  display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; cursor: pointer;
+}
+body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) img { display: none; }
+/* One-line thinking. */
+body.conv-compact.conv-compact .conversations-view .thinking-block { padding: 0 6px; margin: 1px 0; cursor: pointer; }
+body.conv-compact.conv-compact .conversations-view .thinking-block:not(.cc-open) .t-body {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1;
+  overflow: hidden; max-height: none;
+}
+body.conv-compact.conv-compact .conversations-view .thinking-block.cc-open .t-body {
+  display: block; -webkit-line-clamp: unset; max-height: none;
+}
+/* One-line tool commands. */
+body.conv-compact.conv-compact .conversations-view .tool-call { padding: 0 !important; }
+body.conv-compact.conv-compact .conversations-view .tool-call:not(.cc-open) .tool-detail {
+  display: inline-block; max-width: calc(100% - 90px); vertical-align: bottom;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+body.conv-compact.conv-compact .conversations-view .tool-call:not(.cc-open) pre.tool-result-output { display: none; }
+body.conv-compact.conv-compact .conversations-view .tool-call-group { margin: 0; }
+body.conv-compact.conv-compact .conversations-view .tool-call-group-header { padding: 1px 8px; }
+body.conv-compact.conv-compact .conversations-view .tool-call-group-body { padding: 0 8px 2px; }
 
 /* Transcript view segmented control: Compact | Normal | Verbose, all
    visible, one tap. Selected segment follows body[data-conv-view]. */

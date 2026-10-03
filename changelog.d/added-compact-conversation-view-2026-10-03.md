@@ -1,1 +1,1 @@
-- Conversation view is a one-tap Compact | Normal | Verbose segmented control (rail topbar and pane menu). Compact hides per-message timestamps, line numbers and token chips and tightens type and spacing for maximum density.
+- Conversation view is a one-tap Compact | Normal | Verbose segmented control (rail topbar and pane menu). Compact collapses the transcript: messages show two lines, thinking and tool commands one line, tap to expand; the newest reply stays open and per-message timestamps, line numbers and token chips are hidden.

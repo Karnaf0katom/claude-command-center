@@ -34,14 +34,21 @@ class ConvViewToggleTest(unittest.TestCase):
         js = _read("static/app.js")
         self.assertIn("localStorage.getItem('ccc-conv-verbose') === '1' ? 'verbose' : 'normal'", js)
 
-    def test_compact_css_outranks_stitch_theme(self):
+    def test_compact_collapses_and_outranks_stitch_theme(self):
         css = _read("static/app.css")
         rule = re.search(
-            r"body\.conv-compact\.conv-compact \.conversations-view \.event\.assistant \.assistant-text,"
-            r"[^{]*\{([^}]*)\}", css)
+            r"body\.conv-compact\.conv-compact \.conversations-view \.event\.assistant \.assistant-text \{([^}]*)\}", css)
         self.assertIsNotNone(rule)
-        self.assertIn("padding: 2px 8px !important", rule.group(1))
-        self.assertIn("font-size: 13px !important", rule.group(1))
+        self.assertIn("padding: 3px 10px !important", rule.group(1))
+        # Collapsing, not shrinking: messages clamp to two lines and the
+        # newest assistant reply is exempt.
+        self.assertIn(".event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open)", css)
+        self.assertIn("-webkit-line-clamp: 2;", css)
+
+    def test_tap_expands_in_compact(self):
+        js = _read("static/app.js")
+        self.assertIn("t.closest('.assistant-text, .event.user_text, .thinking-block, .tool-call')", js)
+        self.assertIn("el.classList.toggle('cc-open')", js)
 
 
 if __name__ == "__main__":

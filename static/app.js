@@ -76637,6 +76637,19 @@
     });
   }
   _syncConvViewSegs(convViewMode());
+  // Compact view: a tap on a clamped message / thinking / tool command
+  // expands it (and a second tap folds it). Links, buttons and text
+  // selections pass through untouched.
+  document.addEventListener('click', (ev) => {
+    if (!document.body.classList.contains('conv-compact')) return;
+    const t = ev.target;
+    if (!t || !t.closest || !t.closest('.conversations-view')) return;
+    if (t.closest('a, button, summary, input, textarea, select, .tool-call-group-header')) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && String(sel).trim()) return;
+    const el = t.closest('.assistant-text, .event.user_text, .thinking-block, .tool-call');
+    if (el) el.classList.toggle('cc-open');
+  }, true);
   document.addEventListener('click', (ev) => {
     const b = ev.target && ev.target.closest ? ev.target.closest('.conv-view-seg [data-conv-view]') : null;
     if (!b) return;
