@@ -77722,6 +77722,7 @@
   const $voiceMaxMinutes = document.getElementById('voiceMaxMinutes');
   const $voiceIdleSeconds = document.getElementById('voiceIdleSeconds');
   const $voiceSaveTranscripts = document.getElementById('voiceSaveTranscripts');
+  const $voiceAllowFallback = document.getElementById('voiceAllowFallback');
   const $voiceModalError = document.getElementById('voiceModalError');
   const $voiceModalCancelBtn = document.getElementById('voiceModalCancelBtn');
   const $voiceModalSaveBtn = document.getElementById('voiceModalSaveBtn');
@@ -77729,9 +77730,12 @@
 
   const VOICE_HEARTBEAT_MS = 10000;   // server tolerance is 120s
   const VOICE_STATUS_POLL_MS = 5000;
+  const VOICE_PCM_RATE = 24000;       // realtime wire format (ws fallback)
   const Voice = {
     sessionId: null,
     state: 'idle',
+    transport: null,    // 'webrtc' | 'websocket'
+    billing: null,      // 'subscription' | 'api_key'
     pc: null,
     micStream: null,
     es: null,
@@ -77740,6 +77744,12 @@
     elapsedTimer: null,
     startedAt: 0,
     audioMuted: false,
+    audioCtx: null,     // websocket path: capture + playback context
+    micNode: null,
+    pcmBuf: [],         // Int16 chunks pending the next /api/voice/audio POST
+    pcmPostAt: 0,
+    playTime: 0,        // next scheduled playback offset in audioCtx
+    usageLabel: '',     // subscription usage text from the oai-events channel
     streaming: {},    // role -> <span> accumulating transcript deltas
     actionCards: {},  // action id -> card element
   };
@@ -77757,6 +77767,9 @@
     if ($voiceModeBtn) {
       $voiceModeBtn.classList.toggle('live', live);
       $voiceModeBtn.setAttribute('aria-pressed', live ? 'true' : 'false');
+      $voiceModeBtn.title = live && Voice.billing === 'api_key'
+        ? 'Voice is live, billed per use to your OpenAI API key'
+        : 'Talk to CCC - voice mode powered by Codex realtime';
     }
     if ($voiceLiveDot) $voiceLiveDot.hidden = !live;
     if ($voiceTalkBtn) {
@@ -77890,6 +77903,9 @@
       case 'action':
         voiceActionCard(d);
         break;
+      case 'audio':
+        voicePlayChunk(d);
+        break;
       case 'error':
         voiceShowError(d.message || 'voice error');
         break;
@@ -77930,6 +77946,8 @@
     if (Voice.hbTimer) { clearInterval(Voice.hbTimer); Voice.hbTimer = null; }
     if (Voice.elapsedTimer) { clearInterval(Voice.elapsedTimer); Voice.elapsedTimer = null; }
     if (Voice.pc) { try { Voice.pc.close(); } catch (_) {} Voice.pc = null; }
+    if (Voice.micNode) { try { Voice.micNode.disconnect(); } catch (_) {} Voice.micNode = null; }
+    if (Voice.audioCtx) { try { Voice.audioCtx.close(); } catch (_) {} Voice.audioCtx = null; }
     if (Voice.micStream) {
       for (const t of Voice.micStream.getTracks()) { try { t.stop(); } catch (_) {} }
       Voice.micStream = null;
@@ -77937,6 +77955,11 @@
     if ($voiceAudio) $voiceAudio.srcObject = null;
     Voice.streaming = {};
     Voice.actionCards = {};
+    Voice.pcmBuf = [];
+    Voice.playTime = 0;
+    Voice.usageLabel = '';
+    Voice.transport = null;
+    Voice.billing = null;
     if ($voiceActions) $voiceActions.innerHTML = '';
     Voice.sessionId = null;
   }
@@ -77944,8 +77967,125 @@
   function voiceUpdateElapsed() {
     if (!$voiceElapsed) return;
     const s = Math.max(0, Math.floor((Date.now() - Voice.startedAt) / 1000));
-    $voiceElapsed.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    let label = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    if (Voice.billing === 'api_key') label += ' · billed per use';
+    if (Voice.usageLabel) label += ' · ' + Voice.usageLabel;
+    $voiceElapsed.textContent = label;
   }
+
+  // -- websocket-transport audio (paid fallback path) ---------------------
+  // The browser turns mic Float32 into PCM16 chunks and POSTs them to
+  // /api/voice/audio; returned chunks arrive as SSE `audio` events and are
+  // scheduled into the same AudioContext. WebRTC never touches this code.
+
+  const _PCM_WORKLET = `class CccVoicePcm extends AudioWorkletProcessor {
+    process(inputs) {
+      const ch = inputs[0] && inputs[0][0];
+      if (ch && ch.length) {
+        const pcm = new Int16Array(ch.length);
+        for (let i = 0; i < ch.length; i++) {
+          const s = Math.max(-1, Math.min(1, ch[i]));
+          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        this.port.postMessage(pcm.buffer, [pcm.buffer]);
+      }
+      return true;
+    }
+  }
+  registerProcessor('ccc-voice-pcm', CccVoicePcm);`;
+
+  function _bytesToB64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    return btoa(bin);
+  }
+
+  async function voiceStartWsAudio() {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: VOICE_PCM_RATE});
+    Voice.audioCtx = ctx;
+    const url = URL.createObjectURL(new Blob([_PCM_WORKLET], {type: 'application/javascript'}));
+    await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    const src = ctx.createMediaStreamSource(Voice.micStream);
+    const node = new AudioWorkletNode(ctx, 'ccc-voice-pcm');
+    node.port.onmessage = (e) => {
+      Voice.pcmBuf.push(new Uint8Array(e.data));
+      // Flush ~4 worklet chunks (each 128 frames) into one POST ~ 100ms.
+      if (Voice.pcmBuf.length >= 20 && !Voice.pcmPosting) voicePostPcm();
+    };
+    src.connect(node);
+    // Worklets starve when fully disconnected; route through a zeroed gain
+    // so the user's own mic is never played back.
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    node.connect(sink).connect(ctx.destination);
+    Voice.micNode = node;
+  }
+
+  function voicePostPcm() {
+    if (!Voice.pcmBuf.length) return;
+    Voice.pcmPosting = true;
+    const parts = Voice.pcmBuf.splice(0, Voice.pcmBuf.length);
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { merged.set(p, off); off += p.length; }
+    fetch('/api/voice/audio', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: Voice.sessionId,
+        data: _bytesToB64(merged),
+        sampleRate: VOICE_PCM_RATE,
+        numChannels: 1,
+      }),
+    }).catch(() => {}).finally(() => { Voice.pcmPosting = false; });
+  }
+
+  function voicePlayChunk(d) {
+    if (!d || !d.data || !Voice.audioCtx) return;
+    try {
+      const bin = atob(d.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const pcm = new Int16Array(bytes.buffer);
+      const f32 = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768;
+      const ctx = Voice.audioCtx;
+      const buf = ctx.createBuffer(d.numChannels || 1, f32.length, d.sampleRate || VOICE_PCM_RATE);
+      buf.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const gain = ctx.createGain();
+      gain.gain.value = Voice.audioMuted ? 0 : 1;
+      src.connect(gain).connect(ctx.destination);
+      const when = Math.max(ctx.currentTime + 0.02, Voice.playTime);
+      src.start(when);
+      Voice.playTime = when + buf.duration;
+    } catch (_) { /* undecodable chunk — skip */ }
+  }
+
+  function voiceHandleDcMessage(raw) {
+    // oai-events data channel: subscription usage + realtime bookkeeping.
+    let msg;
+    try { msg = JSON.parse(raw); } catch (_) { return; }
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'session.usage.updated') {
+      const u = msg.usage || msg;
+      const ms = u.audio_duration_ms || u.audioDurationMs || 0;
+      const secs = Math.round(ms / 1000);
+      let label = secs ? 'voice ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') : '';
+      const lim = u.usage_limit || u.usageLimit;
+      if (lim && lim.remaining != null) label += (label ? ' · ' : '') + 'plan ' + lim.remaining + ' left';
+      else if (lim && lim.remaining_percent != null) label += (label ? ' · ' : '') + 'plan ' + Math.round(lim.remaining_percent) + '% left';
+      Voice.usageLabel = label;
+      voiceUpdateElapsed();
+    }
+  }
+
 
   async function voiceStart() {
     voiceShowError('');
@@ -77977,7 +78117,8 @@
     try {
       for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
       // oai-events is the realtime events channel the voice host expects.
-      pc.createDataChannel('oai-events');
+      const dc = pc.createDataChannel('oai-events');
+      dc.onmessage = (e) => voiceHandleDcMessage(e.data);
       pc.ontrack = (ev) => {
         if ($voiceAudio && ev.streams && ev.streams[0]) {
           $voiceAudio.srcObject = ev.streams[0];
@@ -77986,7 +78127,7 @@
         }
       };
       pc.onconnectionstatechange = () => {
-        if (!Voice.pc || Voice.sessionId == null) return;
+        if (!Voice.pc || Voice.sessionId == null || Voice.transport !== 'webrtc') return;
         if (pc.connectionState === 'failed') {
           voiceShowError('WebRTC connection to the voice engine failed.');
           voiceStop('rtc_failed');
@@ -78010,18 +78151,38 @@
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok || !d.ok) {
-        if (d && d.code === 'voice_no_openai_key') {
+        const code = d && d.code;
+        if (code === 'voice_no_openai_key') {
           voiceShowError(d.error || 'Add an OpenAI key under Settings > BYOK, then try again.');
-        } else if (d && d.code === 'voice_busy') {
+        } else if (code === 'voice_busy') {
           voiceShowError('A voice session is already running.');
+        } else if (code === 'voice_no_codex') {
+          voiceShowError('Codex CLI with realtime support was not found on this machine.');
+        } else if (code === 'voice_connect_timeout') {
+          voiceShowError('The voice service did not answer in time (known issue for some ChatGPT accounts). ' +
+            'Try again, or add an OpenAI API key under Settings > BYOK to use the billed fallback.');
+        } else if (code === 'voice_sideband_failed') {
+          voiceShowError('OpenAI rejected the realtime call setup for this account. ' +
+            'Try again, or add an OpenAI API key under Settings > BYOK to use the billed fallback.');
         } else {
           voiceShowError((d && d.error) || ('start failed (HTTP ' + res.status + ')'));
         }
         throw new Error('start failed');
       }
       Voice.sessionId = d.session_id;
+      Voice.transport = d.transport || 'webrtc';
+      Voice.billing = d.billing || 'subscription';
       Voice.startedAt = Date.now();
-      await pc.setRemoteDescription({type: 'answer', sdp: d.sdp_answer});
+      if (Voice.transport === 'websocket') {
+        // Paid fallback: the server relays audio over JSON-RPC. The RTC
+        // offer went unused; close it and wire the mic to /api/voice/audio.
+        try { pc.close(); } catch (_) {}
+        Voice.pc = null;
+        await voiceStartWsAudio();
+        voiceSetState('connecting', 'voice engine (billed per use)');
+      } else {
+        await pc.setRemoteDescription({type: 'answer', sdp: d.sdp_answer});
+      }
       voiceOpenEvents();
       Voice.hbTimer = setInterval(() => {
         fetch('/api/voice/heartbeat', {
@@ -78032,7 +78193,9 @@
       }, VOICE_HEARTBEAT_MS);
       Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
       voiceUpdateElapsed();
-      voiceMsg('system', 'Voice is live, billing to your OpenAI key. Speak now.');
+      voiceMsg('system', Voice.billing === 'api_key'
+        ? 'Voice is live over the websocket fallback, billed per use to your OpenAI key. Speak now.'
+        : 'Voice is live on your ChatGPT subscription. Speak now.');
     } catch (err) {
       const orphan = Voice.sessionId;
       voiceTeardownLocal();
@@ -78085,6 +78248,8 @@
       } else if (!Voice.sessionId && ['connecting', 'listening', 'thinking', 'speaking'].includes(sess.state)) {
         // Another tab owns this session — adopt a read-only view of it.
         Voice.sessionId = sess.id;
+        Voice.transport = sess.transport || null;
+        Voice.billing = sess.billing || null;
         Voice.startedAt = (sess.started_at || Date.now() / 1000) * 1000;
         voiceOpenEvents();
         if (!Voice.hbTimer) {
@@ -78151,7 +78316,7 @@
       }
       if ($voiceSetupBanner) {
         if (!profiles.length) {
-          $voiceSetupBanner.textContent = 'No BYOK profile has an OpenAI key yet. Voice mode needs one: add an OpenAI key under Settings > BYOK, then come back.';
+          $voiceSetupBanner.textContent = 'Subscription voice works without a key. The paid fallback is unavailable: no BYOK profile has an OpenAI key. Add one under Settings > BYOK to enable it.';
           $voiceSetupBanner.style.display = '';
         } else {
           $voiceSetupBanner.style.display = 'none';
@@ -78159,12 +78324,13 @@
       }
       if ($voiceProfileHint) {
         $voiceProfileHint.textContent = profiles.length
-          ? 'The key is injected into the local Codex process only; it is never stored by this feature or sent to the page.'
+          ? 'Used only when subscription voice fails to connect. The key is injected into the local Codex process only; it is never stored by this feature or sent to the page.'
           : '';
       }
       if ($voiceMaxMinutes) $voiceMaxMinutes.value = c.max_minutes || 15;
       if ($voiceIdleSeconds) $voiceIdleSeconds.value = c.idle_seconds || 120;
       if ($voiceSaveTranscripts) $voiceSaveTranscripts.checked = !!c.save_transcripts;
+      if ($voiceAllowFallback) $voiceAllowFallback.checked = c.allow_api_fallback !== false;
     } catch (err) {
       voiceModalError('Could not load voice settings.');
     }
@@ -78182,6 +78348,7 @@
       max_minutes: $voiceMaxMinutes ? parseInt($voiceMaxMinutes.value, 10) : undefined,
       idle_seconds: $voiceIdleSeconds ? parseInt($voiceIdleSeconds.value, 10) : undefined,
       save_transcripts: $voiceSaveTranscripts ? !!$voiceSaveTranscripts.checked : undefined,
+      allow_api_fallback: $voiceAllowFallback ? !!$voiceAllowFallback.checked : undefined,
     };
     for (const k of Object.keys(patch)) if (patch[k] === undefined || Number.isNaN(patch[k])) delete patch[k];
     try {

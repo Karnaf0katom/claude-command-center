@@ -3349,9 +3349,12 @@
       <div class="upd-versions">
         Talk to Claude Command Center by voice. Powered by the Codex app's
         realtime lane (experimental). Your mic audio goes to OpenAI; CCC sees
-        only the transcript. Requires an OpenAI API key in a BYOK profile
-        (billed by OpenAI per minute of audio). The backing Codex thread is
-        ephemeral, read-only, and can only propose actions for you to confirm.
+        only the transcript. Runs on your ChatGPT subscription, subject to
+        plan limits. An OpenAI API key in a BYOK profile is optional: it
+        enables the billed-per-use websocket fallback for accounts whose
+        subscription voice call fails to connect. The backing Codex thread
+        is ephemeral, read-only, and can only propose actions for you to
+        confirm.
       </div>
 
       <div id="voiceSetupBanner" class="voice-setup-banner" style="display:none;"></div>
@@ -3361,8 +3364,12 @@
           <label class="bug-label" for="voiceSelect">Voice</label>
           <select id="voiceSelect" class="bug-input"></select>
         </div>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;">
+          <input type="checkbox" id="voiceAllowFallback">
+          Allow paid API-key fallback when subscription voice fails to connect
+        </label>
         <div>
-          <label class="bug-label" for="voiceProfileSelect">BYOK profile with an OpenAI key</label>
+          <label class="bug-label" for="voiceProfileSelect">Fallback: BYOK profile with an OpenAI key</label>
           <select id="voiceProfileSelect" class="bug-input"></select>
           <div id="voiceProfileHint" style="color:var(--text-muted);font-size:12px;margin-top:4px;"></div>
         </div>
