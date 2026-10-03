@@ -25958,6 +25958,10 @@ _adopt_ccc_module("watchtower_msg")
 
 _adopt_ccc_module("pkood")
 _adopt_ccc_module("byok")
+# Vault: local store for any kind of secret (Keychain service "ccc-vault").
+# The HTTP API is write-only; values are read only by the local `ccc vault`
+# CLI. See ccc_server/vault.py.
+_adopt_ccc_module("vault")
 # Realtime voice mode (experimental Codex app-server realtime lane):
 # one session at a time, WebRTC audio browser<->voice-host, CCC relays
 # only SDP + JSON-RPC events. See ccc_server/realtime_voice.py.
@@ -29208,6 +29212,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 days = 30
             self.send_json(byok_usage_summary(days=days))
+        elif path == "/api/vault":
+            # Vault metadata + existing BYOK keys for Settings > Vault.
+            # Write-only by design: no endpoint ever returns a secret value
+            # (the `ccc vault` CLI reads the local store directly).
+            try:
+                byok_rows = vault_list_byok()
+            except Exception:
+                byok_rows = []
+            self.send_json({
+                "backend": vault_storage_backend(),
+                "kinds": VAULT_KINDS,
+                "entries": vault_list_entries(),
+                "byok": byok_rows,
+            })
         elif path == "/api/engines/update-status":
             self.send_json(_engine_update_status())
         elif path == "/api/search-history":
@@ -30019,6 +30037,43 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return True
         self.send_json({"error": "phone-access settings are localhost-only", "origin": origin}, 403)
         return False
+
+    def _handle_vault_post(self, path):
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            length = 0
+        if length > 256 * 1024:
+            self.send_json({"ok": False, "error": "request too large"}, 413)
+            return
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(body) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_json({"ok": False, "error": "invalid JSON"}, 400)
+            return
+        if not isinstance(payload, dict):
+            self.send_json({"ok": False, "error": "invalid payload"}, 400)
+            return
+        meta_keys = ("kind", "service", "username", "env_var", "website", "notes")
+        meta = {k: payload[k] for k in meta_keys if k in payload}
+        try:
+            if path == "/api/vault/entries":
+                entry = vault_create_entry(payload.get("name"), payload.get("value"), **meta)
+            elif path == "/api/vault/entries/update":
+                entry = vault_update_entry(payload.get("name"), value=payload.get("value"), **meta)
+            elif path == "/api/vault/entries/delete":
+                existed = vault_delete_entry(payload.get("name"))
+                self.send_json({"ok": True, "deleted": existed})
+                return
+            else:
+                entry = vault_import_byok(
+                    payload.get("profile"), payload.get("provider"), payload.get("name"), **meta,
+                )
+        except VaultError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        self.send_json({"ok": True, "entry": entry, "backend": vault_storage_backend()})
 
     def _check_same_origin(self):
         """SECURITY: reject cross-origin POSTs (CSRF defence).
@@ -31392,6 +31447,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             else:
                 byok_delete_profile(profile)
             self.send_json({"ok": True})
+            return
+        if path in ("/api/vault/entries", "/api/vault/entries/update",
+                    "/api/vault/entries/delete", "/api/vault/import-byok"):
+            # Vault writes. Same-origin already enforced at the top of
+            # do_POST (same posture as /api/byok/keys). Responses carry
+            # metadata only; the request body (which may hold a value) is
+            # never logged or echoed.
+            self._handle_vault_post(path)
             return
         if path == "/api/engines/update-now":
             self.send_json(_start_engine_update_pass(), 202)

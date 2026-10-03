@@ -12,24 +12,20 @@ plaintext ever hits disk) — sturdy against casual disclosure, but it is a
 fallback, not an audited primitive; the Keychain is the real security
 boundary on the platform CCC ships for. A small unencrypted index file
 (profile -> [providers]) is kept alongside so profile/provider names can be
-listed without touching either secret store.
+listed without touching either secret store. The Keychain and cipher
+primitives are shared with the Vault (ccc_server/secret_store.py).
 
 Names still living in server.py are reached via ``_core`` at call time,
 same convention as every other ccc_server module."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import os
-import platform
-import shutil
-import subprocess
 import threading
 import time
 
 from ccc_server import core as _core
+from ccc_server import secret_store as _secret_store
 
 _KEYCHAIN_SERVICE = "ccc-byok"
 _LOCK = threading.Lock()
@@ -123,82 +119,31 @@ def _usage_log_path():
 
 # ---------------------------------------------------------------------------
 # Encrypted-file fallback (used only when the macOS Keychain isn't available)
+# Primitives are shared with the Vault: ccc_server/secret_store.py.
 # ---------------------------------------------------------------------------
 
 def _machine_secret():
-    try:
-        return _secret_seed_path().read_bytes()
-    except OSError:
-        pass
-    secret = os.urandom(32)
-    try:
-        _state_dir().mkdir(parents=True, exist_ok=True)
-        _secret_seed_path().write_bytes(secret)
-        os.chmod(_secret_seed_path(), 0o600)
-    except OSError:
-        pass
-    return secret
+    return _secret_store.load_or_create_seed(_secret_seed_path())
 
 
 def _derive_key(nonce_context=b"ccc-byok-v1"):
-    return hashlib.pbkdf2_hmac("sha256", _machine_secret(), nonce_context, 100_000, dklen=32)
-
-
-def _keystream(key, nonce, length):
-    out = bytearray()
-    counter = 0
-    while len(out) < length:
-        out.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
-        counter += 1
-    return bytes(out[:length])
+    return _secret_store.derive_key(_machine_secret(), nonce_context)
 
 
 def _encrypt(plaintext: bytes) -> dict:
-    key = _derive_key()
-    nonce = os.urandom(16)
-    cipher = bytes(a ^ b for a, b in zip(plaintext, _keystream(key, nonce, len(plaintext))))
-    mac = hmac.new(key, nonce + cipher, hashlib.sha256).hexdigest()
-    return {"nonce": nonce.hex(), "cipher": cipher.hex(), "mac": mac}
+    return _secret_store.encrypt(_derive_key(), plaintext)
 
 
 def _decrypt(blob: dict):
-    try:
-        key = _derive_key()
-        nonce = bytes.fromhex(blob["nonce"])
-        cipher = bytes.fromhex(blob["cipher"])
-        expect_mac = hmac.new(key, nonce + cipher, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expect_mac, blob.get("mac", "")):
-            return None
-        return bytes(a ^ b for a, b in zip(cipher, _keystream(key, nonce, len(cipher))))
-    except (KeyError, ValueError, TypeError):
-        return None
+    return _secret_store.decrypt(_derive_key(), blob)
 
 
 def _load_file_store():
-    try:
-        blob = json.loads(_file_store_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    plain = _decrypt(blob)
-    if plain is None:
-        return {}
-    try:
-        data = json.loads(plain.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return _secret_store.load_encrypted_json(_file_store_path(), _derive_key())
 
 
 def _save_file_store(data):
-    _state_dir().mkdir(parents=True, exist_ok=True)
-    blob = _encrypt(json.dumps(data).encode("utf-8"))
-    tmp = _file_store_path().with_suffix(".tmp")
-    tmp.write_text(json.dumps(blob), encoding="utf-8")
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    tmp.replace(_file_store_path())
+    _secret_store.save_encrypted_json(_file_store_path(), _derive_key(), data)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +151,7 @@ def _save_file_store(data):
 # ---------------------------------------------------------------------------
 
 def _keychain_available():
-    return platform.system() == "Darwin" and shutil.which("security") is not None
+    return _secret_store.keychain_available()
 
 
 def _keychain_account(profile, provider):
@@ -214,44 +159,15 @@ def _keychain_account(profile, provider):
 
 
 def _keychain_set(profile, provider, secret):
-    account = _keychain_account(profile, provider)
-    subprocess.run(
-        ["security", "delete-generic-password", "-a", account, "-s", _KEYCHAIN_SERVICE],
-        capture_output=True, timeout=5,
-    )
-    try:
-        proc = subprocess.run(
-            ["security", "add-generic-password", "-a", account, "-s", _KEYCHAIN_SERVICE, "-w", secret, "-U"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+    return _secret_store.keychain_set(_KEYCHAIN_SERVICE, _keychain_account(profile, provider), secret)
 
 
 def _keychain_get(profile, provider):
-    account = _keychain_account(profile, provider)
-    try:
-        proc = subprocess.run(
-            ["security", "find-generic-password", "-a", account, "-s", _KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
+    return _secret_store.keychain_get(_KEYCHAIN_SERVICE, _keychain_account(profile, provider)) or None
 
 
 def _keychain_delete(profile, provider):
-    account = _keychain_account(profile, provider)
-    try:
-        subprocess.run(
-            ["security", "delete-generic-password", "-a", account, "-s", _KEYCHAIN_SERVICE],
-            capture_output=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    _secret_store.keychain_delete(_KEYCHAIN_SERVICE, _keychain_account(profile, provider))
 
 
 def byok_storage_backend():

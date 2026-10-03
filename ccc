@@ -40,6 +40,11 @@ command, without opening the dashboard:
     ccc jobs add --host hermes --repo BYM --what "..." --when "hourly" [--name slug] [--wait]
                                                 # an agent session creates the job (POST /api/jobs/add)
 
+    ccc vault list [--json]                     # Vault entries: name/kind/service/env var, never values
+    ccc vault get <name> [--reveal]             # exit 0 if saved; prints the value only with --reveal
+    ccc vault exec --env VAR=<name> [--env ...] -- <cmd...>
+                                                # run cmd with secrets in env, redacted from its output
+
     ccc astra-check <sid> ... # cost/behavior score for a Codex session (scripts/astra-check)
     ccc brain <subcmd> ...    # passthrough to an optional private plugin (no-op if unconfigured)
 
@@ -53,6 +58,9 @@ to `ccc spawn --model` / `--effort` verbatim. Before building a feature, run
 earlier work, run `ccc recall` instead of guessing from scratch. To resume a
 specific earlier session, run `ccc brief <session>` first — it answers
 "where did this stop" without opening the transcript.
+When a task needs an API key, token or login, use `ccc vault exec --env
+VAR=<name> -- <cmd>` rather than `ccc vault get --reveal`: exec keeps the
+value out of your transcript and redacts it from the command's output.
 
 Server discovery: --server URL > $CCC_SERVER > the port.txt the server
 publishes at ~/.claude/command-center/port.txt (see write_port_file in
@@ -76,7 +84,7 @@ PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 SUBCOMMANDS = ("sessions", "list-sessions", "spawn", "models", "doctor", "send", "ask", "quota",
                "rebind-report-to", "recall", "shipped", "history", "decisions", "brief", "where",
-               "brain", "consent", "jobs")
+               "brain", "consent", "jobs", "vault")
 
 BRAIN_CONFIG_FILE = os.path.expanduser("~/.claude/command-center/brain-plugin.json")
 
@@ -1720,6 +1728,220 @@ def cmd_jobs_add(args):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# ccc vault — local secrets (ccc_server/vault.py). Reads the Keychain /
+# encrypted file directly: the server's HTTP API is write-only, so values
+# never travel over HTTP. Needs no running server.
+# ---------------------------------------------------------------------------
+
+def _vault_module():
+    repo_dir = os.path.dirname(os.path.realpath(__file__))
+    if repo_dir not in sys.path:
+        sys.path.append(repo_dir)
+    from ccc_server import vault
+    return vault
+
+
+def _vault_fmt_ts(ts):
+    if not ts:
+        return "-"
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "-"
+
+
+def cmd_vault_list(args):
+    vault = _vault_module()
+    rows = [
+        {k: e.get(k) or "" for k in ("name", "kind", "service", "username", "env_var")}
+        | {"updated_at": e.get("value_updated_at") or e.get("updated_at")}
+        for e in vault.vault_list_entries()
+    ]
+    if args.json:
+        print(json.dumps({"backend": vault.vault_storage_backend(), "entries": rows}, indent=2))
+        return 0
+    if not rows:
+        print("(vault is empty — add entries in Settings > Vault)", file=sys.stderr)
+        return 0
+    headers = ("NAME", "KIND", "SERVICE", "USERNAME", "ENV VAR", "VALUE UPDATED")
+    table = [(r["name"], r["kind"], r["service"], r["username"], r["env_var"],
+              _vault_fmt_ts(r["updated_at"])) for r in rows]
+    widths = [max(len(h), *(len(str(row[i])) for row in table)) for i, h in enumerate(headers)]
+    print("  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip())
+    for row in table:
+        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)).rstrip())
+    return 0
+
+
+def cmd_vault_get(args):
+    vault = _vault_module()
+    entry = vault.vault_get_entry(args.name)
+    if not entry:
+        print(f"ccc vault: no entry named {args.name!r} (see `ccc vault list`)", file=sys.stderr)
+        return 1
+    value = vault.vault_get_value(args.name)
+    if not value:
+        print(f"ccc vault: {entry['name']!r} is listed but its value is missing from "
+              f"{vault.vault_storage_backend()}", file=sys.stderr)
+        return 1
+    if args.reveal:
+        sys.stdout.write(value + ("\n" if sys.stdout.isatty() else ""))
+        sys.stdout.flush()
+        return 0
+    bits = [entry.get("kind") or "", entry.get("service") or ""]
+    if entry.get("env_var"):
+        bits.append("env " + entry["env_var"])
+    desc = ", ".join(b for b in bits if b)
+    print(f"{entry['name']}: saved ({desc}); updated "
+          f"{_vault_fmt_ts(entry.get('value_updated_at') or entry.get('updated_at'))}. "
+          "Use `ccc vault exec` to use it, or --reveal to print it.")
+    return 0
+
+
+def _vault_redaction_pairs(secrets):
+    """[(needle_bytes, replacement_bytes)] longest first. ``secrets`` is
+    [(label, value)]. Multi-line values also redact each substantial line,
+    since a tool may print a PEM key line by line."""
+    pairs = {}
+    for label, value in secrets:
+        rep = f"[REDACTED:{label}]".encode("utf-8")
+        needles = {value}
+        if "\n" in value:
+            needles |= {ln.strip() for ln in value.splitlines() if len(ln.strip()) >= 8}
+        for needle in needles:
+            if needle:
+                pairs.setdefault(needle.encode("utf-8"), rep)
+    return sorted(pairs.items(), key=lambda kv: -len(kv[0]))
+
+
+def _vault_redact(data, pairs):
+    for needle, rep in pairs:
+        data = data.replace(needle, rep)
+    return data
+
+
+class _VaultRedactingPump:
+    """Copy a child's pipe to ``out`` with secret values replaced.
+
+    Chunked, not line-buffered, so prompts without a newline still appear.
+    After redacting, the last (longest needle - 1) bytes are held back until
+    more data arrives: any secret split across two reads is entirely inside
+    that tail, so it is caught on the next pass instead of leaking half."""
+
+    def __init__(self, src_fd, out, pairs):
+        self.src_fd = src_fd
+        self.out = out
+        self.pairs = pairs
+        self.hold = max((len(n) for n, _ in pairs), default=1) - 1
+
+    def run(self):
+        buf = b""
+        while True:
+            try:
+                chunk = os.read(self.src_fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            buf = _vault_redact(buf + chunk, self.pairs)
+            if len(buf) > self.hold:
+                cut = len(buf) - self.hold
+                self._write(buf[:cut])
+                buf = buf[cut:]
+        if buf:
+            self._write(_vault_redact(buf, self.pairs))
+        try:
+            os.close(self.src_fd)
+        except OSError:
+            pass
+
+    def _write(self, data):
+        try:
+            self.out.write(data)
+            self.out.flush()
+        except (OSError, ValueError):
+            pass
+
+
+def _vault_parse_env_specs(vault, specs):
+    """--env VAR=name / --env name  ->  ([(var, name)], error)."""
+    out = []
+    for spec in specs or []:
+        if "=" in spec:
+            var, name = spec.split("=", 1)
+            var, name = var.strip(), name.strip()
+        else:
+            name = spec.strip()
+            entry = vault.vault_get_entry(name)
+            var = (entry or {}).get("env_var") or ""
+            if not var:
+                return None, (f"--env {spec}: no env var stored for that entry; "
+                              f"use --env VAR={spec}")
+        if not vault.VAULT_ENV_VAR_RE.match(var):
+            return None, f"--env {spec}: {var!r} is not a valid environment variable name"
+        if not name:
+            return None, f"--env {spec}: missing entry name"
+        out.append((var, name))
+    return out, None
+
+
+def cmd_vault_exec(args):
+    import threading
+    vault = _vault_module()
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("ccc vault exec: missing command (usage: ccc vault exec --env VAR=<name> -- <cmd...>)",
+              file=sys.stderr)
+        return 2
+    if not args.env:
+        print("ccc vault exec: pass at least one --env VAR=<name>", file=sys.stderr)
+        return 2
+    mapping, err = _vault_parse_env_specs(vault, args.env)
+    if err:
+        print(f"ccc vault exec: {err}", file=sys.stderr)
+        return 2
+    env = dict(os.environ)
+    secrets = []
+    for var, name in mapping:
+        value = vault.vault_get_value(name)
+        if not value:
+            print(f"ccc vault exec: no saved value for {name!r} (see `ccc vault list`)", file=sys.stderr)
+            return 2
+        env[var] = value
+        secrets.append((vault.vault_normalize_name(name), value))
+    pairs = _vault_redaction_pairs(secrets)
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    try:
+        proc = subprocess.Popen(cmd, env=env, stdout=out_w, stderr=err_w)
+    except OSError as e:
+        os.close(out_r); os.close(out_w); os.close(err_r); os.close(err_w)
+        print(f"ccc vault exec: cannot run {cmd[0]!r}: {e.strerror or e}", file=sys.stderr)
+        return 127
+    os.close(out_w)
+    os.close(err_w)
+    pumps = [
+        threading.Thread(target=_VaultRedactingPump(out_r, sys.stdout.buffer, pairs).run, daemon=True),
+        threading.Thread(target=_VaultRedactingPump(err_r, sys.stderr.buffer, pairs).run, daemon=True),
+    ]
+    for t in pumps:
+        t.start()
+    while True:
+        try:
+            rc = proc.wait()
+            break
+        except KeyboardInterrupt:
+            # The child shares our process group and got the SIGINT too;
+            # keep draining its (redacted) output until it exits.
+            continue
+    for t in pumps:
+        t.join()
+    return 128 - rc if rc < 0 else rc
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # `ccc` is also the Homebrew launcher's name (foreground server /
@@ -2047,6 +2269,35 @@ def main(argv=None):
                     help="with --wait: give up after this long (default 1800)")
     jp.add_argument("--json", action="store_true", help="raw result JSON")
     jp.set_defaults(func=cmd_jobs_add)
+
+    p = sub.add_parser(
+        "vault",
+        help="local secrets (API keys, tokens, logins) from Settings > Vault",
+        description="Reads the Vault straight from this machine's Keychain "
+                    "(or encrypted file); no server needed. Agents: prefer "
+                    "`exec`, which keeps values out of your output.",
+    )
+    vsub = p.add_subparsers(dest="vault_command", required=True)
+    vp = vsub.add_parser("list", help="entries: name, kind, service, username, env var (never values)")
+    vp.add_argument("--json", action="store_true", help="machine-readable list")
+    vp.set_defaults(func=cmd_vault_list)
+    vp = vsub.add_parser("get", help="exit 0 if the entry has a saved value; --reveal prints it")
+    vp.add_argument("name")
+    vp.add_argument("--reveal", action="store_true",
+                    help="print the secret value to stdout (avoid in agent transcripts)")
+    vp.set_defaults(func=cmd_vault_get)
+    vp = vsub.add_parser(
+        "exec",
+        help="run a command with secrets in its env; values are redacted from its output",
+        description="ccc vault exec --env STRIPE_KEY=stripe-live [--env ...] -- <cmd...>. "
+                    "--env <name> alone uses the entry's stored env var. The child's "
+                    "stdout/stderr are piped through a redactor that replaces each "
+                    "value with [REDACTED:<name>]. Exits with the command's status.",
+    )
+    vp.add_argument("--env", action="append", metavar="VAR=NAME",
+                    help="map env var VAR to vault entry NAME (repeatable)")
+    vp.add_argument("cmd", nargs=argparse.REMAINDER, help="-- then the command to run")
+    vp.set_defaults(func=cmd_vault_exec)
 
     p = sub.add_parser(
         "brain",
