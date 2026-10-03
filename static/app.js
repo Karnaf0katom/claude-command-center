@@ -77831,6 +77831,7 @@
   // transcript/state events over SSE. Mutations arrive as pending-action
   // cards (assistant_actions) the user confirms by click.
   const $voiceModeBtn = document.getElementById('voiceModeBtn');
+  const $voiceMobileBtn = document.getElementById('voiceMobileBtn');
   const $voiceLiveDot = document.getElementById('voiceLiveDot');
   const $voicePanel = document.getElementById('voicePanel');
   const $voiceStatePill = document.getElementById('voiceStatePill');
@@ -77903,6 +77904,11 @@
         : 'Talk to CCC - voice mode powered by Codex realtime';
     }
     if ($voiceLiveDot) $voiceLiveDot.hidden = !live;
+    if ($voiceMobileBtn) {
+      $voiceMobileBtn.classList.toggle('live', live);
+      $voiceMobileBtn.setAttribute('aria-label', live ? 'Return to voice call' : 'Open voice assistant');
+      document.getElementById('voiceMobileLabel').textContent = live ? 'IN CALL' : 'CALL';
+    }
     if ($voiceTalkBtn) {
       const label = document.getElementById('voiceTalkLabel');
       if (label) label.textContent = live ? 'END CALL' : 'CALL';
@@ -78370,11 +78376,15 @@
 
   function voiceOpenPanel() {
     if ($voicePanel) $voicePanel.hidden = false;
+    document.body.classList.add('voice-panel-open');
+    if ($voiceMobileBtn) $voiceMobileBtn.setAttribute('aria-expanded', 'true');
   }
   function voiceHidePanel() {
     // Panel hides, session keeps running — the topbar dot + status poll keep
     // state live; the stream keeps the session heartbeating.
     if ($voicePanel) $voicePanel.hidden = true;
+    document.body.classList.remove('voice-panel-open');
+    if ($voiceMobileBtn) $voiceMobileBtn.setAttribute('aria-expanded', 'false');
   }
 
   async function voicePollStatus() {
@@ -78507,6 +78517,7 @@
   // -- wiring ------------------------------------------------------------
 
   if ($voiceModeBtn) $voiceModeBtn.addEventListener('click', voiceOpenPanel);
+  if ($voiceMobileBtn) $voiceMobileBtn.addEventListener('click', voiceOpenPanel);
   if ($voicePanelHideBtn) $voicePanelHideBtn.addEventListener('click', voiceHidePanel);
   if ($voicePanelStopBtn) $voicePanelStopBtn.addEventListener('click', () => voiceStop('user'));
   if ($voiceTalkBtn) $voiceTalkBtn.addEventListener('click', () => {
