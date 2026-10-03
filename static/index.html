@@ -1021,6 +1021,18 @@
             </svg>
           </button>
         </span>
+        <!-- Realtime voice: mic button opens the voice panel; while a session
+             is live it turns into the always-visible "voice is live" chip.
+             Wired in app.js (VoiceMode). -->
+        <button type="button" id="voiceModeBtn" class="voice-mode-btn" title="Talk to CCC - voice mode powered by Codex realtime" aria-label="Voice mode" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+            <path d="M5 10v1a7 7 0 0 0 14 0v-1"></path>
+            <line x1="12" y1="18" x2="12" y2="22"></line>
+          </svg>
+          <span class="sh-action-label">Voice</span>
+          <span id="voiceLiveDot" class="voice-live-dot" hidden aria-hidden="true"></span>
+        </button>
         <button type="button" id="annotationStartBtn" class="annotation-link" title="Annotate the visible page and save a local note for agent context.">
           &#9998; Annotate
         </button>
@@ -2924,6 +2936,16 @@
                 <button type="button" class="settings-action-btn" id="carModeMenuBtn">Open…</button>
               </div>
             </div>
+
+            <div class="settings-row" data-keywords="voice mode realtime talk microphone codex openai">
+              <div class="settings-row-main">
+                <div class="settings-row-label">Voice mode</div>
+                <div class="settings-row-desc">Talk to CCC by voice; it answers questions and proposes actions you confirm by click.</div>
+              </div>
+              <div class="settings-row-control">
+                <button type="button" class="settings-action-btn" id="voiceSettingsBtn">Open…</button>
+              </div>
+            </div>
           </section>
 
           <section class="settings-section" id="settingsSection-tools" data-section-id="tools" role="tabpanel" aria-labelledby="settingsRailTab-tools">
@@ -3315,6 +3337,87 @@
         <button type="button" class="upd-btn" id="carModeStopBtn" style="display:none;">Stop</button>
       </div>
     </div>
+  </div>
+
+  <!-- Voice mode settings: pick the realtime voice + the BYOK profile that
+       holds the OpenAI key, set cost guardrails, and (optionally) persist
+       transcripts. Wired in app.js (VoiceMode); saves via /api/voice/config. -->
+  <div id="voiceModal" class="upd-overlay" role="dialog" aria-modal="true" aria-labelledby="voiceModalTitle">
+    <div class="upd-backdrop" id="voiceModalBackdrop"></div>
+    <div class="upd-dialog" style="width:min(560px,94vw);">
+      <div class="upd-title" id="voiceModalTitle">Voice mode</div>
+      <div class="upd-versions">
+        Talk to Claude Command Center by voice. Powered by the Codex app's
+        realtime lane (experimental). Your mic audio goes to OpenAI; CCC sees
+        only the transcript. Requires an OpenAI API key in a BYOK profile
+        (billed by OpenAI per minute of audio). The backing Codex thread is
+        ephemeral, read-only, and can only propose actions for you to confirm.
+      </div>
+
+      <div id="voiceSetupBanner" class="voice-setup-banner" style="display:none;"></div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;font-size:13px;">
+        <div>
+          <label class="bug-label" for="voiceSelect">Voice</label>
+          <select id="voiceSelect" class="bug-input"></select>
+        </div>
+        <div>
+          <label class="bug-label" for="voiceProfileSelect">BYOK profile with an OpenAI key</label>
+          <select id="voiceProfileSelect" class="bug-input"></select>
+          <div id="voiceProfileHint" style="color:var(--text-muted);font-size:12px;margin-top:4px;"></div>
+        </div>
+        <div style="display:flex;gap:14px;">
+          <div style="flex:1;">
+            <label class="bug-label" for="voiceMaxMinutes">Max session (minutes)</label>
+            <input type="number" id="voiceMaxMinutes" class="bug-input" min="1" max="120" step="1">
+          </div>
+          <div style="flex:1;">
+            <label class="bug-label" for="voiceIdleSeconds">Stop after silence (seconds)</label>
+            <input type="number" id="voiceIdleSeconds" class="bug-input" min="15" max="1800" step="5">
+          </div>
+        </div>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;">
+          <input type="checkbox" id="voiceSaveTranscripts">
+          Save transcripts to disk (off by default; they stay in memory otherwise)
+        </label>
+        <div style="color:var(--text-muted);font-size:12px;">
+          Raw audio is never stored. Voice sessions auto-stop on silence, at the
+          max length, and when you close this tab.
+        </div>
+      </div>
+
+      <div class="upd-error" id="voiceModalError"></div>
+      <div class="upd-actions">
+        <button type="button" class="upd-btn" id="voiceModalCancelBtn">Close</button>
+        <button type="button" class="upd-btn upd-primary" id="voiceModalSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Voice panel: the live voice session's floating card. Transcript is a
+       local render of the SSE stream (user + assistant); pending actions are
+       the same cards the Ask tab uses, confirmed by click only. -->
+  <div id="voicePanel" class="voice-panel" role="dialog" aria-label="Voice session" hidden>
+    <div class="voice-panel-head">
+      <span id="voiceStatePill" class="voice-state-pill">idle</span>
+      <span id="voiceElapsed" class="voice-elapsed">0:00</span>
+      <span class="voice-panel-head-btns">
+        <button type="button" id="voiceMuteBtn" class="voice-panel-btn" title="Mute/unmute the voice's audio" aria-label="Mute" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>
+        </button>
+        <button type="button" id="voicePanelStopBtn" class="voice-panel-btn voice-panel-stop" title="End the voice session" aria-label="Stop voice">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"></rect></svg>
+        </button>
+        <button type="button" id="voicePanelHideBtn" class="voice-panel-btn" title="Hide panel (session keeps running)" aria-label="Hide voice panel">&times;</button>
+      </span>
+    </div>
+    <div id="voiceError" class="voice-error" style="display:none;"></div>
+    <div id="voiceActions" class="voice-actions"></div>
+    <div id="voiceTranscript" class="voice-transcript" aria-live="polite"></div>
+    <div class="voice-panel-foot">
+      <button type="button" id="voiceTalkBtn" class="upd-btn upd-primary">Start talking</button>
+    </div>
+    <audio id="voiceAudio" autoplay></audio>
   </div>
 
   <!-- Worktrees modal. Opened from the 🌿 pill in the input-context

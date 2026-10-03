@@ -48,7 +48,10 @@ VOICE_SCRATCH_DIR = VOICE_STATE_DIR / "scratch"
 DEFAULT_VOICE = "marin"
 DEFAULT_MAX_MINUTES = 15
 DEFAULT_IDLE_SECONDS = 120
-HEARTBEAT_TIMEOUT_SECONDS = 45.0
+# Browsers throttle hidden-tab timers to ~1/min, so 45s would kill a voice
+# session the moment the user switches tabs mid-conversation. 120s survives
+# one throttle cycle; a truly closed tab still dies fast via sendBeacon.
+HEARTBEAT_TIMEOUT_SECONDS = 120.0
 START_TIMEOUT_SECONDS = 60.0
 CALL_TIMEOUT_SECONDS = 30.0
 EVENT_BUFFER_MAX = 600
@@ -745,8 +748,10 @@ class VoiceSession:
                 return
 
     def heartbeat(self):
+        # Deliberately NOT touch(): heartbeats prove the browser is alive,
+        # they are not voice activity — otherwise an idle timer would never
+        # fire while the tab is open.
         self.last_heartbeat = time.monotonic()
-        self.touch()
 
     # -- close / teardown -------------------------------------------------
 

@@ -77694,6 +77694,547 @@
   if ($carModeStopBtn) $carModeStopBtn.addEventListener('click', stopCarMode);
   // One status read at load keeps the Car Mode settings state current.
   fetchCarModeStatus();
+
+  // ── Voice mode (Codex realtime) ──────────────────────────────────────
+  // Two-way voice over WebRTC: the browser's RTCPeerConnection peers with
+  // the local codex voice host; CCC relays only the SDP and fans out
+  // transcript/state events over SSE. Mutations arrive as pending-action
+  // cards (assistant_actions) the user confirms by click.
+  const $voiceModeBtn = document.getElementById('voiceModeBtn');
+  const $voiceLiveDot = document.getElementById('voiceLiveDot');
+  const $voicePanel = document.getElementById('voicePanel');
+  const $voiceStatePill = document.getElementById('voiceStatePill');
+  const $voiceElapsed = document.getElementById('voiceElapsed');
+  const $voiceMuteBtn = document.getElementById('voiceMuteBtn');
+  const $voicePanelStopBtn = document.getElementById('voicePanelStopBtn');
+  const $voicePanelHideBtn = document.getElementById('voicePanelHideBtn');
+  const $voiceError = document.getElementById('voiceError');
+  const $voiceActions = document.getElementById('voiceActions');
+  const $voiceTranscript = document.getElementById('voiceTranscript');
+  const $voiceTalkBtn = document.getElementById('voiceTalkBtn');
+  const $voiceAudio = document.getElementById('voiceAudio');
+  const $voiceModal = document.getElementById('voiceModal');
+  const $voiceModalBackdrop = document.getElementById('voiceModalBackdrop');
+  const $voiceSetupBanner = document.getElementById('voiceSetupBanner');
+  const $voiceSelect = document.getElementById('voiceSelect');
+  const $voiceProfileSelect = document.getElementById('voiceProfileSelect');
+  const $voiceProfileHint = document.getElementById('voiceProfileHint');
+  const $voiceMaxMinutes = document.getElementById('voiceMaxMinutes');
+  const $voiceIdleSeconds = document.getElementById('voiceIdleSeconds');
+  const $voiceSaveTranscripts = document.getElementById('voiceSaveTranscripts');
+  const $voiceModalError = document.getElementById('voiceModalError');
+  const $voiceModalCancelBtn = document.getElementById('voiceModalCancelBtn');
+  const $voiceModalSaveBtn = document.getElementById('voiceModalSaveBtn');
+  const $voiceSettingsBtn = document.getElementById('voiceSettingsBtn');
+
+  const VOICE_HEARTBEAT_MS = 10000;   // server tolerance is 120s
+  const VOICE_STATUS_POLL_MS = 5000;
+  const Voice = {
+    sessionId: null,
+    state: 'idle',
+    pc: null,
+    micStream: null,
+    es: null,
+    hbTimer: null,
+    statusTimer: null,
+    elapsedTimer: null,
+    startedAt: 0,
+    audioMuted: false,
+    streaming: {},    // role -> <span> accumulating transcript deltas
+    actionCards: {},  // action id -> card element
+  };
+
+  function voiceSetState(state, detail) {
+    Voice.state = state;
+    if ($voiceStatePill) {
+      $voiceStatePill.textContent = detail ? state + ': ' + detail : state;
+      $voiceStatePill.className = 'voice-state-pill ' +
+        ({connecting: 'connecting', listening: 'listening', thinking: 'thinking',
+          speaking: 'speaking', stopping: 'connecting'}[state] ||
+         (state === 'error' ? 'error' : state === 'closed' ? 'ended' : ''));
+    }
+    const live = ['connecting', 'listening', 'thinking', 'speaking', 'stopping'].includes(state);
+    if ($voiceModeBtn) {
+      $voiceModeBtn.classList.toggle('live', live);
+      $voiceModeBtn.setAttribute('aria-pressed', live ? 'true' : 'false');
+    }
+    if ($voiceLiveDot) $voiceLiveDot.hidden = !live;
+    if ($voiceTalkBtn) {
+      $voiceTalkBtn.textContent = live ? 'Stop' : 'Start talking';
+      $voiceTalkBtn.disabled = (state === 'stopping');
+      $voiceTalkBtn.classList.toggle('upd-primary', !live);
+    }
+  }
+
+  function voiceShowError(msg) {
+    if (!$voiceError) return;
+    $voiceError.textContent = msg || '';
+    $voiceError.style.display = msg ? '' : 'none';
+  }
+
+  function voiceMsg(role, text) {
+    if (!$voiceTranscript || !text) return;
+    const div = document.createElement('div');
+    div.className = 'voice-msg ' + (role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : 'system');
+    if (role === 'user' || role === 'assistant') {
+      const r = document.createElement('span');
+      r.className = 'voice-msg-role';
+      r.textContent = role === 'user' ? 'You' : 'Voice';
+      div.appendChild(r);
+    }
+    const span = document.createElement('span');
+    span.textContent = text;
+    div.appendChild(span);
+    $voiceTranscript.appendChild(div);
+    $voiceTranscript.scrollTop = $voiceTranscript.scrollHeight;
+    // Bound the DOM the same way the backend bounds the transcript.
+    while ($voiceTranscript.children.length > 400) $voiceTranscript.removeChild($voiceTranscript.firstChild);
+    return div;
+  }
+
+  function voiceDelta(role, delta) {
+    let node = Voice.streaming[role];
+    if (!node) {
+      node = voiceMsg(role, '');
+      if (!node) return;
+      node.lastChild.classList.add('voice-msg-streaming');
+      Voice.streaming[role] = node;
+    }
+    node.lastChild.textContent += delta;
+    $voiceTranscript.scrollTop = $voiceTranscript.scrollHeight;
+  }
+
+  function voiceFlushStreams() {
+    for (const role of Object.keys(Voice.streaming)) {
+      Voice.streaming[role].lastChild.classList.remove('voice-msg-streaming');
+      delete Voice.streaming[role];
+    }
+  }
+
+  function voiceActionCard(a) {
+    // a: public assistant-action dict {id, kind, label, effect, detail,
+    // status, confirm_token?} — update in place on outcome events.
+    if (!$voiceActions || !a || !a.id) return;
+    let card = Voice.actionCards[a.id];
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'voice-action-card';
+      Voice.actionCards[a.id] = card;
+      $voiceActions.appendChild(card);
+    }
+    if (a.status === 'proposed') {
+      card.innerHTML = '';
+      const kind = document.createElement('span');
+      kind.className = 'voice-action-kind';
+      kind.textContent = 'Confirm action: ' + (a.kind || 'action');
+      const sum = document.createElement('div');
+      sum.className = 'voice-action-summary';
+      sum.textContent = (a.effect || '') + (a.detail ? ' — ' + a.detail : '');
+      const btns = document.createElement('div');
+      btns.className = 'voice-action-btns';
+      const ok = document.createElement('button');
+      ok.type = 'button';
+      ok.className = 'upd-btn upd-primary';
+      ok.textContent = 'Confirm';
+      ok.addEventListener('click', () => voiceDecideAction(a, 'confirm', card));
+      const no = document.createElement('button');
+      no.type = 'button';
+      no.className = 'upd-btn';
+      no.textContent = 'Dismiss';
+      no.addEventListener('click', () => voiceDecideAction(a, 'dismiss', card));
+      btns.appendChild(ok); btns.appendChild(no);
+      card.appendChild(kind); card.appendChild(sum); card.appendChild(btns);
+    } else {
+      const label = a.status === 'done' ? '✓ Done' : a.status === 'failed' ? '✗ Failed' :
+        a.status === 'dismissed' ? 'Dismissed' : a.status;
+      card.innerHTML = '';
+      const sum = document.createElement('div');
+      sum.className = 'voice-action-summary';
+      sum.textContent = label + ' — ' + (a.effect || '');
+      card.appendChild(sum);
+      card.style.opacity = '0.7';
+    }
+  }
+
+  async function voiceDecideAction(a, verb, card) {
+    try {
+      const res = await fetch('/api/assistant/actions/' + encodeURIComponent(a.id) + '/' + verb, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: a.confirm_token || ''}),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) voiceShowError((d && d.error) || ('action ' + verb + ' failed'));
+      else if (d && d.action) voiceActionCard(d.action);
+    } catch (err) {
+      voiceShowError('Network error on action ' + verb + '.');
+    }
+  }
+
+  function voiceHandleEvent(ev) {
+    const d = ev.data || {};
+    switch (ev.type) {
+      case 'state':
+        voiceSetState(d.state || Voice.state, d.detail || '');
+        break;
+      case 'transcript_delta':
+        voiceDelta(d.role || 'assistant', d.delta || '');
+        break;
+      case 'transcript':
+        voiceFlushStreams();
+        voiceMsg(d.role || 'assistant', d.text || '');
+        break;
+      case 'tool':
+        voiceSetState('thinking', d.tool || 'working');
+        break;
+      case 'action':
+        voiceActionCard(d);
+        break;
+      case 'error':
+        voiceShowError(d.message || 'voice error');
+        break;
+      case 'closed':
+        voiceEnded(d);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function voiceOpenEvents() {
+    if (Voice.es) { Voice.es.close(); Voice.es = null; }
+    const es = new EventSource('/api/voice/events?session_id=' + encodeURIComponent(Voice.sessionId));
+    es.onmessage = (m) => {
+      try {
+        const payload = JSON.parse(m.data);
+        for (const ev of (payload.events || [])) voiceHandleEvent(ev);
+      } catch (_) { /* malformed SSE data — skip */ }
+    };
+    es.addEventListener('end', () => voiceEnded({reason: 'server closed stream'}));
+    Voice.es = es;
+  }
+
+  function voiceEnded(info) {
+    const reason = (info && info.reason) || Voice.state;
+    voiceTeardownLocal();
+    voiceSetState(reason === 'user' || reason === 'tab_close' ? 'closed' : 'ended',
+      {idle_timeout: 'stopped on silence', max_duration: 'hit max length',
+       heartbeat_lost: 'tab connection lost', server_shutdown: 'server restarted',
+       child_exit: 'voice engine exited'}[reason] || reason || '');
+    voiceMsg('system', 'Voice session ended (' + reason + ')' +
+      (info && info.audio_ms ? ' · ' + Math.round(info.audio_ms / 1000) + 's of speech' : ''));
+  }
+
+  function voiceTeardownLocal() {
+    if (Voice.es) { Voice.es.close(); Voice.es = null; }
+    if (Voice.hbTimer) { clearInterval(Voice.hbTimer); Voice.hbTimer = null; }
+    if (Voice.elapsedTimer) { clearInterval(Voice.elapsedTimer); Voice.elapsedTimer = null; }
+    if (Voice.pc) { try { Voice.pc.close(); } catch (_) {} Voice.pc = null; }
+    if (Voice.micStream) {
+      for (const t of Voice.micStream.getTracks()) { try { t.stop(); } catch (_) {} }
+      Voice.micStream = null;
+    }
+    if ($voiceAudio) $voiceAudio.srcObject = null;
+    Voice.streaming = {};
+    Voice.actionCards = {};
+    if ($voiceActions) $voiceActions.innerHTML = '';
+    Voice.sessionId = null;
+  }
+
+  function voiceUpdateElapsed() {
+    if (!$voiceElapsed) return;
+    const s = Math.max(0, Math.floor((Date.now() - Voice.startedAt) / 1000));
+    $voiceElapsed.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  async function voiceStart() {
+    voiceShowError('');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      voiceShowError('No microphone available in this browser.');
+      return;
+    }
+    if (typeof RTCPeerConnection !== 'function') {
+      voiceShowError('This browser has no WebRTC support.');
+      return;
+    }
+    voiceSetState('connecting', 'microphone');
+    let mic;
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({
+        audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true},
+      });
+    } catch (err) {
+      voiceSetState('idle');
+      const name = err && err.name;
+      voiceShowError(name === 'NotAllowedError' ? 'Microphone permission denied — allow mic access and try again.'
+        : name === 'NotFoundError' ? 'No microphone found on this machine.'
+        : 'Could not open the microphone (' + (name || 'unknown') + ').');
+      return;
+    }
+    Voice.micStream = mic;
+    const pc = new RTCPeerConnection();
+    Voice.pc = pc;
+    try {
+      for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
+      // oai-events is the realtime events channel the voice host expects.
+      pc.createDataChannel('oai-events');
+      pc.ontrack = (ev) => {
+        if ($voiceAudio && ev.streams && ev.streams[0]) {
+          $voiceAudio.srcObject = ev.streams[0];
+          $voiceAudio.muted = Voice.audioMuted;
+          $voiceAudio.play().catch(() => {});
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        if (!Voice.pc || Voice.sessionId == null) return;
+        if (pc.connectionState === 'failed') {
+          voiceShowError('WebRTC connection to the voice engine failed.');
+          voiceStop('rtc_failed');
+        }
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      // Codex expects a single SDP (no trickle): wait for gather to finish.
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        const t = setTimeout(resolve, 4000);
+        pc.addEventListener('icegatheringstatechange', () => {
+          if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+        });
+      });
+      voiceSetState('connecting', 'voice engine');
+      const res = await fetch('/api/voice/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sdp_offer: pc.localDescription.sdp}),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) {
+        if (d && d.code === 'voice_no_openai_key') {
+          voiceShowError(d.error || 'Add an OpenAI key under Settings > BYOK, then try again.');
+        } else if (d && d.code === 'voice_busy') {
+          voiceShowError('A voice session is already running.');
+        } else {
+          voiceShowError((d && d.error) || ('start failed (HTTP ' + res.status + ')'));
+        }
+        throw new Error('start failed');
+      }
+      Voice.sessionId = d.session_id;
+      Voice.startedAt = Date.now();
+      await pc.setRemoteDescription({type: 'answer', sdp: d.sdp_answer});
+      voiceOpenEvents();
+      Voice.hbTimer = setInterval(() => {
+        fetch('/api/voice/heartbeat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id: Voice.sessionId}),
+        }).catch(() => {});
+      }, VOICE_HEARTBEAT_MS);
+      Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
+      voiceUpdateElapsed();
+      voiceMsg('system', 'Voice is live — billing to your OpenAI key. Speak now.');
+    } catch (err) {
+      const orphan = Voice.sessionId;
+      voiceTeardownLocal();
+      voiceSetState('idle');
+      if (orphan) {
+        // The server already spawned a session — don't leave it burning.
+        fetch('/api/voice/stop', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id: orphan, reason: 'start_failed'}),
+        }).catch(() => {});
+      }
+    }
+  }
+
+  async function voiceStop(reason) {
+    const sid = Voice.sessionId;
+    voiceTeardownLocal();
+    voiceSetState('closed');
+    try {
+      await fetch('/api/voice/stop', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sid, reason: reason || 'user'}),
+      });
+    } catch (_) { /* best effort — server watchdog cleans up */ }
+  }
+
+  function voiceOpenPanel() {
+    if ($voicePanel) $voicePanel.hidden = false;
+  }
+  function voiceHidePanel() {
+    // Panel hides, session keeps running — the topbar dot + status poll keep
+    // state live; the stream keeps the session heartbeating.
+    if ($voicePanel) $voicePanel.hidden = true;
+  }
+
+  async function voicePollStatus() {
+    // Auto-recovery for a session started in an older tab (or after a server
+    // restart killed it): if the server reports no live session, show a clean
+    // ended state instead of a stale "listening" pill. O(1) status read.
+    try {
+      const res = await fetch('/api/voice/status', {cache: 'no-store'});
+      const d = await res.json().catch(() => ({}));
+      const sess = d && d.session;
+      if (!sess && Voice.sessionId) {
+        voiceEnded({reason: 'session gone'});
+      } else if (!sess) {
+        if (!['idle', 'closed', 'ended', 'error'].includes(Voice.state)) voiceSetState('idle');
+      } else if (!Voice.sessionId && ['connecting', 'listening', 'thinking', 'speaking'].includes(sess.state)) {
+        // Another tab owns this session — adopt a read-only view of it.
+        Voice.sessionId = sess.id;
+        Voice.startedAt = (sess.started_at || Date.now() / 1000) * 1000;
+        voiceOpenEvents();
+        if (!Voice.hbTimer) {
+          Voice.hbTimer = setInterval(() => {
+            fetch('/api/voice/heartbeat', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({session_id: Voice.sessionId}),
+            }).catch(() => {});
+          }, VOICE_HEARTBEAT_MS);
+        }
+        if (!Voice.elapsedTimer) Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
+        voiceSetState(sess.state);
+      }
+    } catch (_) { /* server down — next poll retries */ }
+  }
+
+  // -- settings modal ----------------------------------------------------
+
+  function voiceModalError(msg) {
+    if (!$voiceModalError) return;
+    $voiceModalError.textContent = msg || '';
+    $voiceModalError.classList.toggle('visible', !!msg);
+  }
+
+  async function openVoiceModal() {
+    if (!$voiceModal) return;
+    voiceModalError('');
+    $voiceModal.classList.add('open');
+    try {
+      const [cfgRes, voicesRes] = await Promise.all([
+        fetch('/api/voice/config', {cache: 'no-store'}),
+        fetch('/api/voice/voices', {cache: 'no-store'}),
+      ]);
+      const cfg = (await cfgRes.json().catch(() => ({}))) || {};
+      const voices = (await voicesRes.json().catch(() => ({}))) || {};
+      const c = cfg.config || {};
+      const all = [];
+      const vv = voices.voices || {};
+      for (const v of (vv.v1 || [])) all.push(v);
+      for (const v of (vv.v2 || [])) if (!all.includes(v)) all.push(v);
+      if ($voiceSelect) {
+        $voiceSelect.innerHTML = '';
+        if (!all.length) all.push(c.voice || 'marin');
+        for (const v of all) {
+          const o = document.createElement('option');
+          o.value = v; o.textContent = v;
+          $voiceSelect.appendChild(o);
+        }
+        $voiceSelect.value = c.voice || 'marin';
+      }
+      const profiles = cfg.openai_profiles || [];
+      if ($voiceProfileSelect) {
+        $voiceProfileSelect.innerHTML = '';
+        const auto = document.createElement('option');
+        auto.value = ''; auto.textContent = profiles.length ? 'Auto (first with an OpenAI key)' : 'No OpenAI keys configured';
+        $voiceProfileSelect.appendChild(auto);
+        for (const p of profiles) {
+          const o = document.createElement('option');
+          o.value = p; o.textContent = p;
+          $voiceProfileSelect.appendChild(o);
+        }
+        $voiceProfileSelect.value = c.profile || '';
+      }
+      if ($voiceSetupBanner) {
+        if (!profiles.length) {
+          $voiceSetupBanner.textContent = 'No BYOK profile has an OpenAI key yet. Voice mode needs one: add an OpenAI key under Settings > BYOK, then come back.';
+          $voiceSetupBanner.style.display = '';
+        } else {
+          $voiceSetupBanner.style.display = 'none';
+        }
+      }
+      if ($voiceProfileHint) {
+        $voiceProfileHint.textContent = profiles.length
+          ? 'The key is injected into the local Codex process only; it is never stored by this feature or sent to the page.'
+          : '';
+      }
+      if ($voiceMaxMinutes) $voiceMaxMinutes.value = c.max_minutes || 15;
+      if ($voiceIdleSeconds) $voiceIdleSeconds.value = c.idle_seconds || 120;
+      if ($voiceSaveTranscripts) $voiceSaveTranscripts.checked = !!c.save_transcripts;
+    } catch (err) {
+      voiceModalError('Could not load voice settings.');
+    }
+  }
+
+  function closeVoiceModal() {
+    if ($voiceModal) $voiceModal.classList.remove('open');
+  }
+
+  async function saveVoiceConfig() {
+    voiceModalError('');
+    const patch = {
+      voice: $voiceSelect ? $voiceSelect.value : undefined,
+      profile: $voiceProfileSelect ? $voiceProfileSelect.value : undefined,
+      max_minutes: $voiceMaxMinutes ? parseInt($voiceMaxMinutes.value, 10) : undefined,
+      idle_seconds: $voiceIdleSeconds ? parseInt($voiceIdleSeconds.value, 10) : undefined,
+      save_transcripts: $voiceSaveTranscripts ? !!$voiceSaveTranscripts.checked : undefined,
+    };
+    for (const k of Object.keys(patch)) if (patch[k] === undefined || Number.isNaN(patch[k])) delete patch[k];
+    try {
+      const res = await fetch('/api/voice/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(patch),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) throw new Error((d && d.error) || ('HTTP ' + res.status));
+      showOpToast('Voice settings saved', 'ok');
+      closeVoiceModal();
+    } catch (err) {
+      voiceModalError((err && err.message) || 'Save failed.');
+    }
+  }
+
+  // -- wiring ------------------------------------------------------------
+
+  if ($voiceModeBtn) $voiceModeBtn.addEventListener('click', voiceOpenPanel);
+  if ($voicePanelHideBtn) $voicePanelHideBtn.addEventListener('click', voiceHidePanel);
+  if ($voicePanelStopBtn) $voicePanelStopBtn.addEventListener('click', () => voiceStop('user'));
+  if ($voiceTalkBtn) $voiceTalkBtn.addEventListener('click', () => {
+    if (Voice.sessionId || Voice.state === 'connecting') voiceStop('user');
+    else voiceStart();
+  });
+  if ($voiceMuteBtn) $voiceMuteBtn.addEventListener('click', () => {
+    Voice.audioMuted = !Voice.audioMuted;
+    if ($voiceAudio) $voiceAudio.muted = Voice.audioMuted;
+    $voiceMuteBtn.classList.toggle('muted', Voice.audioMuted);
+    $voiceMuteBtn.setAttribute('aria-pressed', Voice.audioMuted ? 'true' : 'false');
+  });
+  if ($voiceSettingsBtn) $voiceSettingsBtn.addEventListener('click', () => {
+    closeSettingsModal();
+    openVoiceModal();
+  });
+  if ($voiceModalBackdrop) $voiceModalBackdrop.addEventListener('click', closeVoiceModal);
+  if ($voiceModalCancelBtn) $voiceModalCancelBtn.addEventListener('click', closeVoiceModal);
+  if ($voiceModalSaveBtn) $voiceModalSaveBtn.addEventListener('click', saveVoiceConfig);
+  // Tab close/navigation: tell the server to stop the session right away
+  // (the heartbeat watchdog is the backstop). sendBeacon survives unload.
+  window.addEventListener('pagehide', () => {
+    if (!Voice.sessionId) return;
+    try {
+      navigator.sendBeacon('/api/voice/stop', new Blob(
+        [JSON.stringify({session_id: Voice.sessionId, reason: 'tab_close'})],
+        {type: 'application/json'}));
+    } catch (_) {}
+  });
+  // Keep the pill honest if a session ends elsewhere (server restart,
+  // second tab, idle/max/heartbeat watchdogs).
+  Voice.statusTimer = setInterval(voicePollStatus, VOICE_STATUS_POLL_MS);
+  voicePollStatus();
   // Each control below mutates spawnDefaultsState in place and immediately
   // persists it — there is no draft object or Save button now that the
   // fields live inline in Settings instead of behind a modal launcher.
