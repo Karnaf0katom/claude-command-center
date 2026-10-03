@@ -41,15 +41,16 @@ runs only when you click **Confirm**.
 ## Using it
 
 1. Click the **mic button** in the top bar to open the voice panel.
-2. Press **Start talking** and allow microphone access. The panel shows
-   `connecting` then `listening`.
+2. Press the green phone button labeled **CALL** and allow microphone access.
+   The panel shows `connecting` then `listening`. Once audio connects, the
+   voice welcomes you: "Hi, I'm here. What would you like to work on?"
 3. Speak naturally. Transcript lines for you and the voice stream into
    the panel in real time, and the reply is spoken aloud.
 4. If the voice proposes an action (injecting into a session, spawning
    one, filing a WatchTower ticket), a card appears in the panel. Nothing
    runs until you click **Confirm** or **Dismiss**: spoken "yes" is never
    enough, by design.
-5. Press **Stop** (or close the tab) to end the session. The red dot on
+5. Press **END CALL** (or close the tab) to end the session. The red dot on
    the mic button means a session is live.
 
 ## Settings (Settings > Voice mode)
@@ -93,7 +94,7 @@ runs only when you click **Confirm**.
 |---|---|
 | `POST /api/voice/start` | Start a session. Body: `sdp_offer` (WebRTC offer), optional `transport` (`auto`|`webrtc`|`websocket`), `voice`, `profile`. Returns `session_id`, `transport`, `billing` (`subscription`|`api_key`), and `sdp_answer` for WebRTC. |
 | `POST /api/voice/stop` | Stop the active session (`session_id`, `reason`). |
-| `POST /api/voice/heartbeat` | Browser liveness check-in (`session_id`). |
+| `POST /api/voice/heartbeat` | Browser liveness check-in (`session_id`, optional `audio_ms`). Set `connected: true` after audio connects to request the one-time welcome. |
 | `POST /api/voice/audio` | Mic chunk for the websocket fallback only: base64 PCM16, `sampleRate`, `numChannels`. |
 | `GET /api/voice/status` | Active/last session, config, which BYOK profiles hold an OpenAI key. |
 | `GET /api/voice/events?session_id=…&after=N` | SSE: `state`, `transcript_delta`, `transcript`, `action`, `tool`, `audio` (websocket only), `error`, `closed`. |

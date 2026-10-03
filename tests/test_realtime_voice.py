@@ -303,6 +303,49 @@ def test_heartbeat_unknown_session(voice_env):
     assert res["code"] == "voice_no_session"
 
 
+def test_welcome_waits_for_audio_connection_and_runs_once(voice_env):
+    sid = _sess_id(_start())
+    rv.voice_heartbeat(sid)
+    assert "thread/realtime/appendSpeech" not in voice_env.log.read_text()
+    for _ in range(3):
+        result, status = rv.voice_heartbeat(sid, connected=True)
+        assert status == 200 and result["ok"]
+    assert _wait(lambda: "thread/realtime/appendSpeech" in voice_env.log.read_text())
+    assert voice_env.log.read_text().splitlines().count("thread/realtime/appendSpeech") == 1
+    rv.voice_stop(sid)
+    assert rv.voice_heartbeat(sid, connected=True)[1] == 404
+
+
+def test_welcome_retries_after_rejection(voice_env, monkeypatch):
+    sid = _sess_id(_start())
+    sess = rv._session_by_id(sid)
+    calls = []
+    original = sess.call
+
+    def reject_once(method, params, **kwargs):
+        if method == "thread/realtime/appendSpeech":
+            calls.append(params)
+            if len(calls) == 1:
+                return None, {"message": "not ready"}
+        return original(method, params, **kwargs)
+
+    monkeypatch.setattr(sess, "call", reject_once)
+    rv.voice_heartbeat(sid, connected=True)
+    rv.voice_heartbeat(sid, connected=True)
+    rv.voice_heartbeat(sid, connected=True)
+    assert len(calls) == 2
+    assert calls[-1]["threadId"] == sess.thread_id
+    assert "Hi, I'm here." in calls[-1]["text"]
+
+
+def test_welcome_rejects_nonboolean_connection(voice_env):
+    sid = _sess_id(_start())
+    result, status = rv.voice_heartbeat(sid, connected="false")
+    assert status == 400
+    assert result["code"] == "voice_bad_request"
+    assert "thread/realtime/appendSpeech" not in voice_env.log.read_text()
+
+
 def test_malformed_notification_survives(voice_env, monkeypatch):
     monkeypatch.setenv("FAKE_VOICE_MODE", "malformed")
     res, status = _start()

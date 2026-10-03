@@ -12592,6 +12592,15 @@
   .voice-action-btns .upd-btn { font-size: 12px; padding: 3px 12px; }
   .voice-panel-foot { padding: 10px 12px; border-top: 1px solid var(--border);
     display: flex; justify-content: center; }
+  .voice-call-btn.upd-btn { display: inline-flex; align-items: center; justify-content: center;
+    gap: 10px; min-width: 140px; padding: 10px 24px; border-radius: 999px;
+    background: #238636; border-color: #2ea043; color: #fff; font-weight: 700;
+    letter-spacing: 0.5px; }
+  .voice-call-btn.upd-btn:hover { background: #2ea043; border-color: #3fb950; }
+  .voice-call-btn.upd-btn.is-live { background: #b62324; border-color: #da3633; }
+  .voice-call-btn.upd-btn.is-live:hover { background: #da3633; }
+  .voice-call-btn.is-live .voice-call-icon { transform: rotate(135deg); }
+  .voice-call-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
   .voice-setup-banner { font-size: 12px; border-radius: 6px; padding: 8px 10px;
     line-height: 1.5; border: 1px solid rgba(210,153,34,0.3);
     color: var(--text); background: rgba(210,153,34,0.10); }

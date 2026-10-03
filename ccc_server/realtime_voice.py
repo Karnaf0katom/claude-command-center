@@ -373,6 +373,7 @@ class VoiceSession:
         self._key = None              # held only to redact accidents; never read
         self._watchdog_stop = threading.Event()
         self._watchdog_started = False  # respawns share one watchdog
+        self._welcome_sent = False
 
     # -- events ---------------------------------------------------------
 
@@ -903,6 +904,21 @@ class VoiceSession:
         # fire while the tab is open.
         self.last_heartbeat = time.monotonic()
 
+    def welcome(self):
+        """Speak once, after the browser confirms its audio transport is ready."""
+        with self.cond:
+            if self._welcome_sent or not self.thread_id or self.state in ("stopping", "closed", "error"):
+                return
+            self._welcome_sent = True
+        _, error = self.call("thread/realtime/appendSpeech", {
+            "threadId": self.thread_id,
+            "text": "Hi, I'm here. What would you like to work on?",
+        }, timeout=15)
+        if error:
+            # A later connected heartbeat can retry a rejected request.
+            with self.cond:
+                self._welcome_sent = False
+
     # -- close / teardown -------------------------------------------------
 
     def stop(self, reason="user"):
@@ -1088,7 +1104,9 @@ def _session_by_id(session_id):
     return None
 
 
-def voice_heartbeat(session_id, audio_ms=None):
+def voice_heartbeat(session_id, audio_ms=None, connected=False):
+    if not isinstance(connected, bool):
+        return {"ok": False, "error": "connected must be a boolean", "code": "voice_bad_request"}, 400
     sess = _session_by_id(session_id)
     if not sess or sess.state in ("closed", "error"):
         return {"ok": False, "error": "no such voice session", "code": "voice_no_session"}, 404
@@ -1100,6 +1118,8 @@ def voice_heartbeat(session_id, audio_ms=None):
             sess.audio_ms = max(sess.audio_ms, min(int(audio_ms), 24 * 3600 * 1000))
         except (TypeError, ValueError):
             pass
+    if connected:
+        sess.welcome()
     return {"ok": True}, 200
 
 

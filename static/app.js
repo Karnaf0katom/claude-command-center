@@ -77904,9 +77904,11 @@
     }
     if ($voiceLiveDot) $voiceLiveDot.hidden = !live;
     if ($voiceTalkBtn) {
-      $voiceTalkBtn.textContent = live ? 'Stop' : 'Start talking';
+      const label = document.getElementById('voiceTalkLabel');
+      if (label) label.textContent = live ? 'END CALL' : 'CALL';
+      $voiceTalkBtn.setAttribute('aria-label', live ? 'End voice call' : 'Call voice agent');
       $voiceTalkBtn.disabled = (state === 'stopping');
-      $voiceTalkBtn.classList.toggle('upd-primary', !live);
+      $voiceTalkBtn.classList.toggle('is-live', live);
     }
   }
 
@@ -78219,6 +78221,19 @@
     }
   }
 
+  function voiceSendHeartbeat() {
+    if (!Voice.sessionId) return;
+    // Observer tabs have no audio transport and must not trigger the welcome.
+    const connected = Voice.transport === 'websocket' ? !!Voice.micNode
+      : !!Voice.pc && Voice.pc.connectionState === 'connected';
+    fetch('/api/voice/heartbeat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: Voice.sessionId,
+        audio_ms: Voice.usageAudioMs || 0, connected}),
+    }).catch(() => {});
+  }
+
 
   async function voiceStart() {
     voiceShowError('');
@@ -78261,6 +78276,7 @@
       };
       pc.onconnectionstatechange = () => {
         if (!Voice.pc || Voice.sessionId == null || Voice.transport !== 'webrtc') return;
+        if (pc.connectionState === 'connected') voiceSendHeartbeat();
         if (pc.connectionState === 'failed') {
           voiceShowError('WebRTC connection to the voice engine failed.');
           voiceStop('rtc_failed');
@@ -78317,13 +78333,8 @@
         await pc.setRemoteDescription({type: 'answer', sdp: d.sdp_answer});
       }
       voiceOpenEvents();
-      Voice.hbTimer = setInterval(() => {
-        fetch('/api/voice/heartbeat', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({session_id: Voice.sessionId, audio_ms: Voice.usageAudioMs || 0}),
-        }).catch(() => {});
-      }, VOICE_HEARTBEAT_MS);
+      voiceSendHeartbeat();
+      Voice.hbTimer = setInterval(voiceSendHeartbeat, VOICE_HEARTBEAT_MS);
       Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
       voiceUpdateElapsed();
       voiceMsg('system', Voice.billing === 'api_key'
@@ -78386,13 +78397,7 @@
         Voice.startedAt = (sess.started_at || Date.now() / 1000) * 1000;
         voiceOpenEvents();
         if (!Voice.hbTimer) {
-          Voice.hbTimer = setInterval(() => {
-            fetch('/api/voice/heartbeat', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({session_id: Voice.sessionId, audio_ms: Voice.usageAudioMs || 0}),
-            }).catch(() => {});
-          }, VOICE_HEARTBEAT_MS);
+          Voice.hbTimer = setInterval(voiceSendHeartbeat, VOICE_HEARTBEAT_MS);
         }
         if (!Voice.elapsedTimer) Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
         voiceSetState(sess.state);

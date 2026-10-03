@@ -30367,7 +30367,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 data = {}
             result, status = voice_heartbeat(
                 (data.get("session_id") or "").strip(),
-                audio_ms=data.get("audio_ms"))
+                audio_ms=data.get("audio_ms"),
+                connected=data.get("connected", False))
             self.send_json(result, status)
             return
 
