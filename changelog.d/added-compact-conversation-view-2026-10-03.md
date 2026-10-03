@@ -1,1 +1,1 @@
-- Conversation view toggle is now 3-way: Default, Verbose, and a new Compact mode that hides per-message timestamps, line numbers and token chips and tightens type and spacing for maximum density.
+- Conversation view is a one-tap Compact | Normal | Verbose segmented control (rail topbar and pane menu). Compact hides per-message timestamps, line numbers and token chips and tightens type and spacing for maximum density.

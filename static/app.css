@@ -10431,8 +10431,7 @@
 
   /* Today's projects tray (CCC-141). Sits below the search input and above the
      conversation list. Lightweight session tray, NOT Flow board state. */
-  .today-toggle-btn[aria-pressed="true"],
-  .verbose-toggle-btn[aria-pressed="true"] {
+  .today-toggle-btn[aria-pressed="true"] {
     background: rgba(88,166,255,0.18);
     color: var(--text);
     border-color: rgba(88,166,255,0.45);
@@ -30488,3 +30487,24 @@ body.conv-compact.conv-compact .conversations-view .tool-call-group-header { pad
 body.conv-compact.conv-compact .conversations-view .tool-call-group-body { padding: 0 6px 2px; font-size: 11px; }
 body.conv-compact.conv-compact .conversations-view .tool-call { padding: 0 !important; font-size: 11px; }
 body.conv-compact.conv-compact .conversations-view pre.tool-result-output { margin: 0 0 0 18px; padding: 1px 6px; font-size: 11px; }
+
+/* Transcript view segmented control: Compact | Normal | Verbose, all
+   visible, one tap. Selected segment follows body[data-conv-view]. */
+.conv-view-seg {
+  display: inline-flex; align-items: stretch; height: 22px;
+  border: 1px solid var(--border); border-radius: 5px; overflow: hidden;
+  flex: 0 0 auto;
+}
+.conv-view-seg > button {
+  border: 0; border-left: 1px solid var(--border); background: transparent;
+  color: var(--text-muted); font: inherit; font-size: 11px; font-weight: 600;
+  padding: 0 6px; cursor: pointer; white-space: nowrap; line-height: 1;
+}
+.conv-view-seg > button:first-child { border-left: 0; }
+.conv-view-seg > button:hover { color: var(--text); background: var(--surface-2); }
+body[data-conv-view="compact"] .conv-view-seg > [data-conv-view="compact"],
+body[data-conv-view="normal"] .conv-view-seg > [data-conv-view="normal"],
+body[data-conv-view="verbose"] .conv-view-seg > [data-conv-view="verbose"] {
+  background: rgba(88,166,255,0.18); color: var(--text);
+}
+.conv-pane-more-menu .conv-view-seg { margin: 2px 6px 4px; }
