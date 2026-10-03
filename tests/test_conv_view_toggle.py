@@ -54,12 +54,40 @@ class ConvViewToggleTest(unittest.TestCase):
         js = _read("static/app.js")
         css = _read("static/app.css")
         self.assertIn("function _ccMarkRuns(view)", js)
-        self.assertIn("if (groups.length >= 2)", js)
+        self.assertIn("if (active.length >= 2 || (active.length && prevText)) {", js)
+        # Devin/Codex/ACP: tool calls and thinking live inside the
+        # .event.assistant next to the text, so they are units too.
+        self.assertIn("else if (cc.contains('tool-call')) { found = true; units.push({ el: c, kind: 'tool', calls: 1 }); }", js)
+        self.assertIn("else if (cc.contains('thinking-block')) { found = true; units.push({ el: c, kind: 'think' }); }", js)
         # The observer is only live while compact is on.
         self.assertIn("_ccSyncRunsObserver(mode === 'compact');", js)
         # Declared before the boot-time sync call (const TDZ).
         self.assertLess(js.index("const _ccRunsObserver"), js.index("_syncConvViewSegs(convViewMode());"))
         self.assertIn(".cc-run-tail:not(.cc-run-open) { display: none !important; }", css)
+
+    def test_run_chip_rides_on_preceding_text(self):
+        js = _read("static/app.js")
+        css = _read("static/app.css")
+        self.assertIn("chip.className = 'cc-run-chip';", js)
+        self.assertIn("_ccChipHost(prevText).appendChild(chip);", js)
+        # Empty span + ::before: copy / read-aloud never see the label.
+        self.assertIn('.cc-run-chip::before { content: "\\25B8 " attr(data-cc-run-label); }', css)
+        self.assertIn(".cc-run-head.cc-run-chipped:not(.cc-run-open) { display: none !important; }", css)
+        # Chip-bearing text is never two-line clamped (chip would be cut).
+        self.assertIn(".assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),", css)
+
+    def test_turn_final_summary_keeps_card(self):
+        js = _read("static/app.js")
+        css = _read("static/app.css")
+        self.assertIn("if (u.el.classList.contains('user_text')) { markFinal(turnText); turnText = null; }", js)
+        self.assertIn(".assistant-text.cc-final {", css)
+        self.assertIn(":not(.cc-final):not(:has(.cc-run-chip))", css)
+
+    def test_compact_tones_down_text(self):
+        css = _read("static/app.css")
+        # ID-level specificity beats the stitch theme's 0,9,0 !important.
+        self.assertIn("body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assistant-text {", css)
+        self.assertIn("font-weight: 400 !important; letter-spacing: normal !important;", css)
 
 
 if __name__ == "__main__":

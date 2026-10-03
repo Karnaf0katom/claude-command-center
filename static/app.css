@@ -30544,7 +30544,7 @@ body.conv-compact.conv-compact .conversations-view .line-num,
 body.conv-compact.conv-compact .conversations-view .assistant-message-actions,
 body.conv-compact.conv-compact .conversations-view details.tool-command-disclosure { display: none !important; }
 /* Two-line clamp on messages (all but the newest assistant reply). */
-body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open),
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),
 body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) .user-msg {
   display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; cursor: pointer;
@@ -30570,16 +30570,59 @@ body.conv-compact.conv-compact .conversations-view .tool-call-group { margin: 0;
 body.conv-compact.conv-compact .conversations-view .tool-call-group-header { padding: 1px 8px; }
 body.conv-compact.conv-compact .conversations-view .tool-call-group-body { padding: 0 8px 2px; }
 
-/* Folded runs: the tool rows between two text messages collapse into one
-   "N tool calls" line (marked by _ccMarkRuns in app.js). */
+/* Folded runs: everything between two text messages collapses into one
+   "N tool calls" line (marked by _ccMarkRuns in app.js). The head is a
+   .tool-call-group (Claude) or a bare .tool-call / .thinking-block
+   (Devin, Codex, ACP engines). */
 body.conv-compact.conv-compact .conversations-view .cc-run-tail:not(.cc-run-open) { display: none !important; }
 body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-body { display: none; }
-body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header > * { display: none; }
-body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header::before {
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header > *,
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open):not(.tool-call-group) > * { display: none !important; }
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open) > .tool-call-group-header::before,
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open):not(.tool-call-group)::before {
   content: "\25B8  " attr(data-cc-run-label);
+  font-style: normal; font-size: 12px; color: var(--text-muted); cursor: pointer;
+}
+body.conv-compact.conv-compact .conversations-view .cc-run-head:not(.cc-run-open):not(.tool-call-group) {
+  border: 0 !important; background: none !important; padding: 0 6px !important; cursor: pointer;
 }
 body.conv-compact.conv-compact .conversations-view .cc-run-head.cc-run-open > .tool-call-group-header::after {
   content: "\25BE  fold " attr(data-cc-run-label); margin-left: auto; opacity: 0.6; font-size: 0.9em;
+}
+
+/* Run chip: the folded run's label rides at the end of the preceding
+   sentence (empty span + ::before, so copy/read-aloud never pick it up).
+   The standalone head line hides while a chip stands in for it. */
+.cc-run-chip { display: none; }
+body.conv-compact .conversations-view .cc-run-chip {
+  display: inline; margin-left: 6px; cursor: pointer; white-space: nowrap;
+  font-size: 11px; font-weight: 400; font-style: normal; letter-spacing: normal;
+  color: var(--text-muted); opacity: 0.8;
+}
+body.conv-compact .conversations-view .cc-run-chip::before { content: "\25B8 " attr(data-cc-run-label); }
+body.conv-compact .conversations-view .cc-run-chip.cc-run-open::before { content: "\25BE " attr(data-cc-run-label); }
+body.conv-compact .conversations-view .cc-run-chip:hover { color: var(--text); opacity: 1; }
+body.conv-compact.conv-compact .conversations-view .cc-run-head.cc-run-chipped:not(.cc-run-open) { display: none !important; }
+
+/* Toned-down narration in compact: no cards, no heavy weight or wide
+   tracking, so it reads as plain prose. User messages keep their theme
+   bubble on purpose (user ask). `:not(#cc-compact)` adds ID-level specificity
+   so this beats the conv-bg themes (stitch tops out at 0,9,0 !important). */
+body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assistant-text {
+  background: none !important; border: 0 !important; border-radius: 0 !important;
+  box-shadow: none !important; padding: 1px 2px !important; margin: 0 0 10px !important;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif !important;
+  font-weight: 400 !important; letter-spacing: normal !important; line-height: 1.45 !important;
+  color: var(--text) !important;
+}
+
+/* Each turn's final summary keeps the card look Normal view has (stitch
+   surface + accent rule), so it stands out from the toned-down narration. */
+body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assistant-text.cc-final {
+  background: var(--conv-surface-2, rgba(255,255,255,0.05)) !important;
+  border-left: 2px solid var(--conv-accent, var(--accent, #58a6ff)) !important;
+  border-radius: 0 4px 4px 0 !important;
+  padding: 10px 14px !important; margin: 4px 0 12px !important;
 }
 
 /* Transcript view segmented control: Compact | Normal | Verbose, all
