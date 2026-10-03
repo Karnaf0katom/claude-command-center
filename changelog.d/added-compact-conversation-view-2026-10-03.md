@@ -1,0 +1,1 @@
+- Conversation view toggle is now 3-way: Default, Verbose, and a new Compact mode that hides per-message timestamps, line numbers and token chips and tightens type and spacing for maximum density.

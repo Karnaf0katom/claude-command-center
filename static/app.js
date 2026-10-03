@@ -56879,9 +56879,19 @@
   // bodies render expanded always, regardless of this toggle — CCC-942).
   // Persisted so it survives reloads; the topbar toggle (left of Annotate)
   // flips it and re-applies to already-rendered conversation DOM.
-  function convVerboseOn() {
-    try { return localStorage.getItem('ccc-conv-verbose') === '1'; } catch (_) { return false; }
+  // The toggle is 3-way: 'default' -> 'verbose' -> 'compact'. Compact keeps
+  // tools collapsed and adds body.conv-compact, which strips per-message
+  // chrome (timestamps, line numbers, token chips) and tightens type.
+  // Older installs only stored 'ccc-conv-verbose'; honor it as a fallback.
+  const CONV_VIEW_MODES = ['default', 'verbose', 'compact'];
+  function convViewMode() {
+    try {
+      const m = localStorage.getItem('ccc-conv-view');
+      if (CONV_VIEW_MODES.includes(m)) return m;
+      return localStorage.getItem('ccc-conv-verbose') === '1' ? 'verbose' : 'default';
+    } catch (_) { return 'default'; }
   }
+  function convVerboseOn() { return convViewMode() === 'verbose'; }
   function applyConvVerbose(on) {
     document.querySelectorAll('.tool-call-group').forEach(g => {
       // Never re-collapse groups that carry conversation/control-plane
@@ -76603,9 +76613,17 @@
   // panes — hence querySelectorAll at toggle time), and re-applies expansion
   // state to the conversation DOM already on screen (future renders honor
   // convVerboseOn()).
-  function _syncVerboseButtons(on) {
+  const CONV_VIEW_LABELS = { default: 'Default', verbose: 'Verbose', compact: 'Compact' };
+  function _syncVerboseButtons(mode) {
+    const on = mode !== 'default';
+    const next = CONV_VIEW_MODES[(CONV_VIEW_MODES.indexOf(mode) + 1) % CONV_VIEW_MODES.length];
+    document.body.classList.toggle('conv-compact', mode === 'compact');
     document.querySelectorAll('#verboseToggleBtn, [data-role="pane-verbose"]')
       .forEach((b) => {
+        b.textContent = '\u2261 ' + CONV_VIEW_LABELS[mode];
+        b.dataset.convView = mode;
+        b.title = 'Transcript view: ' + CONV_VIEW_LABELS[mode] + '. Click for ' + CONV_VIEW_LABELS[next]
+          + ' (Default / Verbose: tools expanded / Compact: dense, no per-message metadata).';
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
         if (b.getAttribute('role') === 'menuitemcheckbox') {
           b.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -76613,9 +76631,13 @@
       });
   }
   function toggleConvVerbose() {
-    const on = !convVerboseOn();
-    try { localStorage.setItem('ccc-conv-verbose', on ? '1' : '0'); } catch (_) {}
-    _syncVerboseButtons(on);
+    const mode = CONV_VIEW_MODES[(CONV_VIEW_MODES.indexOf(convViewMode()) + 1) % CONV_VIEW_MODES.length];
+    const on = mode === 'verbose';
+    try {
+      localStorage.setItem('ccc-conv-view', mode);
+      localStorage.setItem('ccc-conv-verbose', on ? '1' : '0');
+    } catch (_) {}
+    _syncVerboseButtons(mode);
     applyConvVerbose(on);
     document.querySelectorAll('.conv-pane[data-pane-id]').forEach(pane => {
       if (normalizePresentationMode(pane.dataset.presentationMode) !== 'off') {
@@ -76623,7 +76645,7 @@
       }
     });
   }
-  _syncVerboseButtons(convVerboseOn());
+  _syncVerboseButtons(convViewMode());
   const $verboseToggleBtn = document.getElementById('verboseToggleBtn');
   if ($verboseToggleBtn) $verboseToggleBtn.addEventListener('click', toggleConvVerbose);
 
