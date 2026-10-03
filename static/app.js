@@ -76805,14 +76805,27 @@
     const anchors = [];
     document.querySelectorAll('.conversations-view').forEach((view) => {
       if (!view.scrollTop) return;
-      const top = view.getBoundingClientRect().top;
-      const el = Array.from(view.querySelectorAll('.event, .assistant-text, .user-message'))
-        .find(n => n.getBoundingClientRect().bottom > top + 1);
-      if (el) anchors.push({ view, el, off: el.getBoundingClientRect().top - top });
+      const vr = view.getBoundingClientRect();
+      const el = Array.from(view.querySelectorAll('.event[data-jsonl-line]'))
+        .find(n => n.getBoundingClientRect().bottom > vr.top + 1);
+      if (el) anchors.push({ view, line: Number(el.dataset.jsonlLine), off: el.getBoundingClientRect().top - vr.top });
     });
-    const restoreAnchors = () => anchors.forEach(({ view, el, off }) => {
-      if (!el.isConnected) return;
-      view.scrollTop += el.getBoundingClientRect().top - view.getBoundingClientRect().top - off;
+    // Mode switches re-render the transcript, so anchor by jsonl line, not
+    // node. If the anchor message is folded away (thinking, tool runs), use
+    // the nearest line that is still rendered.
+    const restoreAnchors = () => anchors.forEach(({ view, line, off }) => {
+      let best = null, bestD = Infinity, exact = null;
+      view.querySelectorAll('.event[data-jsonl-line]').forEach((n) => {
+        const h = n.getBoundingClientRect().height;
+        const d = Math.abs(Number(n.dataset.jsonlLine) - line);
+        if (d === 0) exact = n;
+        if (d < bestD && h >= 20) { best = n; bestD = d; }
+      });
+      // Exact message still takes real space: keep it where it was. If it
+      // folded to nothing, put the nearest substantive message at the top.
+      const useExact = exact && exact.getBoundingClientRect().height >= 20;
+      const el = useExact ? exact : best;
+      if (el) view.scrollTop += el.getBoundingClientRect().top - view.getBoundingClientRect().top - (useExact ? off : 0);
     });
     _syncConvViewSegs(mode);
     applyConvVerbose(on);
