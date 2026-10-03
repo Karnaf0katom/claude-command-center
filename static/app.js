@@ -83305,11 +83305,13 @@
       btn.addEventListener('click', () => {
         const r = rows[Number(btn.getAttribute('data-vault-import'))];
         if (!r) return;
+        // Name defaults to the BYOK profile name: people who filed a
+        // non-LLM key under an arbitrary provider named the profile after
+        // the key. Service/env var start blank for the same reason (the
+        // provider's own are shown on the row if they do apply).
         _vaultOpenForm('import', {
-          name: _vaultSlug(r.provider + '-' + r.profile),
+          name: _vaultSlug(r.profile),
           kind: 'api_key',
-          service: r.provider_label || r.provider,
-          env_var: (r.env_vars || [])[0] || '',
         }, { profile: r.profile, provider: r.provider, providerLabel: r.provider_label || r.provider });
       });
     });
