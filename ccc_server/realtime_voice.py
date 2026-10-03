@@ -51,7 +51,10 @@ VOICE_CONFIG_FILE = VOICE_STATE_DIR / "voice.json"
 VOICE_TRANSCRIPT_DIR = VOICE_STATE_DIR / "transcripts"
 VOICE_SCRATCH_DIR = VOICE_STATE_DIR / "scratch"
 
-DEFAULT_VOICE = "marin"
+# version:"v3" only accepts the v1 voice names (the app-server rejects v2
+# voices with "not supported for v3"), so the default must come from that
+# set; "cove" is also the upstream defaultV1.
+DEFAULT_VOICE = "cove"
 DEFAULT_MAX_MINUTES = 15
 DEFAULT_IDLE_SECONDS = 120
 # Browsers throttle hidden-tab timers to ~1/min, so 45s would kill a voice
@@ -995,11 +998,18 @@ def _session_by_id(session_id):
     return None
 
 
-def voice_heartbeat(session_id):
+def voice_heartbeat(session_id, audio_ms=None):
     sess = _session_by_id(session_id)
     if not sess or sess.state in ("closed", "error"):
         return {"ok": False, "error": "no such voice session", "code": "voice_no_session"}, 404
     sess.heartbeat()
+    # WebRTC audio never transits CCC, so the only speech-duration signal on
+    # the subscription path is the oai-events usage the browser relays here.
+    if audio_ms is not None:
+        try:
+            sess.audio_ms = max(sess.audio_ms, min(int(audio_ms), 24 * 3600 * 1000))
+        except (TypeError, ValueError):
+            pass
     return {"ok": True}, 200
 
 
@@ -1080,6 +1090,15 @@ def voice_start(params):
         if not voice or len(voice) > 40 or not voice.replace("-", "").isalnum():
             return {"ok": False, "code": "voice_bad_request",
                     "error": "unknown voice"}, 400
+    # version:"v3" accepts only the v1 voice names; reject a stale v2 choice
+    # here instead of letting the app-server bounce the realtime start.
+    with _VOICES_LOCK:
+        live_v1 = list((_VOICES_LIVE or {}).get("v1") or [])
+    valid = live_v1 or list(VOICES_V1)
+    if valid and voice not in valid:
+        return {"ok": False, "code": "voice_bad_request",
+                "error": (f"voice {voice!r} is not available on this realtime "
+                          f"version; pick one of: {', '.join(valid[:12])}")}, 400
     profile = str(params.get("profile") or cfg["profile"] or "").strip()
 
     codex_info = _core._resolve_codex_bin()

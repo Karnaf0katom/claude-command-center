@@ -127,8 +127,13 @@ def main():
         elif method == "initialized":
             pass
         elif method == "thread/realtime/listVoices":
-            respond(rid, {"voices": {"v1": ["juniper"], "v2": ["marin"],
-                                     "defaultV1": "juniper", "defaultV2": "marin"}})
+            # Mirrors codex-cli 0.160.0's live catalog.
+            respond(rid, {"voices": {
+                "v1": ["juniper", "maple", "spruce", "ember", "vale",
+                       "breeze", "arbor", "sol", "cove"],
+                "v2": ["alloy", "ash", "ballad", "coral", "echo", "sage",
+                       "shimmer", "verse", "marin", "cedar"],
+                "defaultV1": "cove", "defaultV2": "marin"}})
         elif method == "thread/start":
             respond(rid, {"thread": {"id": THREAD_ID}})
         elif method == "thread/realtime/start":

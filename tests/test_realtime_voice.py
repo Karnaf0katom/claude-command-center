@@ -59,7 +59,7 @@ def voice_env(tmp_path, monkeypatch):
                                      "session_state": {"summary": "working"}})
 
     # Fast watchdog knobs: 0.35s idle, ~0.5s max, 0.4s heartbeat loss.
-    cfg = {"voice": "marin", "profile": "", "max_minutes": 15,
+    cfg = {"voice": "cove", "profile": "", "max_minutes": 15,
            "idle_seconds": 120, "save_transcripts": False,
            "allow_api_fallback": True}
     monkeypatch.setattr(rv, "voice_config_load", lambda: dict(cfg))
@@ -111,7 +111,7 @@ def test_start_happy_path_subscription(voice_env):
     assert status == 200
     sid = res["session_id"]
     assert res["sdp_answer"].startswith("v=0")
-    assert res["voice"] == "marin"
+    assert res["voice"] == "cove"
     assert res["transport"] == "webrtc"
     assert res["billing"] == "subscription"
     assert res["profile"] is None

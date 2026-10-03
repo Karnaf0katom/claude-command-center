@@ -55,7 +55,7 @@ runs only when you click **Confirm**.
 ## Settings (Settings > Voice mode)
 
 - **Voice**: pick any realtime voice the installed Codex advertises
-  (defaults to `marin`).
+  (defaults to `cove`).
 - **Allow paid API-key fallback**: retry on the websocket transport with
   a BYOK OpenAI key when the subscription call fails (default on).
 - **Fallback profile**: which keychain profile supplies the OpenAI key

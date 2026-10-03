@@ -77750,6 +77750,7 @@
     pcmPostAt: 0,
     playTime: 0,        // next scheduled playback offset in audioCtx
     usageLabel: '',     // subscription usage text from the oai-events channel
+    usageAudioMs: 0,    // audio_duration_ms reported on that channel
     streaming: {},    // role -> <span> accumulating transcript deltas
     actionCards: {},  // action id -> card element
   };
@@ -77958,6 +77959,7 @@
     Voice.pcmBuf = [];
     Voice.playTime = 0;
     Voice.usageLabel = '';
+    Voice.usageAudioMs = 0;
     Voice.transport = null;
     Voice.billing = null;
     if ($voiceActions) $voiceActions.innerHTML = '';
@@ -78076,6 +78078,7 @@
     if (msg.type === 'session.usage.updated') {
       const u = msg.usage || msg;
       const ms = u.audio_duration_ms || u.audioDurationMs || 0;
+      if (ms) Voice.usageAudioMs = ms;
       const secs = Math.round(ms / 1000);
       let label = secs ? 'voice ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') : '';
       const lim = u.usage_limit || u.usageLimit;
@@ -78188,7 +78191,7 @@
         fetch('/api/voice/heartbeat', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({session_id: Voice.sessionId}),
+          body: JSON.stringify({session_id: Voice.sessionId, audio_ms: Voice.usageAudioMs || 0}),
         }).catch(() => {});
       }, VOICE_HEARTBEAT_MS);
       Voice.elapsedTimer = setInterval(voiceUpdateElapsed, 1000);
@@ -78257,7 +78260,7 @@
             fetch('/api/voice/heartbeat', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({session_id: Voice.sessionId}),
+              body: JSON.stringify({session_id: Voice.sessionId, audio_ms: Voice.usageAudioMs || 0}),
             }).catch(() => {});
           }, VOICE_HEARTBEAT_MS);
         }
@@ -78287,19 +78290,19 @@
       const cfg = (await cfgRes.json().catch(() => ({}))) || {};
       const voices = (await voicesRes.json().catch(() => ({}))) || {};
       const c = cfg.config || {};
-      const all = [];
       const vv = voices.voices || {};
-      for (const v of (vv.v1 || [])) all.push(v);
-      for (const v of (vv.v2 || [])) if (!all.includes(v)) all.push(v);
+      // Sessions pin realtime version v3, which only accepts the v1 voice
+      // names; show v2 names only when no v1 list is available.
+      const all = (vv.v1 && vv.v1.length) ? vv.v1.slice() : (vv.v2 || []).slice();
       if ($voiceSelect) {
         $voiceSelect.innerHTML = '';
-        if (!all.length) all.push(c.voice || 'marin');
+        if (!all.length) all.push(c.voice || 'cove');
         for (const v of all) {
           const o = document.createElement('option');
           o.value = v; o.textContent = v;
           $voiceSelect.appendChild(o);
         }
-        $voiceSelect.value = c.voice || 'marin';
+        $voiceSelect.value = all.includes(c.voice) ? c.voice : (all[0] || 'cove');
       }
       const profiles = cfg.openai_profiles || [];
       if ($voiceProfileSelect) {
