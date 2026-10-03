@@ -83,7 +83,8 @@ _ALL_VOICES = set(VOICES_V1) | set(VOICES_V2)
 
 # Dynamic tools the backing Codex thread may call. Read-only by contract;
 # every mutation goes through ccc_propose_action -> assistant_actions.
-TOOL_NAMES = ("ccc_attention", "ccc_session", "ccc_queues", "ccc_propose_action")
+TOOL_NAMES = ("ccc_attention", "ccc_session", "ccc_sessions", "ccc_queues",
+              "ccc_propose_action")
 
 _VOICE_PROMPT = (
     "You are the voice of Claude Command Center (CCC), a dashboard for the "
@@ -678,6 +679,8 @@ class VoiceSession:
                 return _fmt_tool_text(self._tool_attention(args))
             if tool == "ccc_session":
                 return _fmt_tool_text(self._tool_session(args))
+            if tool == "ccc_sessions":
+                return _fmt_tool_text(self._tool_sessions(args))
             if tool == "ccc_queues":
                 return _fmt_tool_text(self._tool_queues(args))
             if tool == "ccc_propose_action":
@@ -713,7 +716,20 @@ class VoiceSession:
             return "error: session_id is required"
         detail, _status = _core.compute_session_detail(sid)
         if not isinstance(detail, dict) or not detail.get("ok", True):
-            return f"session {sid} not found"
+            # compute_session_detail only reads Claude/Devin transcripts, but the
+            # attention feed spans every engine (kimi, codex, ...): fall back to
+            # the same archive rows the feed is built from.
+            row = self._archive_row(sid)
+            if not row:
+                return f"session {sid} not found"
+            parts = [f"session {row.get('session_id') or sid}:"]
+            for key in ("title", "engine", "folder_label"):
+                if row.get(key):
+                    parts.append(f"{key}={row[key]}")
+            parts.append("live" if row.get("is_live") else "not live")
+            if row.get("last_assistant_text"):
+                parts.append(f"last: {str(row['last_assistant_text'])[:300]}")
+            return "\n".join(parts)[:3000]
         parts = [f"session {sid}:"]
         state = detail.get("session_state") or {}
         for key in ("title", "engine", "repo_label", "folder_label"):
@@ -726,6 +742,43 @@ class VoiceSession:
         if detail.get("last_assistant_text"):
             parts.append(f"last: {str(detail['last_assistant_text'])[:300]}")
         return "\n".join(parts)[:3000]
+
+    @staticmethod
+    def _archive_rows():
+        convs, _cached = _core._archive_all_rows_cached({
+            "include_prs": False,
+            "resolve_pr_states": False,
+            "resolve_effective": False,
+            "resolve_worktree_dirty": False,
+        })
+        return convs or []
+
+    def _archive_row(self, sid):
+        """Archive row for a session id, tolerating a bare/`session_`-prefixed id."""
+        want = {sid, sid[len("session_"):] if sid.startswith("session_") else "session_" + sid}
+        for row in self._archive_rows():
+            if row.get("session_id") in want:
+                return row
+        return None
+
+    def _tool_sessions(self, args):
+        try:
+            limit = max(1, min(30, int(args.get("limit") or 15)))
+        except (TypeError, ValueError):
+            limit = 15
+        rows = [r for r in self._archive_rows() if r.get("is_live")]
+        if not args.get("live_only", True):
+            rows = self._archive_rows()
+        rows.sort(key=lambda r: -(r.get("modified") or r.get("mtime") or 0))
+        if not rows:
+            return "No open sessions."
+        out = [f"{min(len(rows), limit)} of {len(rows)} session(s):"]
+        for r in rows[:limit]:
+            out.append(
+                f"- {r.get('title') or r.get('folder_label') or ''} "
+                f"engine={r.get('engine') or 'claude'} session={r.get('session_id')}"
+            )
+        return "\n".join(out)[:4000]
 
     def _tool_queues(self, args):
         roll = _core._watchtower_queue_rollup() or {}
@@ -1293,7 +1346,7 @@ def _looks_sideband(msg):
 
 
 def _tool_specs():
-    """dynamicTools surface: three read-only + one propose-only mutating tool."""
+    """dynamicTools surface: four read-only + one propose-only mutating tool."""
     return [
         {
             "type": "function",
@@ -1315,6 +1368,21 @@ def _tool_specs():
                 "type": "object",
                 "properties": {"session_id": {"type": "string"}},
                 "required": ["session_id"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "ccc_sessions",
+            "description": (
+                "List open (live) CCC sessions across all engines with their "
+                "session_ids. Set live_only=false for recent history. Read-only."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "max items, default 15"},
+                    "live_only": {"type": "boolean"},
+                },
             },
         },
         {

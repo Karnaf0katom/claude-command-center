@@ -474,3 +474,19 @@ def test_deny_result_shapes():
     assert rv.VoiceSession._deny_result("execCommandApproval")["decision"] == "denied"
     assert rv.VoiceSession._deny_result("mcpServer/elicitation/request")["action"] == "decline"
     assert rv.VoiceSession._deny_result("item/tool/requestUserInput")["answers"] == {}
+
+
+def test_ccc_session_falls_back_to_archive_row_for_non_claude_ids(monkeypatch):
+    """OPS-1341: attention lists kimi/codex ids that compute_session_detail 404s."""
+    monkeypatch.setattr(server, "compute_session_detail",
+                        lambda sid: ({"ok": False, "error": "session not found"}, 404))
+    rows = [{"session_id": "session_abc", "engine": "kimi", "is_live": True,
+             "title": "kimi job", "folder_label": "repo",
+             "last_assistant_text": "waiting"}]
+    monkeypatch.setattr(server, "_archive_all_rows_cached", lambda opts: (rows, True))
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_session({"session_id": "abc"})  # bare uuid still resolves
+    assert "engine=kimi" in out and "session_abc" in out and "live" in out
+    assert "not found" in vs._tool_session({"session_id": "nope"})
+    inv = vs._tool_sessions({})
+    assert "session=session_abc" in inv

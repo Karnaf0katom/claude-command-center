@@ -74,8 +74,8 @@ runs only when you click **Confirm**.
   directly. Transcript/state events stream to the panel over SSE
   (`/api/voice/events`).
 - The backing Codex thread is ephemeral, sandboxed read-only, with
-  `approvalPolicy: never`. Its only window into CCC is four dynamic
-  tools: `ccc_attention`, `ccc_session`, `ccc_queues` (all read-only)
+  `approvalPolicy: never`. Its only window into CCC is five dynamic
+  tools: `ccc_attention`, `ccc_session`, `ccc_sessions`, `ccc_queues` (all read-only)
   and `ccc_propose_action`, which can only create a pending-action card
   through the same confirmation path the Ask agent uses. Approval
   requests from the model are denied outright.
