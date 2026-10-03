@@ -76805,6 +76805,8 @@
     const anchors = [];
     document.querySelectorAll('.conversations-view').forEach((view) => {
       if (!view.scrollTop) return;
+      // Pinned to the bottom stays pinned, whatever the new height is.
+      if (view.scrollHeight - view.scrollTop - view.clientHeight < 8) { anchors.push({ view, bottom: true }); return; }
       const vr = view.getBoundingClientRect();
       const el = Array.from(view.querySelectorAll('.event[data-jsonl-line]'))
         .find(n => n.getBoundingClientRect().bottom > vr.top + 1);
@@ -76814,6 +76816,7 @@
     // node. If the anchor message is folded away (thinking, tool runs), use
     // the nearest line that is still rendered.
     const restoreAnchors = () => anchors.forEach(({ view, line, off }) => {
+      if (!line && anchors.find(a => a.view === view && a.bottom)) { view.scrollTop = view.scrollHeight; return; }
       let best = null, bestD = Infinity, exact = null;
       view.querySelectorAll('.event[data-jsonl-line]').forEach((n) => {
         const h = n.getBoundingClientRect().height;
