@@ -416,8 +416,9 @@ def byok_estimate_cost(model, tokens_in, tokens_out):
     )
 
 
-def byok_record_usage(*, session_id=None, engine, model, key_profile=None, tokens_in=0, tokens_out=0, cost_usd=None):
-    provider = byok_resolve_virtual_provider(model)
+def byok_record_usage(*, session_id=None, engine, model, key_profile=None, tokens_in=0, tokens_out=0, cost_usd=None, provider=None, extra=None):
+    if provider is None:
+        provider = byok_resolve_virtual_provider(model)
     if cost_usd is None:
         cost_usd = byok_estimate_cost(model, tokens_in, tokens_out)
     entry = {
@@ -431,6 +432,11 @@ def byok_record_usage(*, session_id=None, engine, model, key_profile=None, token
         "tokens_out": int(tokens_out or 0),
         "cost_usd": cost_usd,
     }
+    if isinstance(extra, dict):
+        # Free-form context (e.g. voice-session duration); callers are
+        # responsible for keeping secrets out of it.
+        for k, v in extra.items():
+            entry.setdefault(str(k), v)
     try:
         _state_dir().mkdir(parents=True, exist_ok=True)
         with open(_usage_log_path(), "a", encoding="utf-8") as fh:

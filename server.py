@@ -25958,6 +25958,10 @@ _adopt_ccc_module("watchtower_msg")
 
 _adopt_ccc_module("pkood")
 _adopt_ccc_module("byok")
+# Realtime voice mode (experimental Codex app-server realtime lane):
+# one session at a time, WebRTC audio browser<->voice-host, CCC relays
+# only SDP + JSON-RPC events. See ccc_server/realtime_voice.py.
+_adopt_ccc_module("realtime_voice")
 _adopt_ccc_module("repo_guess")
 
 _adopt_ccc_module("github_issues")
@@ -26410,6 +26414,30 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/voice-focus":
             # Current remote-focus target (set via POST). O(1) in-memory poll.
             self.send_json(dict(_VOICE_FOCUS))
+        elif path == "/api/voice/status":
+            # Realtime voice session snapshot (idle when none active). O(1).
+            self.send_json(voice_status())
+        elif path == "/api/voice/voices":
+            # Realtime voice catalog — live listVoices when a session has run,
+            # else the schema-derived fallback. O(1).
+            self.send_json(voice_catalog())
+        elif path == "/api/voice/config":
+            self.send_json({"ok": True, "config": voice_config_load(),
+                            "openai_profiles": _openai_profiles()})
+        elif path == "/api/voice/events":
+            # SSE stream of one voice session's transcript/state/action
+            # events. Bounded replay + Condition-wait, same shape as the ACP
+            # delta streams.
+            qs = urllib.parse.parse_qs(parsed.query)
+            sid = (qs.get("session_id", [""])[0] or "").strip()
+            try:
+                after = int((qs.get("after", ["0"])[0] or "0"))
+            except ValueError:
+                after = 0
+            if not sid:
+                self.send_json({"ok": False, "error": "missing session_id"}, 400)
+            else:
+                self._stream_voice_events(sid, after)
         elif path == "/api/fs/list":
             # Read-only subdirectory listing for the in-browser folder picker
             # (the headless-Linux fallback when no native GUI chooser exists).
@@ -30232,10 +30260,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     item = _aa.store().confirm(aid, str(data.get("token") or ""),
                                                _aa.make_executor(base))
                     _log_activity("assistant", "ACTION", f"kind={item['kind']} id={aid} status={item['status']}")
+                    notify_action_result(item)  # tell a live voice session the outcome
                     self.send_json({"ok": item["status"] == "done", "action": item})
                     return
                 if verb == "dismiss":
-                    self.send_json({"ok": True, "action": _aa.store().dismiss(aid, str(data.get("token") or ""))})
+                    item = _aa.store().dismiss(aid, str(data.get("token") or ""))
+                    notify_action_result(item)  # tell a live voice session the outcome
+                    self.send_json({"ok": True, "action": item})
                     return
                 self.send_json({"ok": False, "error": "unknown action route"}, 404)
             except PermissionError as e:
@@ -30286,6 +30317,70 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True, **_set_voice_focus(sid)})
             except Exception as e:
                 self.send_json({"error": str(e)}, 400)
+            return
+
+        # --- Realtime voice (Codex app-server realtime lane) ---------------
+        # Same-origin was enforced at the top of do_POST. /api/voice/* never
+        # echoes secrets: the OpenAI key lives only in the child env, and the
+        # SDP blobs are signaling data, not credentials.
+        if path == "/api/voice/start":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                if content_len > 256 * 1024:
+                    self.send_json({"ok": False, "error": "body too large",
+                                    "code": "voice_bad_request"}, 413)
+                    return
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+                if not isinstance(data, dict):
+                    raise ValueError("expected object")
+            except (ValueError, OSError):
+                self.send_json({"ok": False, "error": "invalid JSON body",
+                                "code": "voice_bad_request"}, 400)
+                return
+            result, status = voice_start(data)
+            self.send_json(result, status)
+            return
+
+        if path == "/api/voice/stop":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+                if not isinstance(data, dict):
+                    data = {}
+            except (ValueError, OSError):
+                data = {}
+            result, status = voice_stop((data.get("session_id") or "").strip() or None,
+                                        reason=str(data.get("reason") or "user")[:64])
+            self.send_json(result, status)
+            return
+
+        if path == "/api/voice/heartbeat":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+                if not isinstance(data, dict):
+                    data = {}
+            except (ValueError, OSError):
+                data = {}
+            result, status = voice_heartbeat((data.get("session_id") or "").strip())
+            self.send_json(result, status)
+            return
+
+        if path == "/api/voice/config":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(content_len) if content_len else b""
+                data = json.loads(body) if body else {}
+                if not isinstance(data, dict):
+                    raise ValueError("expected object")
+            except (ValueError, OSError):
+                self.send_json({"ok": False, "error": "invalid JSON body"}, 400)
+                return
+            _cfg_res = voice_config_save(data)
+            self.send_json(_cfg_res, 200 if _cfg_res.get("ok") else 400)
             return
 
         if path in (
@@ -37221,6 +37316,51 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
+    def _stream_voice_events(self, session_id, after=0):
+        """SSE for one realtime voice session: transcript deltas/done, state
+        changes, pending-action cards, errors, close. Replays the session's
+        bounded buffer from `after`, then waits on its Condition — the same
+        fan-out shape as _stream_acp_deltas, one stream per open voice panel.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        last_keepalive = time.time()
+        seq = after
+        try:
+            while True:
+                events, seq, alive = voice_events_wait(session_id, seq, timeout=15.0)
+                if events:
+                    try:
+                        self.wfile.write(
+                            f"data: {json.dumps({'events': events})}\n\n".encode()
+                        )
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+                    last_keepalive = time.time()
+                    continue
+                if not alive:
+                    # Session ended and the buffer is drained — close cleanly
+                    # so the browser can tear down without retry storms.
+                    try:
+                        self.wfile.write(b"event: end\ndata: {}\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+                    break
+                if time.time() - last_keepalive >= 5:
+                    try:
+                        self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+                    last_keepalive = time.time()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _stream_worker_acp_deltas(self, session_id, initial, harness="kimi"):
         """SSE bridge for ACP deltas owned by the persistent worker."""
         self.send_response(200)
@@ -40936,6 +41076,10 @@ def main():
         except Exception:
             pass
         try:
+            voice_shutdown()
+        except Exception:
+            pass
+        try:
             _ccc_peer_server_stop()
         except Exception:
             pass
@@ -41058,6 +41202,10 @@ def main():
         print("\nStopped.")
         try:
             _unregister_self()
+        except Exception:
+            pass
+        try:
+            voice_shutdown()
         except Exception:
             pass
         try:
