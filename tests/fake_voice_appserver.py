@@ -12,7 +12,7 @@ client sent (never any key material — the fake echoes only a boolean).
 
 Behavior knobs (env):
   FAKE_VOICE_MODE:
-    ""                 normal flow
+    ""                 normal flow (webrtc succeeds, ws fails w/o key)
     crash_after_realtime  exit(2) right after realtime/start succeeds
     malformed          emit one non-JSON line mid-stream, keep going
     call_tool          after realtime started, issue item/tool/call
@@ -20,12 +20,16 @@ Behavior knobs (env):
     propose_action     after realtime started, issue item/tool/call
                        ccc_propose_action (inject)
     approval_probe     after realtime started, issue an approval request
-                       and echo the client's decision as test/deny_echo
-    no_sdp             never send the sdp notification (start times out)
+                       and echo the client's decision as a client_response log
+    sideband_hang      webrtc: never send the sdp notification (timeout path)
+    sideband_error     webrtc: emit thread/realtime/error instead of sdp
   FAKE_VOICE_LOG       file to append seen method names to
-  FAKE_OPENAI_SENTINEL if set, the env var value expected in
-                       OPENAI_API_KEY (reported as has_key boolean only)
+
+The fake mirrors the real auth gate: `transport:{type:"websocket"}` fails
+with "realtime conversation requires API key auth" unless the child env
+carries OPENAI_API_KEY. `webrtc` never needs a key (subscription path).
 """
+import base64
 import json
 import os
 import sys
@@ -33,6 +37,7 @@ import sys
 MODE = os.environ.get("FAKE_VOICE_MODE", "")
 LOG = os.environ.get("FAKE_VOICE_LOG", "")
 THREAD_ID = "thr_fake_voice_1"
+HAS_KEY = bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def _log(line):
@@ -58,11 +63,23 @@ def respond(rid, result=None, error=None):
     send(out)
 
 
-def start_realtime():
+def start_realtime(transport):
     send({"method": "thread/realtime/started", "params": {"version": "v3"}})
-    if MODE != "no_sdp":
+    if transport == "webrtc":
+        if MODE == "sideband_hang":
+            return  # created the call, sideband join silently fails (issue #35094)
+        if MODE == "sideband_error":
+            send({"method": "thread/realtime/error",
+                  "params": {"message": "sideband join failed: 404 call_id_not_found"}})
+            return
         send({"method": "thread/realtime/sdp",
               "params": {"sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fake\r\nt=0 0\r\n"}})
+    else:
+        # Websocket transport streams audio back over the JSON-RPC lane.
+        chunk = base64.b64encode(b"\x00\x01" * 1200).decode()
+        send({"method": "thread/realtime/outputAudio/delta",
+              "params": {"audio": {"data": chunk, "sampleRate": 24000,
+                                   "numChannels": 1, "samplesPerChannel": 1200}}})
 
 
 def post_start():
@@ -90,8 +107,7 @@ def post_start():
 
 
 def main():
-    # Report presence of the injected key as a boolean — never the value.
-    has_key = bool(os.environ.get("OPENAI_API_KEY"))
+    _log("has_openai_key:" + str(HAS_KEY).lower())
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -107,8 +123,7 @@ def main():
         _log(str(method or ("response:" + str(rid))))
 
         if method == "initialize":
-            respond(rid, {"has_openai_key": has_key,
-                          "serverInfo": {"name": "fake-appserver", "version": "0"}})
+            respond(rid, {"serverInfo": {"name": "fake-appserver", "version": "0"}})
         elif method == "initialized":
             pass
         elif method == "thread/realtime/listVoices":
@@ -118,17 +133,25 @@ def main():
             respond(rid, {"thread": {"id": THREAD_ID}})
         elif method == "thread/realtime/start":
             params = msg.get("params") or {}
+            transport = ((params.get("transport") or {}).get("type")) or "websocket"
             # Surface params for the test to inspect via the log file.
             _log("rt_params:" + json.dumps({
                 "version": params.get("version"),
                 "voice": params.get("voice"),
                 "outputModality": params.get("outputModality"),
-                "transport_type": ((params.get("transport") or {}).get("type")),
+                "transport_type": transport,
                 "has_initialItems": bool(params.get("initialItems")),
             }))
+            if transport == "websocket" and not HAS_KEY:
+                # The real API-key gate: WS transport demands key auth.
+                respond(rid, error={"code": -32000,
+                                    "message": "realtime conversation requires API key auth"})
+                continue
             respond(rid, {"realtimeSessionId": "rts_fake"})
-            start_realtime()
+            start_realtime(transport)
             post_start()
+        elif method == "thread/realtime/appendAudio":
+            respond(rid, {})
         elif method == "thread/realtime/appendSpeech":
             respond(rid, {})
             # Simulate the spoken confirmation outcome.
@@ -140,8 +163,6 @@ def main():
             respond(rid, {})
             send({"method": "thread/realtime/closed", "params": {"reason": "user"}})
         elif method == "item/tool/call":
-            # Echo the client's tool RESULT back as a notification the test
-            # can read off the SSE fan-out.
             respond(rid, {})
         elif method in ("execCommandApproval", "applyPatchApproval",
                         "item/commandExecution/requestApproval",
@@ -164,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

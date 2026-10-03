@@ -60,9 +60,11 @@ def voice_env(tmp_path, monkeypatch):
 
     # Fast watchdog knobs: 0.35s idle, ~0.5s max, 0.4s heartbeat loss.
     cfg = {"voice": "marin", "profile": "", "max_minutes": 15,
-           "idle_seconds": 120, "save_transcripts": False}
+           "idle_seconds": 120, "save_transcripts": False,
+           "allow_api_fallback": True}
     monkeypatch.setattr(rv, "voice_config_load", lambda: dict(cfg))
     monkeypatch.setattr(rv, "HEARTBEAT_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(rv, "SDP_ANSWER_TIMEOUT_SECONDS", 0.4)
 
     yield Simple(cfg=cfg, log=log, usage=usage_calls)
     # Never leave a child alive between tests.
@@ -102,20 +104,24 @@ def _events(sid, after=0, timeout=0.5):
     return rv.voice_events_wait(sid, after, timeout=timeout)
 
 
-def test_start_happy_path_env_key_only(voice_env):
+def test_start_happy_path_subscription(voice_env):
+    """Default start = WebRTC on the ChatGPT subscription: the child env is
+    stripped of OPENAI_API_KEY even though a BYOK key exists for fallback."""
     res, status = _start()
     assert status == 200
     sid = res["session_id"]
     assert res["sdp_answer"].startswith("v=0")
     assert res["voice"] == "marin"
-    assert res["profile"] == "TestProfile"
+    assert res["transport"] == "webrtc"
+    assert res["billing"] == "subscription"
+    assert res["profile"] is None
 
     sess = rv._session_by_id(sid)
     assert sess is not None
-    # Key rode in the child's env, never on argv (visible in `ps`).
+    # The key is absent from argv and from the child's env entirely —
+    # billing must never silently switch to the API key.
     argv_str = " ".join(sess.proc.args)
     assert SENTINEL_KEY not in argv_str
-    # The fake reported seeing a key in its env.
     assert sess.proc.poll() is None
     # No API response carries the key.
     assert SENTINEL_KEY not in json.dumps(res)
@@ -126,8 +132,96 @@ def test_start_happy_path_env_key_only(voice_env):
     log = voice_env.log.read_text()
     assert "initialize" in log and "thread/start" in log
     assert "thread/realtime/start" in log
+    assert '"transport_type": "webrtc"' in log
+    # The fake saw NO key in its environment.
+    assert "has_openai_key:false" in log
+    assert "has_openai_key:true" not in log
     assert SENTINEL_KEY not in log
     assert "has_initialItems\": true" in log
+
+
+def test_subscription_works_without_key(voice_env, monkeypatch):
+    """No BYOK key at all: auto still succeeds on the subscription path."""
+    monkeypatch.setattr(server, "byok_get_key", lambda p, pr: None)
+    monkeypatch.setattr(server, "byok_list_profiles",
+                        lambda: [{"name": "Empty", "providers": []}])
+    res, status = _start()
+    assert status == 200
+    assert res["transport"] == "webrtc"
+    assert res["billing"] == "subscription"
+
+
+def test_websocket_requires_key(voice_env, monkeypatch):
+    """Explicit websocket start without a key -> typed voice_no_openai_key."""
+    monkeypatch.setattr(server, "byok_get_key", lambda p, pr: None)
+    monkeypatch.setattr(server, "byok_list_profiles",
+                        lambda: [{"name": "Empty", "providers": []}])
+    res, status = _start(transport="websocket")
+    assert status == 400
+    assert res["code"] == "voice_no_openai_key"
+    assert SENTINEL_KEY not in json.dumps(res)
+
+
+def test_sideband_hang_no_key_times_out(voice_env, monkeypatch):
+    """Issue #35094 shape: sdp never arrives. With no BYOK key there is no
+    fallback — a typed voice_connect_timeout (not a spin of retries)."""
+    monkeypatch.setenv("FAKE_VOICE_MODE", "sideband_hang")
+    monkeypatch.setattr(server, "byok_get_key", lambda p, pr: None)
+    monkeypatch.setattr(server, "byok_list_profiles",
+                        lambda: [{"name": "Empty", "providers": []}])
+    res, status = _start()
+    assert status == 502
+    assert res["code"] == "voice_connect_timeout"
+    assert not rv.voice_status()["active"]
+
+
+def test_sideband_error_no_key(voice_env, monkeypatch):
+    monkeypatch.setenv("FAKE_VOICE_MODE", "sideband_error")
+    monkeypatch.setattr(server, "byok_get_key", lambda p, pr: None)
+    monkeypatch.setattr(server, "byok_list_profiles",
+                        lambda: [{"name": "Empty", "providers": []}])
+    res, status = _start()
+    assert status == 502
+    assert res["code"] == "voice_sideband_failed"
+
+
+def test_sideband_hang_falls_back_to_websocket(voice_env, monkeypatch):
+    """WebRTC failed but a BYOK key exists: respawn with the key in the
+    child env and switch to the websocket (paid) transport."""
+    monkeypatch.setenv("FAKE_VOICE_MODE", "sideband_hang")
+    res, status = _start()
+    assert status == 200
+    sid = res["session_id"]
+    assert res["transport"] == "websocket"
+    assert res["billing"] == "api_key"
+    assert res["profile"] == "TestProfile"
+    assert res["sdp_answer"] is None
+    log = voice_env.log.read_text()
+    # First child: no key (stripped). Second child: key injected.
+    assert "has_openai_key:false" in log
+    assert "has_openai_key:true" in log
+    assert '"transport_type": "websocket"' in log
+    assert SENTINEL_KEY not in log
+    # The ws fallback's outputAudio/delta becomes a volatile audio event.
+    ev = _wait(lambda: [e for e in rv.voice_events_wait(sid, 0, 0.1)[0]
+                        if e["type"] == "audio"], timeout=5)
+    assert ev and ev[-1]["data"]["sampleRate"] == 24000
+
+
+def test_audio_append_ws_path(voice_env, monkeypatch):
+    monkeypatch.setenv("FAKE_VOICE_MODE", "sideband_hang")
+    res, _ = _start()
+    sid = res["session_id"]
+    res2, status2 = rv.voice_audio_append(sid, "AAEC", 24000, 1)
+    assert status2 == 200 and res2["ok"]
+    assert _wait(lambda: "appendAudio" in voice_env.log.read_text(), 5)
+
+
+def test_audio_append_wrong_transport_rejected(voice_env):
+    res, _ = _start()
+    sid = res["session_id"]
+    res2, status2 = rv.voice_audio_append(sid, "AAEC", 24000, 1)
+    assert status2 == 400  # webrtc session — audio flows direct to voice host
 
 
 def test_second_start_is_409(voice_env):
@@ -136,16 +230,6 @@ def test_second_start_is_409(voice_env):
     res2, status2 = _start()
     assert status2 == 409
     assert res2["code"] == "voice_busy"
-
-
-def test_missing_key_typed_error(voice_env, monkeypatch):
-    monkeypatch.setattr(server, "byok_get_key", lambda p, pr: None)
-    monkeypatch.setattr(server, "byok_list_profiles",
-                        lambda: [{"name": "Empty", "providers": []}])
-    res, status = _start()
-    assert status == 400
-    assert res["code"] == "voice_no_openai_key"
-    assert SENTINEL_KEY not in json.dumps(res)
 
 
 def test_bad_sdp_rejected(voice_env):
@@ -158,15 +242,18 @@ def test_stop_kills_child_and_closes(voice_env):
     res, _ = _start()
     sid = _sess_id((res, 200))
     sess = rv._session_by_id(sid)
+    proc = sess.proc  # _kill_proc clears sess.proc before reaping
     res2, status2 = rv.voice_stop(sid)
     assert status2 == 200 and res2["stopped"] is True
-    assert _wait(lambda: sess.proc.poll() is not None, timeout=6), "child survived stop"
+    assert _wait(lambda: proc.poll() is not None, timeout=6), "child survived stop"
     d = rv.voice_status()
     assert d["active"] is False
-    # Usage ledger recorded the session, provider openai, no key material.
+    # Usage ledger recorded the session. Subscription path: duration only,
+    # no provider charge attached.
     assert voice_env.usage, "byok_record_usage was not called"
     u = voice_env.usage[-1]
-    assert u["provider"] == "openai"
+    assert u["provider"] is None
+    assert u["extra"]["billing"] == "subscription"
     assert u["extra"]["duration_s"] >= 0
     assert SENTINEL_KEY not in json.dumps(u)
 
@@ -252,7 +339,10 @@ def test_transcript_events(voice_env):
     assert sess.transcript and sess.transcript[-1]["role"] == "assistant"
 
 
-def test_key_redaction_in_errors(voice_env):
+def test_key_redaction_in_errors(voice_env, monkeypatch):
+    # Only the websocket (API key) path loads a key — force the fallback so
+    # the session actually holds one to scrub.
+    monkeypatch.setenv("FAKE_VOICE_MODE", "sideband_hang")
     res, _ = _start()
     sid = _sess_id((res, 200))
     sess = rv._session_by_id(sid)

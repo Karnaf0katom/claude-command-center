@@ -60,8 +60,14 @@ DEFAULT_IDLE_SECONDS = 120
 HEARTBEAT_TIMEOUT_SECONDS = 120.0
 START_TIMEOUT_SECONDS = 60.0
 CALL_TIMEOUT_SECONDS = 30.0
+# WebRTC signaling deadline: issue #35094-style failures can leave the
+# app-server silent (no sdp, no error) after the call is created.
+SDP_ANSWER_TIMEOUT_SECONDS = 20.0
 EVENT_BUFFER_MAX = 600
 TRANSCRIPT_MAX_ITEMS = 400
+# Volatile SSE events (websocket-path audio chunks) are dropped from replay
+# if they sat in the buffer this long — stale audio is worse than a gap.
+VOLATILE_EVENT_MAX_AGE_S = 1.5
 
 # Schema-derived catalog (codex app-server generate-json-schema --experimental,
 # codex-cli 0.160.0). Refreshed from live thread/realtime/listVoices on each
@@ -120,6 +126,7 @@ def _default_config():
         "max_minutes": DEFAULT_MAX_MINUTES,
         "idle_seconds": DEFAULT_IDLE_SECONDS,
         "save_transcripts": False,
+        "allow_api_fallback": True,
     }
 
 
@@ -150,6 +157,7 @@ def _config_sanitize(cfg):
     except (TypeError, ValueError):
         out["idle_seconds"] = DEFAULT_IDLE_SECONDS
     out["save_transcripts"] = bool(cfg.get("save_transcripts"))
+    out["allow_api_fallback"] = bool(cfg.get("allow_api_fallback", True))
     return out
 
 
@@ -334,6 +342,8 @@ class VoiceSession:
         self.proc = None
         self.thread_id = None
         self.realtime_version = None
+        self.transport = None        # "webrtc" (subscription) | "websocket" (api key)
+        self.billing = None          # "subscription" | "api_key"
         self.started_at = time.time()
         self.closed_at = None
         self.last_activity = time.monotonic()
@@ -351,19 +361,24 @@ class VoiceSession:
         self._next_id = 0
         self._sdp_event = threading.Event()
         self._sdp_answer = None
+        self._connect_error = None   # realtime/error seen while connecting
         self._stderr_tail = deque(maxlen=40)
         self._closed_once = False
         self._close_lock = threading.Lock()   # atomic _closed_once check-and-set
         self._close_done = threading.Event()  # bookkeeping fully finished
         self._key = None              # held only to redact accidents; never read
         self._watchdog_stop = threading.Event()
+        self._watchdog_started = False  # respawns share one watchdog
 
     # -- events ---------------------------------------------------------
 
-    def emit(self, etype, data):
+    def emit(self, etype, data, volatile=False):
         with self.cond:
             self.seq += 1
-            self.events.append({"seq": self.seq, "type": etype, "data": data})
+            ev = {"seq": self.seq, "type": etype, "data": data, "ts": time.time()}
+            if volatile:
+                ev["volatile"] = True
+            self.events.append(ev)
             self.cond.notify_all()
 
     def set_state(self, state, detail=""):
@@ -374,21 +389,29 @@ class VoiceSession:
     def touch(self):
         self.last_activity = time.monotonic()
 
+    def _fresh_events(self, seq):
+        """Buffered events after `seq`, with stale volatile ones dropped:
+        an audio chunk older than a second and a half would replay as noise."""
+        now = time.time()
+        return [dict(e) for e in self.events
+                if e["seq"] > seq
+                and not (e.get("volatile") and now - e["ts"] > VOLATILE_EVENT_MAX_AGE_S)]
+
     def events_since(self, seq):
         with self.cond:
-            return [dict(e) for e in self.events if e["seq"] > seq]
+            return self._fresh_events(seq)
 
     def wait_events(self, seq, timeout=15.0):
         deadline = time.monotonic() + timeout
         with self.cond:
             while True:
-                pending = [dict(e) for e in self.events if e["seq"] > seq]
+                pending = self._fresh_events(seq)
                 if pending:
                     return pending
                 left = deadline - time.monotonic()
                 if left <= 0 or self.state in ("closed", "error"):
                     # Flush a final state event so waiters see the close.
-                    return [dict(e) for e in self.events if e["seq"] > seq]
+                    return self._fresh_events(seq)
                 self.cond.wait(min(left, 5.0))
 
     # -- JSON-RPC -------------------------------------------------------
@@ -426,12 +449,18 @@ class VoiceSession:
 
     # -- child lifecycle ------------------------------------------------
 
-    def spawn(self, codex_bin, key, scratch):
+    def spawn(self, codex_bin, key, scratch, extra_argv=()):
         env = dict(os.environ)
-        env["OPENAI_API_KEY"] = key
-        self._key = key  # retained for redaction only
+        if key:
+            env["OPENAI_API_KEY"] = key
+            self._key = key  # retained for redaction only
+        else:
+            # Subscription path: the child must NOT see a key — if one leaked
+            # into CCC's env, the realtime lane would silently bill it.
+            env.pop("OPENAI_API_KEY", None)
+            self._key = None
         self.proc = subprocess.Popen(
-            [codex_bin, "app-server"],
+            [codex_bin, "app-server", *extra_argv],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -441,7 +470,9 @@ class VoiceSession:
         )
         threading.Thread(target=self._reader, name="voice-reader", daemon=True).start()
         threading.Thread(target=self._stderr_pump, name="voice-stderr", daemon=True).start()
-        threading.Thread(target=self._watchdog, name="voice-watchdog", daemon=True).start()
+        if not self._watchdog_started:
+            self._watchdog_started = True
+            threading.Thread(target=self._watchdog, name="voice-watchdog", daemon=True).start()
 
     def _stderr_pump(self):
         proc = self.proc
@@ -481,9 +512,14 @@ class VoiceSession:
         except (OSError, ValueError):
             pass
         finally:
-            self._child_exited()
+            self._child_exited(proc)
 
-    def _child_exited(self):
+    def _child_exited(self, proc):
+        # Respawn (WebRTC -> websocket fallback, --enable retry) kills the
+        # old child; its reader hitting EOF must not close the session that
+        # just spawned a replacement. Only the CURRENT child's exit counts.
+        if proc is not self.proc:
+            return
         if self.state in ("closed", "error"):
             return
         tail = "; ".join(list(self._stderr_tail)[-3:])[:300]
@@ -533,12 +569,25 @@ class VoiceSession:
             rate = audio.get("sampleRate") or 24000
             if rate:
                 self.audio_ms += int(1000 * samples / rate)
+            if self.transport == "websocket" and audio.get("data"):
+                # Only the websocket path carries audio through CCC — forward
+                # the chunk for the browser to play. Volatile: drop on replay.
+                self.emit("audio", {
+                    "data": audio["data"],
+                    "sampleRate": audio.get("sampleRate") or 24000,
+                    "numChannels": audio.get("numChannels") or 1,
+                }, volatile=True)
             if self.state == "listening":
                 self.set_state("speaking")
             self.touch()
             return
         if method == "thread/realtime/error":
             msg = _redact(str(params.get("message") or "realtime error")[:400], self._key)
+            if self._sdp_answer is None:
+                if self._connect_error is None:
+                    self._connect_error = msg
+                # Wake the SDP waiter now instead of burning the full timeout.
+                self._sdp_event.set()
             self.emit("error", {"message": msg})
             self.touch()
             return
@@ -786,6 +835,9 @@ class VoiceSession:
         proc = self.proc
         if proc is None:
             return
+        # Clear first so the dead child's reader-thread exit cannot race a
+        # respawn into closing the whole session (_child_exited identity check).
+        self.proc = None
         try:
             if proc.poll() is None:
                 try:
@@ -843,7 +895,9 @@ class VoiceSession:
                     pass
             except OSError:
                 pass
-        # Usage ledger: duration + provider openai, zero guessed tokens.
+        # Usage ledger: duration + audio for both paths. Dollar cost only
+        # applies to the api_key fallback — the subscription path logs
+        # duration with no provider charge attached.
         try:
             _core.byok_record_usage(
                 session_id=self.id,
@@ -853,11 +907,13 @@ class VoiceSession:
                 tokens_in=0,
                 tokens_out=0,
                 cost_usd=None,
-                provider="openai",
+                provider="openai" if self.billing == "api_key" else None,
                 extra={
                     "duration_s": round(dur, 1),
                     "audio_ms": self.audio_ms,
                     "codex_tokens": self.codex_tokens,
+                    "billing": self.billing,
+                    "transport": self.transport,
                     "reason": self.reason,
                 },
             )
@@ -884,6 +940,8 @@ class VoiceSession:
             "error": self.error,
             "reason": self.reason,
             "realtime_version": self.realtime_version,
+            "transport": self.transport,
+            "billing": self.billing,
             "pending_actions": [dict(a) for a in self.pending_actions.values()],
         }
 
@@ -945,16 +1003,74 @@ def voice_heartbeat(session_id):
     return {"ok": True}, 200
 
 
+def voice_audio_append(session_id, data, sample_rate, num_channels):
+    """Mic chunk for the websocket-transport fallback. The browser posts
+    base64 PCM16; CCC forwards it as thread/realtime/appendAudio."""
+    sess = _session_or_none()
+    if not sess or sess.id != session_id or sess.state in ("closed", "error"):
+        return {"ok": False, "error": "no such voice session",
+                "code": "voice_no_session"}, 404
+    if sess.transport != "websocket":
+        return {"ok": False, "error": "session is not on the websocket transport",
+                "code": "voice_bad_request"}, 400
+    if not isinstance(data, str) or not data or len(data) > 1024 * 1024:
+        return {"ok": False, "error": "invalid audio data",
+                "code": "voice_bad_request"}, 400
+    try:
+        rate = int(sample_rate) if sample_rate else 24000
+        chans = int(num_channels) if num_channels else 1
+    except (TypeError, ValueError):
+        rate, chans = 24000, 1
+    try:
+        import base64
+        samples = len(base64.b64decode(data)) // 2 // max(1, chans)
+    except Exception:
+        samples = 0
+    if not sess.thread_id:
+        return {"ok": False, "error": "realtime not started",
+                "code": "voice_no_session"}, 404
+    _result, err = sess.call("thread/realtime/appendAudio", {
+        "threadId": sess.thread_id,
+        "audio": {
+            "data": data,
+            "sampleRate": rate,
+            "numChannels": chans,
+            "samplesPerChannel": samples or None,
+        },
+    }, timeout=10)
+    if err:
+        return {"ok": False, "error": _redact(str(err)[:200], sess._key),
+                "code": "voice_audio_failed"}, 502
+    sess.touch()  # user is speaking — counts as activity for the idle timer
+    return {"ok": True}, 200
+
+
+class _VoiceStartError(Exception):
+    def __init__(self, code, message, status=502):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+class _MethodNotFound(Exception):
+    pass
+
+
 def voice_start(params):
     """Validate, spawn, negotiate. Returns (response_dict, http_status)."""
     global _SESSION
     params = params if isinstance(params, dict) else {}
-    sdp_offer = params.get("sdp_offer")
-    if not isinstance(sdp_offer, str) or "v=0" not in sdp_offer[:200]:
+    transport_req = str(params.get("transport") or "auto").strip().lower()
+    if transport_req not in ("auto", "webrtc", "websocket"):
         return {"ok": False, "code": "voice_bad_request",
-                "error": "sdp_offer (a WebRTC SDP offer string) is required"}, 400
-    if len(sdp_offer) > 65536:
-        return {"ok": False, "code": "voice_bad_request", "error": "sdp_offer too large"}, 400
+                "error": "transport must be auto, webrtc, or websocket"}, 400
+    sdp_offer = params.get("sdp_offer")
+    if transport_req != "websocket":
+        if not isinstance(sdp_offer, str) or "v=0" not in sdp_offer[:200]:
+            return {"ok": False, "code": "voice_bad_request",
+                    "error": "sdp_offer (a WebRTC SDP offer string) is required"}, 400
+        if len(sdp_offer) > 65536:
+            return {"ok": False, "code": "voice_bad_request", "error": "sdp_offer too large"}, 400
 
     cfg = voice_config_load()
     voice = str(params.get("voice") or cfg["voice"] or DEFAULT_VOICE).strip().lower()
@@ -971,19 +1087,31 @@ def voice_start(params):
         return {"ok": False, "code": "voice_no_codex",
                 "error": codex_info.get("reason") or "Codex CLI not found"}, 503
 
-    key, used_profile, err = _resolve_openai_key(profile)
-    if err:
-        return err, 400
+    # The key is only fetched when a websocket (paid) attempt can happen —
+    # the subscription WebRTC path never touches BYOK at all.
+    want_paid = transport_req == "websocket" or (
+        transport_req == "auto" and cfg.get("allow_api_fallback"))
+    key = used_profile = None
+    if want_paid:
+        key, used_profile, kerr = _resolve_openai_key(profile)
+        if transport_req == "websocket" and kerr:
+            return kerr, 400
 
     with _MGR_LOCK:
         if _SESSION is not None and _SESSION.state not in ("closed", "error"):
             return {"ok": False, "code": "voice_busy",
                     "error": "a voice session is already running"}, 409
-        sess = VoiceSession("voice_" + secrets.token_hex(4), voice, used_profile)
+        sess = VoiceSession("voice_" + secrets.token_hex(4), voice, None)
         _SESSION = sess
 
     try:
-        _bootstrap(sess, codex_info["bin"], key, sdp_offer)
+        _bootstrap(sess, codex_info["bin"], transport_req, key, used_profile,
+                   sdp_offer, cfg)
+    except _VoiceStartError as e:
+        sess.error = _redact(str(e)[:300], key)
+        sess.close(reason="start_failed")
+        return {"ok": False, "code": e.code,
+                "error": sess.error or str(e)}, e.status
     except Exception as e:
         sess.error = _redact(str(e)[:300], key)
         sess.close(reason="start_failed")
@@ -992,24 +1120,86 @@ def voice_start(params):
 
     return {"ok": True, "session_id": sess.id, "state": sess.state,
             "sdp_answer": sess._sdp_answer, "voice": sess.voice,
-            "profile": used_profile}, 200
+            "profile": sess.profile, "transport": sess.transport,
+            "billing": sess.billing}, 200
 
 
-def _bootstrap(sess, codex_bin, key, sdp_offer):
+def _bootstrap(sess, codex_bin, transport_req, key, used_profile, sdp_offer, cfg):
+    """Try transports in order: WebRTC on the ChatGPT subscription first,
+    then the paid websocket path (child env gets the BYOK key) only when
+    WebRTC failed and a key exists."""
     VOICE_SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
-    sess.spawn(codex_bin, key, str(VOICE_SCRATCH_DIR))
+    plan = []
+    if transport_req in ("auto", "webrtc"):
+        plan.append(("webrtc", None, sdp_offer))
+    if key and transport_req in ("auto", "websocket"):
+        if transport_req == "websocket" or cfg.get("allow_api_fallback", True):
+            plan.append(("websocket", key, None))
+    if not plan:
+        raise _VoiceStartError("voice_bad_request", "no viable voice transport", 400)
+
+    last_err = None
+    for transport, env_key, offer in plan:
+        try:
+            _bootstrap_once(sess, codex_bin, transport, env_key, offer)
+            sess.transport = transport
+            sess.billing = "api_key" if env_key else "subscription"
+            sess.profile = used_profile if env_key else None
+            # A failed first attempt (e.g. the WebRTC sideband timeout) can
+            # outlast the heartbeat window on short test budgets; the browser
+            # heartbeats only after start returns, so reset the liveness clock.
+            sess.heartbeat()
+            sess.touch()
+            return
+        except _VoiceStartError as e:
+            last_err = e
+        except Exception as e:
+            last_err = e
+    code = getattr(last_err, "code", "voice_start_failed")
+    status = getattr(last_err, "status", 502)
+    raise _VoiceStartError(code, str(last_err)[:300] or "voice failed to start", status)
+
+
+def _bootstrap_once(sess, codex_bin, transport, key, sdp_offer):
+    """One spawn+negotiate attempt. Retries once with --enable
+    realtime_conversation if the app-server build gates the feature."""
+    last = None
+    for extra_argv in ((), ("--enable", "realtime_conversation")):
+        try:
+            _bootstrap_child(sess, codex_bin, transport, key, sdp_offer, extra_argv)
+            return
+        except _MethodNotFound as e:
+            last = e
+            continue
+    if isinstance(last, _VoiceStartError):
+        raise last
+    if last is not None:
+        raise _VoiceStartError("voice_start_failed", str(last) or "realtime unavailable")
+
+
+def _bootstrap_child(sess, codex_bin, transport, key, sdp_offer, extra_argv):
+    sess._kill_proc()
+    sess.thread_id = None
+    sess.transport = transport   # outputAudio/delta routing needs it at once
+    sess._sdp_event.clear()
+    sess._connect_error = None
+    sess.spawn(codex_bin, key, str(VOICE_SCRATCH_DIR), extra_argv=extra_argv)
 
     result, error = sess.call("initialize", {
         "clientInfo": {"name": "claude-command-center", "version": str(_core.__version__)},
         "capabilities": {"experimentalApi": True},
     }, timeout=START_TIMEOUT_SECONDS)
     if error or not isinstance(result, dict):
-        raise RuntimeError(f"app-server initialize failed: {(error or {}).get('message', 'no result')}")
+        raise _VoiceStartError(
+            "voice_start_failed",
+            f"app-server initialize failed: {(error or {}).get('message', 'no result')}")
     sess._send({"method": "initialized"})
 
     result, error = sess.call("thread/realtime/listVoices", {}, timeout=15)
     if isinstance(result, dict):
         _record_live_voices(result)
+    elif error and _looks_method_missing(error):
+        raise _MethodNotFound(str(error))
 
     briefing = build_briefing()
     result, error = sess.call("thread/start", {
@@ -1021,29 +1211,66 @@ def _bootstrap(sess, codex_bin, key, sdp_offer):
     }, timeout=START_TIMEOUT_SECONDS)
     thread = (result or {}).get("thread") or {}
     tid = thread.get("id")
+    if error and _looks_method_missing(error):
+        raise _MethodNotFound(str(error))
     if error or not tid:
-        raise RuntimeError(f"thread/start failed: {(error or {}).get('message', 'no thread id')}")
+        raise _VoiceStartError(
+            "voice_start_failed",
+            f"thread/start failed: {(error or {}).get('message', 'no thread id')}")
     sess.thread_id = tid
 
-    sess._sdp_event.clear()
-    result, error = sess.call("thread/realtime/start", {
+    rt_params = {
         "threadId": tid,
         "outputModality": "audio",
-        "transport": {"type": "webrtc", "sdp": sdp_offer},
         "voice": sess.voice,
         "version": "v3",
         "prompt": _VOICE_PROMPT,
         "realtimeStartInstructions": _CODEX_INSTRUCTIONS,
         "initialItems": [{"role": "developer", "text": briefing}],
         "clientManagedHandoffs": False,
-    }, timeout=START_TIMEOUT_SECONDS)
+    }
+    if transport == "webrtc":
+        rt_params["transport"] = {"type": "webrtc", "sdp": sdp_offer}
+    else:
+        rt_params["transport"] = {"type": "websocket"}
+    result, error = sess.call("thread/realtime/start", rt_params,
+                              timeout=START_TIMEOUT_SECONDS)
+    if error and _looks_method_missing(error):
+        raise _MethodNotFound(str(error))
     if error:
-        raise RuntimeError(f"realtime/start failed: {(error or {}).get('message', 'error')}")
+        msg = str((error or {}).get("message") or "realtime/start failed")
+        code = "voice_sideband_failed" if _looks_sideband(msg) else "voice_start_failed"
+        raise _VoiceStartError(code, msg[:300])
 
-    if not sess._sdp_event.wait(timeout=25):
-        raise RuntimeError("app-server did not return an SDP answer")
-    if not sess._sdp_answer:
-        raise RuntimeError("empty SDP answer")
+    if transport == "webrtc":
+        # SDP answer arrives as a notification; issue #35094-style failures
+        # can leave it never arriving, so the wait is bounded either way.
+        deadline_hit = not sess._sdp_event.wait(timeout=SDP_ANSWER_TIMEOUT_SECONDS)
+        if sess._connect_error:
+            raise _VoiceStartError("voice_sideband_failed",
+                                   str(sess._connect_error)[:300])
+        if deadline_hit:
+            raise _VoiceStartError(
+                "voice_connect_timeout",
+                "the voice service did not answer the WebRTC offer in time. "
+                "This happens for some accounts; try again or check Codex "
+                "realtime availability for your plan")
+        if not sess._sdp_answer:
+            raise _VoiceStartError("voice_start_failed", "empty SDP answer")
+
+
+def _looks_method_missing(error):
+    msg = json.dumps(error or {}).lower()
+    return ("method not found" in msg or "unknown method" in msg
+            or "not enabled" in msg or "experimental" in msg
+            or "no such method" in msg)
+
+
+def _looks_sideband(msg):
+    m = (msg or "").lower()
+    return ("call_id_not_found" in m or "sideband" in m
+            or "404" in m or "403" in m
+            or "realtime conversation" in m)
 
 
 def _tool_specs():
