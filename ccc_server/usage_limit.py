@@ -1036,6 +1036,41 @@ def _mutate_spawn_registry(mutator):
         return changed
 
 
+# Per-request spawn task metadata. The /api/sessions/spawn handler sets this
+# before engine dispatch so _record_spawn_to_registry can persist the dedupe
+# contract (task_key/prompt_hash/task_summary) on the registry row without
+# threading new kwargs through every engine's spawn_session_* signature —
+# and, more importantly, without changing the worker RPC arg schema (an old
+# worker would reject an unknown spawn kwarg outright). Worker-routed spawns
+# get the fields stamped after dispatch by the handler-side tag helper
+# (_tag_spawn_task_meta_in_registry); this thread-local covers every engine
+# that spawns in-process. Mirrors _CONTROL_PLANE_REQUEST_CONTEXT in server.py.
+_SPAWN_REQUEST_META = threading.local()
+
+
+def _set_spawn_request_meta(task_key="", prompt_hash="", task_summary=""):
+    _SPAWN_REQUEST_META.value = {
+        "task_key": str(task_key or "").strip()[:200],
+        "prompt_hash": str(prompt_hash or "").strip(),
+        "task_summary": str(task_summary or "").strip()[:200],
+    }
+
+
+def _clear_spawn_request_meta():
+    _SPAWN_REQUEST_META.value = None
+
+
+def _spawn_request_meta():
+    meta = getattr(_SPAWN_REQUEST_META, "value", None)
+    return meta if isinstance(meta, dict) else {}
+
+
+# Registry fields inherited across resume/re-spawn of the same task. The new
+# record keeps the dedupe identity so a re-dispatch still matches the task
+# even though the pid (and often the session id) changed.
+_SPAWN_TASK_META_FIELDS = ("task_key", "prompt_hash", "task_summary")
+
+
 def _record_spawn_to_registry(
     pid, name, log_path, cwd, spawned_at, command_summary,
     fifo=None, engine="claude", session_id=None, model=None, repo_path=None,
@@ -1081,6 +1116,10 @@ def _record_spawn_to_registry(
         "parent_session_id": parent_session_id or "",
         "spawned_via": clean_via,
     }
+    for _meta_key in _SPAWN_TASK_META_FIELDS:
+        _meta_val = _spawn_request_meta().get(_meta_key)
+        if _meta_val:
+            record[_meta_key] = _meta_val
     if engine and not prewarm:
         try:
             _core.record_model_picker_pick(engine, model or "", reasoning_effort or "")
@@ -1113,12 +1152,22 @@ def _record_spawn_to_registry(
         })
     def _append_record(entries):
         nonlocal record
-        if not record.get("spawned_via"):
+        if not record.get("spawned_via") or any(
+            not record.get(_k) for _k in _SPAWN_TASK_META_FIELDS
+        ):
             for entry in entries:
                 pid_match = pid is not None and str(entry.get("pid") or "") == str(pid)
                 sid_match = session_id and entry.get("session_id") == session_id
-                if (pid_match or sid_match) and entry.get("spawned_via"):
+                if not (pid_match or sid_match):
+                    continue
+                if not record.get("spawned_via") and entry.get("spawned_via"):
                     record["spawned_via"] = entry["spawned_via"]
+                for _k in _SPAWN_TASK_META_FIELDS:
+                    if not record.get(_k) and entry.get(_k):
+                        record[_k] = entry[_k]
+                if record.get("spawned_via") and all(
+                    record.get(_k) for _k in _SPAWN_TASK_META_FIELDS
+                ):
                     break
         entries[:] = [
             entry for entry in entries
@@ -1171,17 +1220,110 @@ def _reap_orphaned_claude_prewarms():
     return reaped
 
 
-def _remove_spawn_from_registry(pid):
+# Finished-spawn history: spawned-pids.json stays "live processes only"
+# (every reader assumes a row is a process we may signal), so ended rows are
+# appended to a sibling file instead. Read by /api/sessions/spawned only
+# under include_finished=1 and by the task_key dedupe lookup — a finished
+# lane answers "this task ran and exited" instead of silently vanishing and
+# inviting a duplicate spawn.
+_SPAWNED_HISTORY_FILE = _core.COMMAND_CENTER_STATE_DIR / "spawned-history.json"
+_SPAWNED_HISTORY_TTL_S = 24 * 3600
+_SPAWNED_HISTORY_MAX_ROWS = 200
+
+
+def _load_spawn_history():
+    """Finished-spawn rows, oldest first. Tolerant of missing/malformed."""
+    try:
+        data = json.loads(_SPAWNED_HISTORY_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _archive_finished_spawn_entry(entry, exit_code=None):
+    """Move one registry entry into spawned-history.json (TTL + capped).
+
+    Called with the entry about to leave the live registry. exit_code is
+    only known to the process that owns the Popen; worker-owned and
+    reattached rows legitimately store None.
+    """
+    if not isinstance(entry, dict):
+        return
+    row = dict(entry)
+    row["ended_at"] = time.strftime("%Y%m%dT%H%M%S")
+    row["ended_at_epoch"] = time.time()
+    row["exit_code"] = exit_code
+
+    def _mutate(entries):
+        entries[:] = [
+            e for e in entries
+            if str(e.get("pid") or "") != str(row.get("pid"))
+        ]
+        entries.append(row)
+        return True
+
+    _mutate_spawn_history(_mutate)
+
+
+def _mutate_spawn_history(mutator):
+    """Locked read/modify/write of spawned-history.json. Prunes expired and
+    overflow rows on every write so the file stays bounded without a
+    background sweeper. Shares the spawn-registry flock: writes that remove
+    a row from the live registry and append it here must not interleave."""
+    with _core._spawn_registry_exclusive_lock():
+        entries = _load_spawn_history()
+        changed = bool(mutator(entries))
+        now = time.time()
+        kept = [
+            e for e in entries
+            if (now - float(e.get("ended_at_epoch") or 0)) <= _SPAWNED_HISTORY_TTL_S
+        ]
+        if len(kept) > _SPAWNED_HISTORY_MAX_ROWS:
+            kept = kept[-_SPAWNED_HISTORY_MAX_ROWS:]
+        if changed or len(kept) != len(entries):
+            _save_spawn_history_unlocked(kept)
+        return changed
+
+
+def _save_spawn_history_unlocked(entries):
+    try:
+        _SPAWNED_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SPAWNED_HISTORY_FILE.with_suffix(
+            f".json.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            tmp.write_text(json.dumps(entries, indent=2))
+            os.replace(tmp, _SPAWNED_HISTORY_FILE)
+        finally:
+            _core._unlink_quiet(tmp)
+    except OSError as e:
+        print(f"  [spawn-registry] could not write {_SPAWNED_HISTORY_FILE} ({e})")
+
+
+def _remove_spawn_from_registry(pid, exit_code=None):
     """Drop a PID from the registry — called when a session exits gracefully
-    or is explicitly torn down. Safe to call when the entry isn't present."""
+    or is explicitly torn down. Safe to call when the entry isn't present.
+    The removed row lands in spawned-history.json so dedupe lookups can still
+    answer "this task ran and finished" after the row leaves the live set."""
+    removed = []
+
     def _remove(entries):
-        pruned = [e for e in entries if e.get("pid") != pid]
+        pruned = []
+        for e in entries:
+            if e.get("pid") == pid:
+                removed.append(e)
+            else:
+                pruned.append(e)
         if len(pruned) == len(entries):
             return False
         entries[:] = pruned
         return True
 
     _core._mutate_spawn_registry(_remove)
+    for entry in removed:
+        _archive_finished_spawn_entry(entry, exit_code=exit_code)
 
 
 def _update_spawn_session_id_in_registry(pid, session_id, spawned_via=""):
@@ -1425,14 +1567,22 @@ def _pid_is_engine_process(pid, engine):
 
 
 def _reattach_spawned_orphans(skip_engines=None, only_engines=None):
-    """Reattach under the same lock used by registry mutations."""
+    """Reattach under the same lock used by registry mutations. Entries the
+    sweep drops (dead/reused pids) are moved to spawned-history.json after
+    the lock is released — archiving inside the lock would re-acquire the
+    same flock on a second fd."""
+    dropped_entries = []
     with _core._spawn_registry_exclusive_lock():
-        return _reattach_spawned_orphans_locked(
+        result = _reattach_spawned_orphans_locked(
             skip_engines=skip_engines, only_engines=only_engines,
+            dropped_sink=dropped_entries,
         )
+    for entry in dropped_entries:
+        _archive_finished_spawn_entry(entry)
+    return result
 
 
-def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
+def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None, dropped_sink=None):
     """Boot-time sweep that re-populates `_spawned_sessions` from the on-disk
     registry. Verifies every entry's PID is alive AND is still a process of
     the recorded engine (PIDs can be reused), drops dead/reused ones, and rewrites the
@@ -1475,6 +1625,8 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
             continue
         if not isinstance(pid, int):
             dropped += 1
+            if dropped_sink is not None:
+                dropped_sink.append(dict(entry))
             continue
         # Step 1: is the PID alive at all?
         try:
@@ -1488,6 +1640,8 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
             alive = False
         if not alive:
             dropped += 1
+            if dropped_sink is not None:
+                dropped_sink.append(dict(entry))
             continue
         if _core._pid_is_zombie(pid):
             try:
@@ -1495,6 +1649,8 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
             except (ChildProcessError, OSError):
                 pass
             dropped += 1
+            if dropped_sink is not None:
+                dropped_sink.append(dict(entry))
             continue
         # Step 2: is it actually a process of the engine we recorded?
         # Older registry entries pre-date the `engine` field — default
@@ -1503,6 +1659,8 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
         engine = entry.get("engine", "claude")
         if not _core._pid_is_engine_process(pid, engine):
             dropped += 1
+            if dropped_sink is not None:
+                dropped_sink.append(dict(entry))
             continue
         # Step 3: try to backfill session_id from the log file if we don't
         # have it yet. Claude emits stream-json session headers; Codex emits a
@@ -1590,6 +1748,9 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
             "model": entry.get("model") or "",
             "parent_session_id": entry.get("parent_session_id") or "",
         }
+        for _meta_key in _SPAWN_TASK_META_FIELDS:
+            if entry.get(_meta_key):
+                survivor[_meta_key] = entry[_meta_key]
         if valid_input_target is not None:
             survivor["input_result_target"] = valid_input_target
         if valid_input_accepted_at is not None:
@@ -1604,10 +1765,10 @@ def _reattach_spawned_orphans_locked(skip_engines=None, only_engines=None):
 
 
 def list_spawned_sessions():
-    """Return spawned sessions with running/finished status. Also opportunistically
-    drops finished sessions from the on-disk spawn registry so it doesn't grow
-    forever (the in-memory list keeps them so the UI can still show 'finished'
-    state, but persistence only needs the live ones)."""
+    """Return spawned sessions with running/finished status. Finished rows are
+    moved out of the live registry into spawned-history.json on removal
+    (_remove_spawn_from_registry), so persistence only holds the live ones
+    while dedupe lookups can still answer "this task already ran"."""
     result = []
     worker_owned_registry = []
     if _core._control_plane_routes_engines():
@@ -1665,6 +1826,9 @@ def list_spawned_sessions():
                 "reasoning_effort": entry.get("reasoning_effort") or "",
                 "parent_session_id": entry.get("parent_session_id") or "",
                 "command_summary": entry.get("command_summary") or "",
+                "task_key": entry.get("task_key") or "",
+                "task_summary": entry.get("task_summary") or "",
+                "prompt_hash": entry.get("prompt_hash") or "",
                 "running": running,
                 "exit_code": None,
                 "status": "running" if running else "finished",
@@ -1695,6 +1859,9 @@ def list_spawned_sessions():
             "reasoning_effort": s.get("reasoning_effort") or "",
             "parent_session_id": s.get("parent_session_id") or "",
             "command_summary": s.get("prompt", ""),
+            "task_key": s.get("task_key") or "",
+            "task_summary": s.get("task_summary") or "",
+            "prompt_hash": s.get("prompt_hash") or "",
             "running": poll is None,
             "exit_code": poll,
             "status": "running" if poll is None else f"finished (exit {poll})",
@@ -1735,6 +1902,9 @@ def list_spawned_sessions():
             "reasoning_effort": entry.get("reasoning_effort") or "",
             "parent_session_id": entry.get("parent_session_id") or "",
             "command_summary": entry.get("command_summary") or "",
+            "task_key": entry.get("task_key") or "",
+            "task_summary": entry.get("task_summary") or "",
+            "prompt_hash": entry.get("prompt_hash") or "",
             "running": running,
             "exit_code": None,
             "status": "running" if running else "finished",

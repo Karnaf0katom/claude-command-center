@@ -5255,6 +5255,145 @@ def _tag_spawned_via_in_registry(pid=None, session_id=None, via=""):
     _mutate_spawn_registry(_mutator)
 
 
+def _tag_spawn_task_meta_in_registry(pid=None, session_id=None, meta=None):
+    """Stamp task_key/prompt_hash/task_summary onto a spawn registry entry.
+
+    Fallback path for spawns whose registry row was written without the
+    per-request meta — worker-routed engines (the thread-local set in this
+    process does not cross the engine.execute RPC) and any engine that
+    records the row before meta was set. Also patches the live in-memory
+    entry so list_spawned_sessions' local branch sees the key immediately.
+    """
+    if not isinstance(meta, dict) or (pid is None and not session_id):
+        return
+    clean = {
+        k: str(meta.get(k) or "").strip()
+        for k in ("task_key", "prompt_hash", "task_summary")
+    }
+    clean = {k: v for k, v in clean.items() if v}
+    if not clean:
+        return
+
+    def _stamp(entry):
+        changed = False
+        for k, v in clean.items():
+            if entry.get(k) != v:
+                entry[k] = v
+                changed = True
+        return changed
+
+    for entry in _spawned_sessions:
+        pid_match = pid is not None and str(entry.get("pid") or "") == str(pid)
+        sid_match = session_id and (
+            entry.get("session_id") == session_id
+            or entry.get("resumed_sid") == session_id
+        )
+        if pid_match or sid_match:
+            _stamp(entry)
+
+    def _mutator(entries):
+        changed = False
+        for entry in entries:
+            pid_match = pid is not None and str(entry.get("pid") or "") == str(pid)
+            sid_match = session_id and entry.get("session_id") == session_id
+            if pid_match or sid_match:
+                changed = _stamp(entry) or changed
+        return changed
+    _mutate_spawn_registry(_mutator)
+
+
+# Idempotent-spawn guard. Two requests carrying the same dedupe key race
+# check-then-spawn: the registry row is written by whichever process owns
+# the engine (often the worker) seconds after the dashboard's check, and
+# the registry flock cannot be held across dispatch (the worker needs it
+# to record the row). Every /api/sessions/spawn lands in THIS process
+# though, so an in-process in-flight map closes the window: the second
+# request waits on the first's result instead of spawning a twin.
+_SPAWN_DEDUPE_LOCK = threading.Lock()
+_SPAWN_DEDUPE_INFLIGHT = {}  # (key, scope) -> {"event": Event, "result": dict|None}
+_SPAWN_DEDUPE_WAIT_S = 120.0
+
+
+def _spawn_dedupe_lookup(task_key="", prompt_hash="", scope=""):
+    """Return (live_row, finished_row) matching the dedupe contract.
+
+    task_key matches exactly; prompt_hash matches exactly (only used when
+    the caller passes dedupe:true). scope is the caller's repo scope —
+    resolved cwd or repo_path — and must equal the row's repo_path/cwd when
+    non-empty, so the same task_key on a different repo cannot collide.
+    Live rows additionally pass an engine-process liveness check (the
+    registry is live-only but stale between sweeps; pids get reused).
+    """
+    def _scope_of(entry):
+        return str(entry.get("repo_path") or entry.get("cwd") or "")
+
+    def _matches(entry):
+        if task_key:
+            if (entry.get("task_key") or "") != task_key:
+                return False
+        elif prompt_hash:
+            if (entry.get("prompt_hash") or "") != prompt_hash:
+                return False
+        else:
+            return False
+        return not scope or _scope_of(entry) == scope
+
+    live = None
+    for entry in reversed(_load_spawn_registry()):
+        if not isinstance(entry, dict) or not _matches(entry):
+            continue
+        pid = entry.get("pid")
+        if pid is None:
+            live = entry
+            break
+        try:
+            if _pid_is_engine_process(int(pid), entry.get("engine") or "claude"):
+                live = entry
+                break
+        except (TypeError, ValueError):
+            continue
+    finished = None
+    if live is None and task_key:
+        for entry in reversed(_load_spawn_history()):
+            if _matches(entry):
+                finished = entry
+                break
+    return live, finished
+
+
+def _dedupe_existing_response(row, finished=False):
+    """Response for a dedupe-matched spawn: the caller is told explicitly
+    that no NEW session was spawned, what the existing lane is, and — the
+    sharp edge — that any report-back goes to the ORIGINAL dispatcher, not
+    to this request's report_to."""
+    sid = row.get("session_id") or row.get("resumed_sid") or ""
+    return {
+        "ok": True,
+        "existing": True,
+        "finished": bool(finished),
+        "pid": row.get("pid"),
+        "session_id": sid,
+        "session_id_pending": not bool(sid),
+        "name": row.get("name") or "",
+        "engine": row.get("engine") or "claude",
+        "model": row.get("model") or "",
+        "cwd": row.get("cwd") or "",
+        "repo_path": row.get("repo_path") or "",
+        "task_key": row.get("task_key") or "",
+        "spawned_at": row.get("spawned_at") or "",
+        "ended_at": row.get("ended_at") or "",
+        "exit_code": row.get("exit_code"),
+        "parent_session_id": row.get("parent_session_id") or "",
+        "log": row.get("log") or "",
+        "report_back": "original_dispatcher",
+        "note": (
+            "a lane already carries this dedupe key — no new session was "
+            "spawned; completion reports (if any) go to the lane's original "
+            "dispatcher, not to this request's report_to"
+        ),
+    }
+
+
 def _load_session_overrides():
     """Return {session_id: {model, context_1m, engine, set_at}} or {}."""
     try:
@@ -26746,9 +26885,86 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path in ("/api/sessions/spawned", "/api/spawned"):
             qs = urllib.parse.parse_qs(parsed.query)
             rows = list_spawned_sessions()
+            include_finished = (
+                (qs.get("include_finished", [""])[0] or "").strip().lower()
+                in ("1", "true", "yes")
+            )
+            if include_finished:
+                # spawned-history.json rows shaped like list_spawned_sessions
+                # output so callers can treat finished lanes uniformly.
+                # exit_code is only known for rows the owning process
+                # reaped; worker-owned and sweep-dropped rows carry None.
+                for h in _load_spawn_history():
+                    rows.append({
+                        "pid": h.get("pid"),
+                        "spawn_id": str(h.get("spawn_id") or h.get("pid") or ""),
+                        "session_id": h.get("session_id") or h.get("resumed_sid") or "",
+                        "session_id_pending": False,
+                        "name": h.get("name") or "",
+                        "log": h.get("log") or "",
+                        "prompt": h.get("command_summary") or "",
+                        "started": h.get("spawned_at") or "",
+                        "spawned_at": h.get("spawned_at") or "",
+                        "engine": h.get("engine") or "claude",
+                        "cwd": h.get("cwd") or "",
+                        "repo_path": h.get("repo_path") or "",
+                        "model": h.get("model") or "",
+                        "reasoning_effort": h.get("reasoning_effort") or "",
+                        "parent_session_id": h.get("parent_session_id") or "",
+                        "command_summary": h.get("command_summary") or "",
+                        "task_key": h.get("task_key") or "",
+                        "task_summary": h.get("task_summary") or "",
+                        "prompt_hash": h.get("prompt_hash") or "",
+                        "running": False,
+                        "exit_code": h.get("exit_code"),
+                        "status": "finished",
+                        "ended_at": h.get("ended_at") or "",
+                        "ended_at_epoch": h.get("ended_at_epoch"),
+                    })
+            # display_name: the enriched title the sidebar shows (AI title /
+            # custom title / first message), from the cached identity map —
+            # one dict lookup per row, no transcript scan. Only emitted when
+            # an archive row actually exists; without one the "name" is just
+            # the spawn label echoed back, which is worse than absent.
+            try:
+                ident_map = _census_identity_map()
+            except Exception:
+                ident_map = {}
+            for row in rows:
+                sid = str(row.get("session_id") or "")
+                info = ident_map.get(sid) if sid else None
+                if info and info.get("has_conversation_row") and info.get("name"):
+                    row["display_name"] = info["name"]
             engine_filter = (qs.get("engine", [""])[0] or "").strip().lower()
             if engine_filter:
                 rows = [r for r in rows if (r.get("engine") or "").lower() == engine_filter]
+            task_key_filter = (qs.get("task_key", [""])[0] or "").strip()
+            if task_key_filter:
+                rows = [r for r in rows if (r.get("task_key") or "") == task_key_filter]
+            parent_filter = (qs.get("parent", [""])[0] or "").strip()
+            if parent_filter:
+                if len(parent_filter) < 8:
+                    self.send_json(
+                        {"ok": False, "error": "parent query param required (at least 8 chars of a session id)"},
+                        400,
+                    )
+                    return
+                rows = [
+                    r for r in rows
+                    if str(r.get("parent_session_id") or "").startswith(parent_filter)
+                ]
+            q_filter = (qs.get("q", [""])[0] or "").strip().lower()
+            if q_filter:
+                rows = [
+                    r for r in rows
+                    if q_filter in " ".join(
+                        str(r.get(field) or "")
+                        for field in (
+                            "name", "display_name", "command_summary",
+                            "task_summary", "task_key", "prompt",
+                        )
+                    ).lower()
+                ]
             self.send_json(rows)
         elif path == "/api/sessions/children":
             # Lightweight lineage lookup: children of a dispatcher session,
@@ -33329,6 +33545,30 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 return
             prompt = _decode_over_url_encoded_text(payload.get("prompt") or "").strip()
             name = (payload.get("name") or "").strip() or None
+            # task_key is the caller's dedupe contract: "a lane for THIS
+            # task" — an opaque token (ticket id, slug, hash) matched
+            # exactly, repo-scoped, on /api/sessions/spawned?task_key= and by
+            # the idempotent-spawn check below. Deliberately NOT aliased to
+            # idempotency_key: that field already means "replay this exact
+            # request" at the control-plane WorkLedger layer and must keep
+            # its own semantics.
+            task_key = str(payload.get("task_key") or "").strip()[:200]
+            # prompt_hash/task_summary come from the RAW prompt — by dispatch
+            # time the prompt has grown the shipped-check heads-up, brain
+            # prefix, return-address wrapper (with a per-request route id)
+            # and astra guardrail, so hashing the dispatched prompt would
+            # never match twice. task_summary is the raw first-200 so grep
+            # hits the topic, unlike command_summary (wrapped prompt[:200]).
+            prompt_hash = (
+                hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest()[:16]
+                if prompt else ""
+            )
+            task_summary = " ".join(prompt.split())[:200]
+            spawn_request_meta = {
+                "task_key": task_key,
+                "prompt_hash": prompt_hash,
+                "task_summary": task_summary,
+            }
             engine_raw = payload.get("engine")
             engine, model = _spawn_request_engine_and_model(payload)
             # BYOK (W2-2): "key_profile" picks which stored profile's API
@@ -33501,6 +33741,82 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 _log_activity("spawn", "REJECT", f"parent_session error: {parent_session_error}")
                 self.send_json({"ok": False, "error": parent_session_error}, 400)
             else:
+                # Idempotent-spawn check, after validation but BEFORE any
+                # side effects (report route, shipped check, worktree). A
+                # caller opts in by sending task_key (exact-match dedupe
+                # contract) or dedupe:true (exact raw-prompt-hash match).
+                # The in-flight map closes the check-then-spawn race: every
+                # spawn lands in this process, so the second concurrent
+                # request waits on the first's result instead of twinning.
+                result = None
+                dedupe_key = None
+                dedupe_slot = None
+                if task_key or payload.get("dedupe"):
+                    dedupe_scope = str(
+                        cwd_resolved or payload.get("repo_path") or cwd_input or ""
+                    )
+                    dedupe_key = (
+                        task_key or f"prompt:{prompt_hash}",
+                        dedupe_scope,
+                    )
+                    with _SPAWN_DEDUPE_LOCK:
+                        dedupe_slot = _SPAWN_DEDUPE_INFLIGHT.get(dedupe_key)
+                        if dedupe_slot is None:
+                            dedupe_slot = {
+                                "event": threading.Event(),
+                                "result": None,
+                            }
+                            _SPAWN_DEDUPE_INFLIGHT[dedupe_key] = dedupe_slot
+                            dedupe_owner = True
+                        else:
+                            dedupe_owner = False
+                    if not dedupe_owner:
+                        if dedupe_slot["event"].wait(_SPAWN_DEDUPE_WAIT_S):
+                            waited = dict(dedupe_slot["result"] or {})
+                            # Only a lane that actually exists is a dedupe
+                            # hit — a failed first spawn returns its error
+                            # unmarked so the caller can retry cleanly.
+                            if waited.get("ok"):
+                                waited["existing"] = True
+                                waited["deduped"] = "in_flight"
+                            _log_activity(
+                                "spawn", "DEDUPED",
+                                f"in-flight key={task_key or prompt_hash!r} "
+                                f"name={name!r}",
+                            )
+                            self.send_json(waited)
+                        else:
+                            self.send_json({
+                                "ok": False,
+                                "error": "timed out waiting for an in-flight "
+                                         "duplicate spawn to finish",
+                                "code": "dedupe_wait_timeout",
+                            }, 504)
+                        return
+                    live_row, finished_row = _spawn_dedupe_lookup(
+                        task_key=task_key,
+                        prompt_hash=(
+                            prompt_hash if payload.get("dedupe") else ""
+                        ),
+                        scope=dedupe_scope,
+                    )
+                    if live_row is not None or finished_row is not None:
+                        matched = live_row if live_row is not None else finished_row
+                        result = _dedupe_existing_response(
+                            matched, finished=finished_row is not None,
+                        )
+                        _log_activity(
+                            "spawn", "DEDUPED",
+                            f"key={task_key or prompt_hash!r} "
+                            f"matched pid={matched.get('pid')} "
+                            f"finished={finished_row is not None} name={name!r}",
+                        )
+                        with _SPAWN_DEDUPE_LOCK:
+                            dedupe_slot["result"] = result
+                            _SPAWN_DEDUPE_INFLIGHT.pop(dedupe_key, None)
+                            dedupe_slot["event"].set()
+                        self.send_json(result)
+                        return
                 try:
                     # Return address: spawned session reports back to its
                     # dispatcher on completion. No-op when report_to is unset.
@@ -33549,6 +33865,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     ) + prompt
                     spawn_cwd = str(cwd_resolved) if cwd_resolved else None
                     _set_control_plane_action_id(payload.get("idempotency_key"))
+                    _set_spawn_request_meta(
+                        task_key=task_key,
+                        prompt_hash=prompt_hash,
+                        task_summary=task_summary,
+                    )
                     if engine == "codex":
                         result = spawn_session_codex(
                             prompt,
@@ -33770,6 +34091,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             session_id=result.get("session_id"),
                             via=spawned_via,
                         )
+                        # The in-process meta path stamps the registry row
+                        # inside _record_spawn_to_registry; this tag is the
+                        # fallback for rows written by the worker (or an
+                        # engine that recorded before meta was set).
+                        if any(spawn_request_meta.values()):
+                            result["task_key"] = task_key
+                            _tag_spawn_task_meta_in_registry(
+                                pid=result.get("pid"),
+                                session_id=result.get("session_id"),
+                                meta=spawn_request_meta,
+                            )
                     # Opt in to unattended auto-resume ("continue") pokes at
                     # spawn time -- the main legitimate use case is a
                     # WatchTower queue-drain worker that should be nudged
@@ -33821,6 +34153,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     _log_activity("spawn", "FAILED", f"engine={engine} error={e}")
                     self.send_json({"ok": False, "error": str(e)}, 500)
+                finally:
+                    _clear_spawn_request_meta()
+                    if dedupe_slot is not None:
+                        with _SPAWN_DEDUPE_LOCK:
+                            dedupe_slot["result"] = (
+                                result
+                                if isinstance(result, dict)
+                                else {"ok": False, "error": "spawn dispatch failed"}
+                            )
+                            _SPAWN_DEDUPE_INFLIGHT.pop(dedupe_key, None)
+                            dedupe_slot["event"].set()
         elif path == "/api/sessions/spawn-codex":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

@@ -1386,6 +1386,10 @@ def cmd_spawn(args):
         payload["worktree"] = True
     if args.confirm_blocked_model:
         payload["confirm_blocked_model"] = True
+    if args.task_key:
+        payload["task_key"] = args.task_key
+    if args.dedupe:
+        payload["dedupe"] = True
     if args.report_to:
         payload["report_to"] = args.report_to
     elif os.environ.get("CLAUDE_CODE_SESSION_ID"):
@@ -1432,7 +1436,15 @@ def cmd_spawn(args):
         bits.append(f"effort={args.effort}")
     ident = f"session {sid}" if sid else (f"pid {pid}" if pid else "session")
     suffix = f"  ({', '.join(bits)})" if bits else ""
-    print(f"spawned {engine} {ident}{suffix}")
+    if result.get("existing"):
+        verb = "finished lane already exists" if result.get("finished") \
+            else "lane already exists"
+        print(f"{verb} for this dedupe key: {engine} {ident}{suffix}")
+        if result.get("report_back") == "original_dispatcher":
+            print("note: completion reports go to the lane's original "
+                  "dispatcher, not this spawn")
+    else:
+        print(f"spawned {engine} {ident}{suffix}")
     print("track it: ccc sessions")
     return 0
 
@@ -1776,6 +1788,13 @@ def main(argv=None):
                    help="reasoning effort for engines with a ladder — see the "
                         "EFFORTS in `ccc models`")
     p.add_argument("--name", help="display name for the session")
+    p.add_argument("--task-key", metavar="KEY",
+                   help="dedupe contract: if a lane already carries this key "
+                        "(repo-scoped), return it with existing:true instead "
+                        "of spawning a twin — e.g. a ticket id or task slug")
+    p.add_argument("--dedupe", action="store_true",
+                   help="dedupe on the exact raw prompt hash instead of an "
+                        "explicit key")
     p.add_argument("--cwd", help="working directory for the session "
                                  "(default: your current directory)")
     p.add_argument("--worktree", action="store_true",

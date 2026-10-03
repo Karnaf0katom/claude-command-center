@@ -7048,7 +7048,7 @@ def _poll_spawn_entry(entry):
         _cleanup_finished_entry(entry)
         pid = entry.get("pid")
         if pid is not None:
-            _core._remove_spawn_from_registry(pid)
+            _core._remove_spawn_from_registry(pid, exit_code=poll)
         entry["_cleanup_done"] = True
     return poll
 
