@@ -76608,40 +76608,76 @@
     clearPaneScreenForVideo(paneId);
   });
 
-  // Compact view: the tool rows between two text messages fold into one
-  // "N tool calls" line (the narration stays, the work between it folds).
-  // Runs are re-marked after every DOM change while compact is on; the
-  // marks are inert outside body.conv-compact. Tap the line to unfold.
-  function _ccIsRunItem(el) {
-    if (el.classList.contains('tool-call-group')) return true;
-    if (el.matches('details.spawn-stats')) return true;
-    return el.classList.contains('event') && el.classList.contains('assistant')
-      && !el.querySelector('.assistant-text');
+  // Compact view: everything between two text messages (tool calls,
+  // thinking) folds into one "N tool calls · M thoughts" line; the
+  // narration stays. Claude sessions render tool calls as sibling
+  // .tool-call-group rows; Devin/Codex/ACP sessions put .tool-call and
+  // .thinking-block straight inside the .event.assistant next to the
+  // text, so units are collected at both levels. Runs are re-marked after
+  // every DOM change while compact is on; the marks are inert outside
+  // body.conv-compact. Tap the line to unfold, tap the head to fold.
+  function _ccUnitsOf(view) {
+    // -> array of { el, kind: 'tool'|'think'|'passive'|'break', calls }
+    const units = [];
+    for (const el of view.children) {
+      const cl = el.classList;
+      if (cl.contains('tool-call-group')) {
+        units.push({ el, kind: 'tool', calls: Math.max(1, el.querySelectorAll('.tool-call').length) });
+      } else if (el.matches('details.spawn-stats')) {
+        units.push({ el, kind: 'passive' });
+      } else if (cl.contains('event') && cl.contains('assistant')) {
+        let found = false;
+        for (const c of el.children) {
+          const cc = c.classList;
+          if (cc.contains('tool-call-group')) { found = true; units.push({ el: c, kind: 'tool', calls: Math.max(1, c.querySelectorAll('.tool-call').length) }); }
+          else if (cc.contains('tool-call')) { found = true; units.push({ el: c, kind: 'tool', calls: 1 }); }
+          else if (cc.contains('thinking-block')) { found = true; units.push({ el: c, kind: 'think' }); }
+          else if (cc.contains('assistant-text')) { found = true; units.push({ el: c, kind: 'break' }); }
+        }
+        if (!found) units.push({ el, kind: 'passive' });
+      } else {
+        units.push({ el, kind: 'break' });
+      }
+    }
+    return units;
   }
+  let _ccRunSeq = 0;
   function _ccMarkRuns(view) {
+    const stale = new Set(view.querySelectorAll('[data-cc-run]'));
     let run = [];
     const flush = () => {
-      const groups = run.filter(el => el.classList.contains('tool-call-group'));
-      if (groups.length >= 2) {
-        const head = groups[0];
-        const calls = groups.reduce((n, g) => n + Math.max(1, g.querySelectorAll('.tool-call').length), 0);
-        const open = run.some(el => el.classList.contains('cc-run-open'));
-        run.forEach(el => {
+      const active = run.filter(u => u.kind !== 'passive');
+      if (active.length >= 2) {
+        const head = active[0].el;
+        const calls = active.reduce((n, u) => n + (u.calls || 0), 0);
+        const thoughts = active.filter(u => u.kind === 'think').length;
+        const open = run.some(u => u.el.classList.contains('cc-run-open'));
+        const id = head.dataset.ccRun || String(++_ccRunSeq);
+        run.forEach(({ el }) => {
+          stale.delete(el);
+          el.dataset.ccRun = id;
           el.classList.toggle('cc-run-head', el === head);
           el.classList.toggle('cc-run-tail', el !== head);
           el.classList.toggle('cc-run-open', open);
         });
-        const hdr = head.querySelector(':scope > .tool-call-group-header');
-        if (hdr) hdr.dataset.ccRunLabel = calls + ' tool call' + (calls === 1 ? '' : 's');
-      } else {
-        run.forEach(el => el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open'));
+        const label = [
+          calls ? calls + ' tool call' + (calls === 1 ? '' : 's') : '',
+          thoughts ? thoughts + ' thought' + (thoughts === 1 ? '' : 's') : '',
+        ].filter(Boolean).join(' \u00b7 ');
+        const labelEl = head.classList.contains('tool-call-group')
+          ? head.querySelector(':scope > .tool-call-group-header') : head;
+        if (labelEl && labelEl.dataset.ccRunLabel !== label) labelEl.dataset.ccRunLabel = label;
       }
       run = [];
     };
-    for (const el of view.children) {
-      if (_ccIsRunItem(el)) run.push(el); else flush();
+    for (const u of _ccUnitsOf(view)) {
+      if (u.kind === 'break') flush(); else run.push(u);
     }
     flush();
+    stale.forEach(el => {
+      el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open');
+      delete el.dataset.ccRun;
+    });
   }
   let _ccRunsRaf = 0;
   function _ccScheduleRuns() {
@@ -76665,20 +76701,20 @@
       _ccScheduleRuns();
     }
   }
-  // A tap on a folded run's line unfolds the whole run; a tap on the head's
-  // header while unfolded folds it back.
+  // A tap on a folded run's line unfolds the whole run; a tap on the run's
+  // head while unfolded folds it back.
   document.addEventListener('click', (ev) => {
     if (!document.body.classList.contains('conv-compact')) return;
-    const hdr = ev.target && ev.target.closest ? ev.target.closest('.tool-call-group.cc-run-head > .tool-call-group-header') : null;
-    if (!hdr) return;
-    const head = hdr.parentElement;
-    ev.stopPropagation();
+    const t = ev.target;
+    const head = t && t.closest ? t.closest('.cc-run-head') : null;
+    if (!head) return;
+    if (head.classList.contains('tool-call-group') && !t.closest('.tool-call-group-header')) return;
+    const view = head.closest('.conversations-view');
+    if (!view) return;
+    ev.stopImmediatePropagation();
     const open = !head.classList.contains('cc-run-open');
-    let el = head;
-    while (el && (el === head || el.classList.contains('cc-run-tail'))) {
-      el.classList.toggle('cc-run-open', open);
-      el = el.nextElementSibling;
-    }
+    view.querySelectorAll('[data-cc-run="' + head.dataset.ccRun + '"]')
+      .forEach(el => el.classList.toggle('cc-run-open', open));
   }, true);
 
   // CCC-454: transcript view segmented control (rail topbar + per-pane

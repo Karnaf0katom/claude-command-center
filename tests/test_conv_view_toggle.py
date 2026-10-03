@@ -54,12 +54,22 @@ class ConvViewToggleTest(unittest.TestCase):
         js = _read("static/app.js")
         css = _read("static/app.css")
         self.assertIn("function _ccMarkRuns(view)", js)
-        self.assertIn("if (groups.length >= 2)", js)
+        self.assertIn("if (active.length >= 2)", js)
+        # Devin/Codex/ACP: tool calls and thinking live inside the
+        # .event.assistant next to the text, so they are units too.
+        self.assertIn("else if (cc.contains('tool-call')) { found = true; units.push({ el: c, kind: 'tool', calls: 1 }); }", js)
+        self.assertIn("else if (cc.contains('thinking-block')) { found = true; units.push({ el: c, kind: 'think' }); }", js)
         # The observer is only live while compact is on.
         self.assertIn("_ccSyncRunsObserver(mode === 'compact');", js)
         # Declared before the boot-time sync call (const TDZ).
         self.assertLess(js.index("const _ccRunsObserver"), js.index("_syncConvViewSegs(convViewMode());"))
         self.assertIn(".cc-run-tail:not(.cc-run-open) { display: none !important; }", css)
+
+    def test_compact_tones_down_text(self):
+        css = _read("static/app.css")
+        # ID-level specificity beats the stitch theme's 0,9,0 !important.
+        self.assertIn("body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assistant-text {", css)
+        self.assertIn("font-weight: 400 !important; letter-spacing: normal !important;", css)
 
 
 if __name__ == "__main__":
