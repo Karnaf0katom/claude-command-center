@@ -76655,8 +76655,17 @@
   function _ccMarkRuns(view) {
     const stale = new Set(view.querySelectorAll('[data-cc-run]'));
     const staleChips = new Set(view.querySelectorAll('.cc-run-chip'));
+    const staleFinals = new Set(view.querySelectorAll('.assistant-text.cc-final'));
+    // The last text of each turn (right before the next user message, or
+    // the end of the view) is the turn's summary: compact keeps it as a card.
+    const markFinal = (t) => {
+      if (!t) return;
+      staleFinals.delete(t);
+      if (!t.classList.contains('cc-final')) t.classList.add('cc-final');
+    };
     let run = [];
     let prevText = null;
+    let turnText = null;
     const flush = () => {
       const active = run.filter(u => u.kind !== 'passive');
       // A chip costs no row, so with a preceding text even one step folds;
@@ -76707,14 +76716,18 @@
     for (const u of _ccUnitsOf(view)) {
       if (u.kind === 'break') {
         flush();
+        if (u.el.classList.contains('user_text')) { markFinal(turnText); turnText = null; }
         prevText = u.el.classList.contains('assistant-text') ? u.el
           : (u.el.classList.contains('event') && u.el.classList.contains('assistant')
             ? u.el.querySelector(':scope > .assistant-text') : null);
+        if (prevText) turnText = prevText;
       } else {
         run.push(u);
       }
     }
     flush();
+    markFinal(turnText);
+    staleFinals.forEach(t => t.classList.remove('cc-final'));
     stale.forEach(el => {
       el.classList.remove('cc-run-head', 'cc-run-tail', 'cc-run-open', 'cc-run-chipped');
       delete el.dataset.ccRun;

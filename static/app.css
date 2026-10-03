@@ -30466,7 +30466,7 @@ body.conv-compact.conv-compact .conversations-view .line-num,
 body.conv-compact.conv-compact .conversations-view .assistant-message-actions,
 body.conv-compact.conv-compact .conversations-view details.tool-command-disclosure { display: none !important; }
 /* Two-line clamp on messages (all but the newest assistant reply). */
-body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open):not(:has(.cc-run-chip)),
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),
 body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) .user-msg {
   display: -webkit-box !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; cursor: pointer;
@@ -30536,6 +30536,15 @@ body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assista
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif !important;
   font-weight: 400 !important; letter-spacing: normal !important; line-height: 1.45 !important;
   color: var(--text) !important;
+}
+
+/* Each turn's final summary keeps the card look Normal view has (stitch
+   surface + accent rule), so it stands out from the toned-down narration. */
+body.conv-compact:not(#cc-compact) .conversations-view .event.assistant .assistant-text.cc-final {
+  background: var(--conv-surface-2, rgba(255,255,255,0.05)) !important;
+  border-left: 2px solid var(--conv-accent, var(--accent, #58a6ff)) !important;
+  border-radius: 0 4px 4px 0 !important;
+  padding: 10px 14px !important; margin: 4px 0 12px !important;
 }
 
 /* Transcript view segmented control: Compact | Normal | Verbose, all

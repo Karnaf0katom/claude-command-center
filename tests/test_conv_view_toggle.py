@@ -76,6 +76,13 @@ class ConvViewToggleTest(unittest.TestCase):
         # Chip-bearing text is never two-line clamped (chip would be cut).
         self.assertIn(".assistant-text:not(.cc-open):not(:has(.cc-run-chip)),", css)
 
+    def test_turn_final_summary_keeps_card(self):
+        js = _read("static/app.js")
+        css = _read("static/app.css")
+        self.assertIn("if (u.el.classList.contains('user_text')) { markFinal(turnText); turnText = null; }", js)
+        self.assertIn(".assistant-text.cc-final {", css)
+        self.assertIn(":not(.cc-final):not(:has(.cc-run-chip))", css)
+
     def test_compact_tones_down_text(self):
         css = _read("static/app.css")
         # ID-level specificity beats the stitch theme's 0,9,0 !important.
