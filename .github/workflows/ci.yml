@@ -3,8 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+# Superseded runs on the same ref are wasted minutes (OPS-1349).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # The public checkout must not grow private planning archives or generated
@@ -31,11 +38,11 @@ jobs:
   # errors without needing to install or run anything.
   py-compile:
     name: py-compile (${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
+    # Linux only: macOS minutes bill 10x and compileall is OS-independent (OPS-1349).
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +132,8 @@ jobs:
 
   python39-smoke:
     name: python 3.9 import + boot
-    runs-on: macos-latest
+    # ubuntu, not macos: 10x billing multiplier (OPS-1349); macOS is covered by macapp-install-smoke.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
