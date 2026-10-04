@@ -16374,7 +16374,7 @@ def _rehydrate_archive_cached_rows(rows):
                         )
                         if row["ai_title"] is None:
                             try:
-                                _request_codex_auto_title(sid, fresh=fresh)
+                                _request_codex_auto_title(sid, fresh=fresh, mtime=row.get("mtime"))
                             except Exception:
                                 pass
 

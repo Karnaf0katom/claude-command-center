@@ -31,13 +31,23 @@ class TitlerTurnsPayload(unittest.TestCase):
         self.assertEqual(p["turns"][0]["session_id"], "a")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WorkerPromptSkip(unittest.TestCase):
     def test_worker_prompt_is_skipped_but_normal_prompt_is_not(self):
         import server  # noqa: F401  (populates the shared core)
         from ccc_server import session_graph as g
         self.assertTrue(g._is_wt_worker_session("x", "Drain the CCC WatchTower queue and keep it empty."))
         self.assertFalse(g._is_wt_worker_session("x", "Fix the login bug"))
+
+
+class CodexTitleAgeCap(unittest.TestCase):
+    def test_old_codex_session_is_not_queued(self):
+        import time
+        import server  # noqa: F401
+        from ccc_server import session_graph as g
+        with mock.patch.object(g, "_auto_title_marker_path") as marker:
+            g._request_codex_auto_title("abc", fresh={}, mtime=time.time() - 30 * 86400)
+        marker.assert_not_called()  # returned before any marker/claim work
+
+
+if __name__ == "__main__":
+    unittest.main()

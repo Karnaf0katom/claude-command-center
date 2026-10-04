@@ -2308,11 +2308,29 @@ def _codex_auto_title_worker(session_id, first_message):
         _auto_title_sem.release()
 
 
-def _request_codex_auto_title(session_id, fresh=None):
-    """Queue a background auto-title for a Codex session. Returns immediately."""
+def _codex_title_max_age_s():
+    try:
+        return float(os.environ.get("CCC_AUTO_TITLE_CODEX_MAX_AGE_DAYS", "3")) * 86400
+    except ValueError:
+        return 3 * 86400
+
+
+def _request_codex_auto_title(session_id, fresh=None, mtime=None):
+    """Queue a background auto-title for a Codex session. Returns immediately.
+
+    Codex has no Stop hook, so this runs from the list-build path over every
+    Codex row; without an age cap that titled months-old history in bulk (a
+    Haiku run each). Sessions untouched for CCC_AUTO_TITLE_CODEX_MAX_AGE_DAYS
+    (default 3) are left alone; pass the row's mtime to enable the check.
+    """
     sid = str(session_id or "").strip()
     if not sid or not _auto_title_enabled():
         return
+    try:
+        if mtime and time.time() - float(mtime) > _codex_title_max_age_s():
+            return
+    except (TypeError, ValueError):
+        pass
     if _auto_title_marker_path(sid).exists():
         return
     needed = _codex_auto_title_needed(sid)
