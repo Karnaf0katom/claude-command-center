@@ -2050,25 +2050,41 @@ def _auto_title_needed(session_id):
     return True
 
 
+def _auto_title_mtime_tag(session_id):
+    """`mtime=<UTC iso> age=<s>s` of the session transcript being titled, for
+    the activity log, so a burst of titles can be traced to stale or churning
+    sessions. Empty string when the transcript can't be found."""
+    try:
+        path = _core._find_session_jsonl(session_id)
+        if path is None:
+            return ""
+        mtime = os.path.getmtime(path)
+    except Exception:
+        return ""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+    return f" mtime={stamp} age={int(time.time() - mtime)}s"
+
+
 def _auto_title_worker(session_id):
     acquired = _auto_title_sem.acquire(blocking=False)
     if not acquired:
         # Fleet-wide Stop storm — let a later Stop on this session retry.
         _auto_title_release(session_id)
         return
+    tag = _auto_title_mtime_tag(session_id)
     try:
         result = summarize_session_title(session_id, validate=True)
         if not result.get("ok"):
             _auto_title_release(session_id)
             _core._log_activity("autotitle", "FAILED",
-                          f"sid={session_id[:8]} err={str(result.get('error') or '')[:120]}")
+                          f"sid={session_id[:8]}{tag} err={str(result.get('error') or '')[:120]}")
         else:
             _auto_title_record(session_id, str(result.get("title") or ""))
             _core._log_activity("autotitle", "TITLED",
-                          f"sid={session_id[:8]} title={str(result.get('title') or '')[:60]}")
+                          f"sid={session_id[:8]}{tag} title={str(result.get('title') or '')[:60]}")
     except Exception as e:
         _auto_title_release(session_id)
-        _core._log_activity("autotitle", "ERROR", f"sid={session_id[:8]} {str(e)[:120]}")
+        _core._log_activity("autotitle", "ERROR", f"sid={session_id[:8]}{tag} {str(e)[:120]}")
     finally:
         _auto_title_sem.release()
 
