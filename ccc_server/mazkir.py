@@ -76,6 +76,8 @@ MAZKIR_MAX_TURNS = int(os.environ.get("CCC_ASK_MAX_TURNS", "8"))
 MAZKIR_TIMEOUT_SEC = int(os.environ.get("CCC_ASK_TIMEOUT_SEC", "75"))
 PREFETCH_TIMEOUT_SEC = 15
 PREFETCH_LIMIT = 8
+# Fan-out deadline is 1.5 s per peer; a little slack for thread scheduling.
+PEER_PREFETCH_TIMEOUT_SEC = 2.5
 HTTP_TIMEOUT_SEC = 12
 
 STUCK_IDLE_SEC = 600          # live but transcript idle > 10 min
@@ -664,12 +666,13 @@ Tools:
 Method:
 1. CANDIDATES are pre-fetched below with excerpts from their best-matching messages, best match first, with currently-live sessions already excluded (a session still open right now cannot be where past work "already happened" — it's likely the very session asking). If they answer the question, answer immediately without any tool call (each tool round trip costs ~4 s); call session_info only when the excerpts do not say what was decided or how it ended.
 2. Otherwise call search_sessions once (rephrase with 2-4 topic words), then at most one or two follow-ups. Never loop.
-3. Trust the candidate order: it already ranks by relevance with only a small recency tie-break, and demotes planning-only/self-referential sessions. Don't override it just because a lower-ranked candidate is more recent.
-4. For fleet questions (stuck, burning, waiting, what is running, cost) call fleet_diagnostics or the specific tool once.
-5. "This session", "the session on (the) screen", "this one": the ON SCREEN session named in the prompt. Use its id; never guess another. If the user says it won't take a message, call inject_diagnostics on it and report its findings.
-6. Be honest: if nothing matches, say what you searched and that you found nothing.
-7. For a daily brief / "what happened overnight", call daily_brief once and lead with its headline, then stuck items, then the numbered proposals.
-8. Acting: you cannot start, send, file, or post anything yourself. When the user asks you to (start a session, steer or message a session, file or comment on a ticket, "file proposal 2"), call the matching propose_* tool once with complete parameters, put [[action:confirm:ACTION_ID]] on its own line, and say it is waiting for their Confirm. Never say it was done. Don't propose actions the user did not ask for.
+3. Candidates marked machine=NAME were found on another of the user's CCC machines (e.g. the VM), not this one. Cite them the same way and say which machine the work happened on.
+4. Trust the candidate order: it already ranks by relevance with only a small recency tie-break, and demotes planning-only/self-referential sessions. Don't override it just because a lower-ranked candidate is more recent.
+5. For fleet questions (stuck, burning, waiting, what is running, cost) call fleet_diagnostics or the specific tool once.
+6. "This session", "the session on (the) screen", "this one": the ON SCREEN session named in the prompt. Use its id; never guess another. If the user says it won't take a message, call inject_diagnostics on it and report its findings.
+7. Be honest: if nothing matches, say what you searched and that you found nothing.
+8. For a daily brief / "what happened overnight", call daily_brief once and lead with its headline, then stuck items, then the numbered proposals.
+9. Acting: you cannot start, send, file, or post anything yourself. When the user asks you to (start a session, steer or message a session, file or comment on a ticket, "file proposal 2"), call the matching propose_* tool once with complete parameters, put [[action:confirm:ACTION_ID]] on its own line, and say it is waiting for their Confirm. Never say it was done. Don't propose actions the user did not ask for.
 
 Answer format (plain text, no markdown headers):
 - Lead with the answer in one or two sentences, then 1-4 short supporting lines.
@@ -719,6 +722,49 @@ def prefetch_sessions(question: str, since: str | None, runner=None, index_bin: 
     except ValueError:
         return []
     return [d for d in data if isinstance(d, dict) and d.get("session_id")] if isinstance(data, list) else []
+
+
+PEER_PREFETCH_LIMIT = 5
+
+
+def peer_prefetch(question: str, limit: int = PEER_PREFETCH_LIMIT, fan_out=None) -> tuple[list[dict], list[dict]]:
+    """Candidates from paired CCC machines (multi-machine S4): each peer's
+    own local recall, asked in parallel under the fan-out deadline. Returns
+    (candidates, peer statuses). No peers, or any failure, means ([], ...):
+    another machine must never break the local answer."""
+    try:
+        if fan_out is None:
+            import federation
+            if not federation.load_peers():
+                return [], []
+            from ccc_server import memory_fanout as _mf
+            fan_out = _mf.fan_out
+        entries = fan_out("memory_recall", {"q": question[:500], "limit": limit})
+    except Exception:
+        return [], []
+    cands: list[dict] = []
+    statuses: list[dict] = []
+    for e in entries:
+        statuses.append({"name": e.get("name"), "status": e.get("status"),
+                         "stale": bool(e.get("stale")), "rows": 0})
+        for row in ((e.get("result") or {}).get("results") or [])[:limit]:
+            sid = row.get("session_id") if isinstance(row, dict) else None
+            if not sid:
+                continue
+            match = row.get("match") if isinstance(row.get("match"), dict) else {}
+            date = str(row.get("date") or "")
+            cands.append({
+                "session_id": sid,
+                "title": row.get("title") or "",
+                "snippet": match.get("snippet") or row.get("snippet") or "",
+                "first_ts": date,
+                "last_ts": date,
+                "cwd": row.get("repo") or "",
+                "node": e.get("name") or "",
+                "node_id": e.get("node_id") or "",
+            })
+            statuses[-1]["rows"] += 1
+    return cands, statuses
 
 
 def builtin_prefetch(question: str, range_key: str | None, exclude_session_ids=None,
@@ -792,8 +838,9 @@ def _fmt_candidate(i: int, s: dict) -> str:
     title = " ".join(str(s.get("title") or "").split())[:140]
     snip = " ".join(str(s.get("best_snippet") or s.get("snippet") or "").split())[:220]
     runs = f" runs={s['runs']}" if (s.get("runs") or 1) > 1 else ""
+    node = f" machine={s['node']}" if s.get("node") else ""
     out = (f"{i}. [[session:{s['session_id']}]] {s.get('harness') or 'claude'} {when} "
-           f"hits={s.get('hits', '?')}{runs} cwd={s.get('cwd') or '?'}\n"
+           f"hits={s.get('hits', '?')}{runs}{node} cwd={s.get('cwd') or '?'}\n"
            f"   title: {title}\n   match: {snip}")
     for e in (s.get("excerpts") or [])[:3]:
         if not isinstance(e, dict):
@@ -1048,7 +1095,7 @@ def _short_args(inp) -> str:
 
 
 def build_trace(prefetch_src: str, n_raw: int, n_kept: int, prefetch_ms: int, stats: dict,
-                tool_calls: list | None) -> list[dict]:
+                tool_calls: list | None, peers: list | None = None) -> list[dict]:
     """What Mazkir looked at, in order, for the small trace above the answer."""
     detail = f"{n_raw} candidates"
     if n_kept != n_raw:
@@ -1060,8 +1107,16 @@ def build_trace(prefetch_src: str, n_raw: int, n_kept: int, prefetch_ms: int, st
         extra.append(f"{stats['runs_merged']} repeat run{'s' if stats['runs_merged'] > 1 else ''} merged")
     if extra:
         detail += " (" + ", ".join(extra) + ")"
-    trace = [{"tool": prefetch_src, "detail": f"{detail} · {prefetch_ms / 1000:.1f}s"},
-             {"tool": "ccc-state · fleet snapshot", "detail": "census"}]
+    trace = [{"tool": prefetch_src, "detail": f"{detail} · {prefetch_ms / 1000:.1f}s"}]
+    for p in peers or []:
+        if p.get("status") == "ok":
+            d = f"{p.get('rows', 0)} sessions"
+        else:
+            d = str(p.get("status") or "?").replace("_", " ")
+            if p.get("stale"):
+                d += f", {p.get('rows', 0)} cached"
+        trace.append({"tool": f"{p.get('name') or 'peer'} · memory recall", "detail": d})
+    trace.append({"tool": "ccc-state · fleet snapshot", "detail": "census"})
     for call in tool_calls or []:
         name = str(call.get("name") or "?")
         if name.startswith("mcp__"):
@@ -1081,7 +1136,9 @@ def source_row(s: dict, live_ids: set | None = None) -> dict:
         title = f"[{harness}] {title}"
     elif harness != "claude":
         title = f"[{harness}] {sid}"
-    return {
+    if s.get("node"):
+        title = f"[{s['node']}] {title or sid}"
+    row = {
         "id": sid,
         "title": title or (sid or "")[:8],
         "repo": Path(str(s.get("cwd") or "")).name or None,
@@ -1091,6 +1148,10 @@ def source_row(s: dict, live_ids: set | None = None) -> dict:
         "snippet": " ".join(str(s.get("best_snippet") or s.get("snippet") or "").split())[:300],
         "harness": harness,
     }
+    if s.get("node"):
+        # Lives on a paired machine: the UI can't open it locally.
+        row.update(node=s["node"], node_id=s.get("node_id"), local=False)
+    return row
 
 
 def assemble_sources(answer: str, candidates: list[dict], db_path: str = INDEX_DB,
@@ -1113,7 +1174,7 @@ def assemble_sources(answer: str, candidates: list[dict], db_path: str = INDEX_D
 def run_mazkir(question: str, history: list | None = None, range_key: str | None = None,
                runner=None, base: str | None = None, claude_bin: str | None = None,
                fetch=None, prefetch_runner=None, db_path: str = INDEX_DB,
-               focused=None) -> tuple[dict, int]:
+               focused=None, peer_fan_out=None) -> tuple[dict, int]:
     """Full Ask pipeline. Returns (response dict, HTTP status)."""
     t0 = time.time()
     question = (question or "").strip()
@@ -1136,20 +1197,27 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
     # the "live" status badge on sources below.
     live_ids = _live_ids()
 
-    prefetch_info: dict = {"raw": 0, "stats": {}}
+    prefetch_info: dict = {"raw": 0, "stats": {}, "peers": []}
 
     def do_prefetch() -> tuple[list[dict], str]:
         # The census fetch and the index search are independent; overlap them
         # (round 3 lost 12 s on Q3 waiting for a restarting CCC).
         import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+        with _cf.ThreadPoolExecutor(max_workers=2) as ex:
             snap_f = ex.submit(fleet_snapshot, base, fetch)
+            peer_f = ex.submit(peer_prefetch, question, fan_out=peer_fan_out)
             if INDEX_BIN or prefetch_runner is not None:
                 cands = prefetch_sessions(question, since, runner=prefetch_runner,
                                           index_bin=INDEX_BIN or "claude-index",
                                           exclude_session_ids=live_ids)
             else:
                 cands = builtin_prefetch(question, range_key, exclude_session_ids=live_ids)
+            try:
+                peer_cands, prefetch_info["peers"] = peer_f.result(timeout=PEER_PREFETCH_TIMEOUT_SEC)
+            except Exception:
+                peer_cands = []
+            local_ids = {c.get("session_id") for c in cands}
+            cands = cands + [c for c in peer_cands if c["session_id"] not in local_ids]
             prefetch_info["raw"] = len(cands)
             cands, prefetch_info["stats"] = prepare_candidates(
                 cands, question, _ccc_titles(c.get("session_id") for c in cands),
@@ -1246,7 +1314,7 @@ def run_mazkir(question: str, history: list | None = None, range_key: str | None
     prefetch_src = ("claude-index · sessions search" if (INDEX_BIN or prefetch_runner is not None)
                     else "CCC built-in session search")
     trace = build_trace(prefetch_src, prefetch_info["raw"], len(candidates), prefetch_ms,
-                        prefetch_info["stats"], res.get("tool_calls"))
+                        prefetch_info["stats"], res.get("tool_calls"), prefetch_info["peers"])
     return {
         "ok": True,
         "answer": answer,

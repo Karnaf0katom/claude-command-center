@@ -140,7 +140,8 @@ class RunMazkirTest(unittest.TestCase):
         with mock.patch.object(mazkir, "INDEX_BIN", "/x/claude-index"):
             body, status = mazkir.run_mazkir("Where did I work on the Ask tab?", [{"q": "hi", "a": "yo"}], "7d",
                                              runner=runner, base="http://x", claude_bin="/x/claude",
-                                             fetch=fake_fetch, prefetch_runner=prefetch, db_path=dbp)
+                                             fetch=fake_fetch, prefetch_runner=prefetch, db_path=dbp,
+                                             peer_fan_out=lambda a, b: [])
         self.assertEqual(status, 200)
         self.assertEqual(body["agent"], "mazkir")
         self.assertEqual(body["cited"], ["c-100001", "kimi-1"])

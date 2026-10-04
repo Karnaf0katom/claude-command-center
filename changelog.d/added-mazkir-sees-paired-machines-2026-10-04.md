@@ -1,0 +1,1 @@
+- **Ask (Mazkir) now finds sessions on your other paired CCC machines.** History questions also ask each paired peer's own recall in parallel (2.5 s cap). Answers name the machine a session ran on, and sources show a `[machine]` tag. An unreachable peer shows up in the trace and never blocks the answer.
