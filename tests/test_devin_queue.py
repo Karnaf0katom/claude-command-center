@@ -2029,6 +2029,69 @@ class DevinCliAcpTranscriptMergeTests(unittest.TestCase):
         usage = self.devin_mod._extract_devin_cli_usage("devincli-merge-test")
         self.assertEqual(usage["model"], "swe-2-high")
 
+    def test_acp_result_rows_memoized_on_mtime_size(self):
+        """CCC-1255: the merge ran on every open/poll and re-decoded a
+        289 MB transcript each time (~0.8 s). Unchanged file -> same rows
+        object; an append -> re-read."""
+        ts = "2026-10-04T00:00:00Z"
+        self._write_transcript("merge-test", [
+            {"type": "assistant", "text": "not a result", "line": 1, "ts": ts},
+            {"type": "result", "subtype": "success", "line": 2, "ts": ts},
+        ])
+        first = self.devin_mod._devin_acp_result_rows("merge-test")
+        self.assertEqual([e["line"] for e in first], [2])
+        self.assertIs(self.devin_mod._devin_acp_result_rows("merge-test"), first)
+        path = self.server._acp_transcript_path("devin", "merge-test")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "result", "subtype": "error",
+                                 "line": 3, "ts": ts}) + "\n")
+        self.assertEqual(
+            [e["line"] for e in self.devin_mod._devin_acp_result_rows("merge-test")],
+            [2, 3])
+
+    def test_parse_cache_persists_across_process_restart(self):
+        """CCC-1255: a cold full parse of a 1.9 GB session cost 5-11 s after
+        every restart. A slow parse is persisted; a fresh process resumes
+        from disk and reads only rows past the persisted max_row_id."""
+        m = self.devin_mod
+        with mock.patch.object(m, "_DEVIN_CLI_PARSE_DISK_MIN_PARSE_S", 0):
+            first = self.server._parse_devin_cli_conversation("devincli-merge-test")
+        self.assertEqual(first["last_line"], 1)
+        disk = pathlib.Path(self.db_path + ".ccc-parse-cache") / "merge-test.json"
+        self.assertTrue(disk.is_file())
+
+        con = sqlite3.connect(self.db_path)
+        con.execute(
+            "INSERT INTO message_nodes (session_id, node_id, chat_message, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            ("merge-test", 2, self._msg("user", "second turn",
+                                       is_user_input=True),
+             int(time.time() * 1000)),
+        )
+        con.commit()
+        con.close()
+
+        m._DEVIN_CLI_PARSE_CACHE.clear()  # simulate a new process
+        real_parse_row = m._devin_cli_parse_message_row
+        with mock.patch.object(
+            m, "_devin_cli_parse_message_row", side_effect=real_parse_row
+        ) as parse_row:
+            second = self.server._parse_devin_cli_conversation("devincli-merge-test")
+        self.assertEqual(parse_row.call_count, 1)  # only the new row
+        self.assertEqual(second["last_line"], 2)
+        self.assertEqual(
+            [e.get("text") for e in second["events"] if e["type"] == "user_text"],
+            ["hello devin", "second turn"])
+
+    def test_persisted_parse_cache_ignored_when_parser_changes(self):
+        m = self.devin_mod
+        with mock.patch.object(m, "_DEVIN_CLI_PARSE_DISK_MIN_PARSE_S", 0):
+            self.server._parse_devin_cli_conversation("devincli-merge-test")
+        self.assertIsNotNone(m._devin_cli_parse_disk_load("merge-test", ""))
+        with mock.patch.object(m, "_devin_cli_parse_disk_code_sig", return_value="other"):
+            self.assertIsNone(m._devin_cli_parse_disk_load("merge-test", ""))
+        self.assertIsNone(m._devin_cli_parse_disk_load("merge-test", "sidekick"))
+
 
 class DevinCliFusionLaneTests(unittest.TestCase):
     """Fusion sessions keep the lead and the sidekick in one message_nodes

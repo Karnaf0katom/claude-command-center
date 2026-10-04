@@ -114,6 +114,17 @@ _DEVIN_CLI_ID_CACHE = {}  # str(db_path) -> {"mtime": float, "ids": set}
 _DEVIN_CLI_PARSE_CACHE = {}
 _DEVIN_CLI_PARSE_CACHE_LOCK = threading.Lock()
 _DEVIN_CLI_PARSE_CACHE_MAX = 64
+# The in-memory cache dies with the process, and a cold full parse of a long
+# session is O(GB): carefree-airboat holds 1.9 GB of chat_message JSON and
+# took 5-11 s on the first open after every restart (CCC-1255), while its
+# parsed events are ~2 MB and decode in ~15 ms. Parses slower than this
+# threshold are persisted per session; appends rewrite at most every
+# _DEVIN_CLI_PARSE_DISK_MIN_INTERVAL_S (a lagging file is fine: the resume
+# path reads only rows past its max_row_id).
+_DEVIN_CLI_PARSE_DISK_MIN_PARSE_S = 0.25
+_DEVIN_CLI_PARSE_DISK_MIN_INTERVAL_S = 15.0
+_DEVIN_CLI_PARSE_DISK_VERSION = 1
+_DEVIN_CLI_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 # In-memory session-list cache for the local CLI backend. Opening the Devin
 # CLI sessions DB can take multiple seconds when the DB is large and the WAL
@@ -2847,6 +2858,78 @@ def _devin_cli_tool_input(session_id, tool_use_id):
     return None
 
 
+def _devin_cli_parse_disk_dir():
+    """Persisted parse-cache dir; beside the DB for test-fixture overrides
+    (same reasoning as _devin_cli_row_memo_path)."""
+    override = os.environ.get("CCC_DEVIN_DB") or os.environ.get("CCC_DEVIN_NEXT_DB")
+    if override:
+        return Path(str(Path(override).expanduser()) + ".ccc-parse-cache")
+    return _core.COMMAND_CENTER_STATE_DIR / "devin_cli_parse_cache"
+
+
+def _devin_cli_parse_disk_code_sig():
+    """Parser fingerprint: any edit to this module invalidates persisted
+    events, so a parser fix never serves stale rendered rows."""
+    try:
+        st = os.stat(__file__)
+        return f"{_DEVIN_CLI_PARSE_DISK_VERSION}:{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return str(_DEVIN_CLI_PARSE_DISK_VERSION)
+
+
+def _devin_cli_parse_disk_load(raw_id, sidekick_key):
+    """Persisted parse-cache entry for ``raw_id``, or None."""
+    if not _DEVIN_CLI_SAFE_ID_RE.match(raw_id or ""):
+        return None
+    try:
+        with (_devin_cli_parse_disk_dir() / f"{raw_id}.json").open(
+            "r", encoding="utf-8"
+        ) as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("sig") != _devin_cli_parse_disk_code_sig()
+        or payload.get("sidekick_key") != sidekick_key
+        or not isinstance(payload.get("events"), list)
+        or not isinstance(payload.get("seen"), list)
+    ):
+        return None
+    try:
+        return {
+            "events": payload["events"],
+            "seen": {tuple(k) for k in payload["seen"]},
+            "last_line": int(payload.get("last_line") or 0),
+            "max_row_id": int(payload.get("max_row_id") or 0),
+            "persisted_at": time.time(),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _devin_cli_parse_disk_save(raw_id, entry, sidekick_key):
+    """Best-effort atomic write of one session's parse cache. Never raises."""
+    if not _DEVIN_CLI_SAFE_ID_RE.match(raw_id or ""):
+        return
+    try:
+        path = _devin_cli_parse_disk_dir() / f"{raw_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({
+                "sig": _devin_cli_parse_disk_code_sig(),
+                "sidekick_key": sidekick_key,
+                "events": entry["events"],
+                "seen": [list(k) for k in entry["seen"]],
+                "last_line": entry["last_line"],
+                "max_row_id": entry["max_row_id"],
+            }, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def _parse_devin_cli_conversation(session_id, after_line=0):
     """Build a CCC transcript event list from a Devin CLI session's messages.
 
@@ -2895,6 +2978,8 @@ def _parse_devin_cli_conversation(session_id, after_line=0):
         # normal SQLite tables, so MAX(row_id) is a cheap per-session marker.
         with _DEVIN_CLI_PARSE_CACHE_LOCK:
             cached = _DEVIN_CLI_PARSE_CACHE.get(raw_id)
+        if cached is None:
+            cached = _devin_cli_parse_disk_load(raw_id, sidekick_key)
 
         incremental = False
         if cached and cached.get("max_row_id"):
@@ -2929,17 +3014,34 @@ def _parse_devin_cli_conversation(session_id, after_line=0):
                 "WHERE session_id = ? ORDER BY row_id",
                 (raw_id,),
             )
+        resume_max_row_id = max_row_id
         _append_rows(rows)
 
+        now = time.time()
+        persisted_at = (cached or {}).get("persisted_at") if incremental else None
+        if max_row_id != resume_max_row_id and (
+            (persisted_at is None
+             and time.perf_counter() - start >= _DEVIN_CLI_PARSE_DISK_MIN_PARSE_S)
+            or (persisted_at is not None
+                and now - persisted_at >= _DEVIN_CLI_PARSE_DISK_MIN_INTERVAL_S)
+        ):
+            persisted_at = now
+            persist = True
+        else:
+            persist = False
+        entry = {
+            "events": events,
+            "seen": seen,
+            "last_line": line,
+            "max_row_id": max_row_id,
+            "db_key": db_key,
+            "accessed": now,
+            "persisted_at": persisted_at,
+        }
+        if persist:
+            _devin_cli_parse_disk_save(raw_id, entry, sidekick_key)
         with _DEVIN_CLI_PARSE_CACHE_LOCK:
-            _DEVIN_CLI_PARSE_CACHE[raw_id] = {
-                "events": events,
-                "seen": seen,
-                "last_line": line,
-                "max_row_id": max_row_id,
-                "db_key": db_key,
-                "accessed": time.time(),
-            }
+            _DEVIN_CLI_PARSE_CACHE[raw_id] = entry
             if len(_DEVIN_CLI_PARSE_CACHE) > _DEVIN_CLI_PARSE_CACHE_MAX:
                 oldest = min(
                     _DEVIN_CLI_PARSE_CACHE.items(),
@@ -2990,6 +3092,48 @@ def _parse_devin_cli_conversation(session_id, after_line=0):
     return {"events": visible, "last_line": line}
 
 
+# raw_id -> (mtime_ns, size, [result rows]). The ACP transcript of a long
+# session reaches hundreds of MB, and this merge runs on every conv open and
+# SSE poll; re-decoding the whole file each time cost ~0.8 s per call
+# (CCC-1255). Only ``result`` rows are needed, so decode just the lines that
+# can be one and memoize on the file's (mtime, size).
+_DEVIN_ACP_RESULT_CACHE = {}
+_DEVIN_ACP_RESULT_CACHE_LOCK = threading.Lock()
+
+
+def _devin_acp_result_rows(raw_id):
+    """The ``type == "result"`` rows of a session's ACP transcript, memoized."""
+    try:
+        path = _core._acp_transcript_path("devin", raw_id)
+        st = path.stat()
+    except Exception:
+        return []
+    key = (st.st_mtime_ns, st.st_size)
+    with _DEVIN_ACP_RESULT_CACHE_LOCK:
+        cached = _DEVIN_ACP_RESULT_CACHE.get(raw_id)
+    if cached and cached[0] == key:
+        return cached[1]
+    rows = []
+    try:
+        with path.open("rb") as handle:
+            for raw in handle:
+                if b'"result"' not in raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict) and ev.get("type") == "result":
+                    rows.append(ev)
+    except OSError:
+        return []
+    with _DEVIN_ACP_RESULT_CACHE_LOCK:
+        _DEVIN_ACP_RESULT_CACHE[raw_id] = (key, rows)
+        if len(_DEVIN_ACP_RESULT_CACHE) > _DEVIN_CLI_PARSE_CACHE_MAX:
+            _DEVIN_ACP_RESULT_CACHE.pop(next(iter(_DEVIN_ACP_RESULT_CACHE)))
+    return rows
+
+
 def _merge_devin_acp_result_events(raw_id, events):
     """Splice a session's ACP turn-result rows into the DB-parsed event list.
 
@@ -3007,15 +3151,10 @@ def _merge_devin_acp_result_events(raw_id, events):
     on data-jsonl-line, so re-sending these rows on incremental polls is
     safe and keeps the merge out of the incremental parse cache.
     """
-    try:
-        acp_events = _core._acp_transcript_events_after("devin", raw_id, 0)
-    except Exception:
-        return events
+    acp_results = _devin_acp_result_rows(raw_id)
     results = []
     used_lines = set()
-    for ev in acp_events:
-        if not isinstance(ev, dict) or ev.get("type") != "result":
-            continue
+    for ev in acp_results:
         ev = dict(ev)
         try:
             acp_line = int(ev.get("line") or 0)
