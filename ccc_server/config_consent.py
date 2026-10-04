@@ -10,8 +10,9 @@ without asking. This module is now the only path to those writes:
     ~/.claude/command-center dir. Each item can plan (diff), apply, and revoke.
   * Nothing is written until the user approves an item (dashboard modal or
     `ccc consent`). The decision is stored in config-consent.json with a hash
-    of the content CCC proposed; if that content later changes, the item goes
-    back to "changed" and is not re-applied until approved again.
+    of the content CCC proposed. An approval covers later CCC updates to the
+    same item: new content is applied on the next start without re-asking
+    (re-prompting on every update trained users to click through).
   * Declining an item that is already present removes it.
   * Installs that predate this gate are recorded as approved on the first run
     (so nothing breaks) and a one-time notice lists what is installed.
@@ -873,7 +874,8 @@ def _status(record, digest):
     if record.get("decision") == "declined":
         return "declined"
     if record.get("decision") == "approved":
-        return "enabled" if record.get("hash") == digest else "changed"
+        # Approval sticks across CCC updates to the item's content.
+        return "enabled"
     return "pending"
 
 
