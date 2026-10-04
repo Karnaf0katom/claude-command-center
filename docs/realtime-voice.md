@@ -1,6 +1,7 @@
 # Voice mode (Codex realtime)
 
-Talk to Claude Command Center by voice: press the mic button in the top bar,
+Talk to Claude Command Center by voice: tap the floating phone button on mobile,
+or press the mic button in the desktop top bar,
 speak, and a voice answers questions about your board: what's waiting on
 you, what a session is doing, how the queues look. It can also act: "send
 the ads session a nudge" becomes a confirmation card in the dashboard that
@@ -40,10 +41,12 @@ runs only when you click **Confirm**.
 
 ## Using it
 
-1. Click the **mic button** in the top bar to open the voice panel.
-2. Press the green phone button labeled **CALL** and allow microphone access.
+1. On mobile, tap the floating green **CALL** button to open the panel and
+   start calling. Drag the button to move it; its position is remembered.
+   On desktop, click the **mic button** in the top bar, then press **CALL**.
+2. Allow microphone access.
    The panel shows `connecting` then `listening`. Once audio connects, the
-   voice welcomes you: "Hi, I'm here. What would you like to work on?"
+   voice welcomes you: "Hi, what's up?"
 3. Speak naturally. Transcript lines for you and the voice stream into
    the panel in real time, and the reply is spoken aloud.
 4. If the voice proposes an action (injecting into a session, spawning
@@ -52,6 +55,20 @@ runs only when you click **Confirm**.
    enough, by design.
 5. Press **END CALL** (or close the tab) to end the session. The red dot on
    the mic button means a session is live.
+
+Hide the panel to keep using the dashboard during a call. The floating
+button then says **IN CALL**; tapping it reopens the panel.
+
+You can ask "Why does QUEUE-123 need input?" to hear its recorded question
+and recent comments, or "Which tickets in this queue need me?" for a queue
+summary. If live ticket details cannot be fetched, the voice labels cached
+details as stale.
+
+Ask "Start a Deep session to triage this queue" to propose a focused triage
+session in the queue's configured repository. Configure the **Deep** model
+profile in CCC Settings first, or request an explicit engine and model.
+The session checks blockers, human input requests, and worker claims, then
+reports priorities. It starts only after you press **Confirm** on its card.
 
 ## Settings (Settings > Voice mode)
 
@@ -75,9 +92,10 @@ runs only when you click **Confirm**.
   directly. Transcript/state events stream to the panel over SSE
   (`/api/voice/events`).
 - The backing Codex thread is ephemeral, sandboxed read-only, with
-  `approvalPolicy: never`. Its only window into CCC is five dynamic
-  tools: `ccc_attention`, `ccc_session`, `ccc_sessions`, `ccc_queues` (all read-only)
-  and `ccc_propose_action`, which can only create a pending-action card
+  `approvalPolicy: never`. Its window into CCC is the dynamic
+  tools: `ccc_attention`, `ccc_session`, `ccc_sessions`, `ccc_queues`,
+  `ccc_ticket`, `ccc_models` (all read-only), plus `ccc_triage_queue` and
+  `ccc_propose_action`, which can only create a pending-action card
   through the same confirmation path the Ask agent uses. Approval
   requests from the model are denied outright.
 - Each session seeds a small briefing from already-cached board data

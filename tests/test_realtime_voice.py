@@ -335,7 +335,123 @@ def test_welcome_retries_after_rejection(voice_env, monkeypatch):
     rv.voice_heartbeat(sid, connected=True)
     assert len(calls) == 2
     assert calls[-1]["threadId"] == sess.thread_id
-    assert "Hi, I'm here." in calls[-1]["text"]
+    assert calls[-1]["text"] == "Hi, what's up?"
+
+
+def test_ccc_ticket_reads_current_question_and_recent_comments(monkeypatch):
+    class Queue:
+        def get(self, ref):
+            assert ref == "OPS-42"
+            return {
+                "ref": ref, "title": "Repair the relay", "status": "blocked",
+                "body": "The relay times out after five minutes.",
+                "block_question": "Should we raise the timeout or retry?",
+                "comments": [
+                    {"author": "worker", "text": "Checked the logs."},
+                    {"by": "owner", "body": "Please keep the retry bounded."},
+                ],
+            }
+
+    monkeypatch.setattr(rv._core, "_q", Queue())
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_ticket({"ref": "ops-42"})
+    assert "OPS-42" in out and "needs input: Should we raise the timeout" in out
+    assert "The relay times out" in out
+    assert "worker: Checked the logs." in out
+    assert "owner: Please keep the retry bounded." in out
+
+
+def test_ccc_ticket_missing_question_and_stale_cached_fallback(monkeypatch):
+    class Queue:
+        def get(self, ref):
+            return None
+
+    monkeypatch.setattr(rv._core, "_q", Queue())
+    monkeypatch.setattr(rv._core, "_ux_fixes_list_items_cached", lambda *a, **kw: [
+        {"ref": "OPS-43", "title": "Cached ticket", "needs_input": True,
+         "body": "Only the cached copy is available."},
+    ])
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_ticket({"ref": "ops-43"})
+    assert "stale cached fallback" in out
+    assert "needs input: question not recorded" in out
+    assert "Cached ticket" in out
+    assert "error" in vs._tool_ticket({"ref": "bad ref!"})
+
+
+def test_ccc_queues_reports_named_queue_and_needs_input_refs(monkeypatch):
+    monkeypatch.setattr(rv._core, "build_ux_fixes_health_payload", lambda: {
+        "queues": [{"queue": "OPS", "depth": 3, "workers": 1, "stuck": False}],
+    })
+    monkeypatch.setattr(rv._core, "_wt_read_config", lambda: {"OPS": {"repo_path": "/tmp"}})
+    monkeypatch.setattr(rv._core, "_ux_fixes_list_items_cached", lambda *a, **kw: [
+        {"project": "OPS", "ref": "OPS-2", "needs_input": True},
+        {"project": "OPS", "ref": "OPS-3", "status": "blocked"},
+    ])
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_queues({"queue": "ops"})
+    assert "OPS: 3 open" in out
+    assert "2 need input (OPS-2, OPS-3)" in out
+    assert "error" in vs._tool_queues({"queue": "unknown"})
+    assert "error" in vs._tool_queues({"queue": "bad queue!"})
+
+
+def test_ccc_models_returns_approved_catalog_ids_and_efforts(monkeypatch):
+    monkeypatch.setattr(rv._core, "_build_engine_model_catalog", lambda force_refresh=False: {
+        "catalog": {
+            "claude": {"models": [
+                {"id": "opus-5-5", "label": "Opus 5.5", "available": True,
+                 "policy_blocked": False, "reasoning_efforts": ["high", "max"]},
+                {"id": "blocked", "label": "Blocked", "available": True,
+                 "policy_blocked": True},
+            ]},
+            "codex": {"models": [
+                {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "available": True,
+                 "policy_blocked": False, "reasoning_efforts": ["medium", "high"]},
+                {"id": "offline", "label": "Offline", "available": False,
+                 "policy_blocked": False},
+            ]},
+        },
+    })
+    vs = object.__new__(rv.VoiceSession)
+    out = vs._tool_models({"query": "sol"})
+    assert "codex: gpt-6.1-sol (GPT-6.1 Sol); efforts: medium, high" in out
+    assert "blocked" not in out and "offline" not in out
+    assert "opus-5-5" in vs._tool_models({"engine": "claude"})
+
+
+def test_ccc_triage_queue_proposes_but_never_spawns(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(rv._core, "_wt_queue_attend_resolve_repo", lambda queue: (str(repo), None))
+    monkeypatch.setattr(rv._core, "_load_spawn_defaults", lambda: {
+        "model_profiles": {"deep": {"models": [
+            {"engine": "claude", "model": "senior-model", "effort": "max"},
+        ]}},
+    })
+    proposed = []
+    vs = object.__new__(rv.VoiceSession)
+    vs._tool_propose = lambda args: proposed.append(args) or "proposed"
+    out = vs._tool_triage_queue({"queue": "ops"})
+    assert out == "proposed"
+    assert len(proposed) == 1
+    action = proposed[0]
+    assert action["kind"] == "spawn_session"
+    assert action["params"]["cwd"] == str(repo)
+    assert action["params"]["engine"] == "claude"
+    assert action["params"]["model"] == "senior-model"
+    assert action["params"]["effort"] == "max"
+    assert "no blindly reclaiming live workers" in action["params"]["prompt"].lower()
+    assert "needs input" in action["params"]["prompt"].lower()
+
+
+def test_ccc_triage_queue_requires_configured_deep_profile(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(rv._core, "_wt_queue_attend_resolve_repo", lambda queue: (str(repo), None))
+    monkeypatch.setattr(rv._core, "_load_spawn_defaults", lambda: {"model_profiles": {}})
+    vs = object.__new__(rv.VoiceSession)
+    assert "configure a Deep profile" in vs._tool_triage_queue({"queue": "ops"})
 
 
 def test_welcome_rejects_nonboolean_connection(voice_env):

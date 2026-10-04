@@ -12552,14 +12552,14 @@
   @media (max-width: 1200px) {
     .voice-mobile-btn {
       position: fixed; right: max(16px, env(safe-area-inset-right, 0px));
-      bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 9400;
+      bottom: calc(160px + env(safe-area-inset-bottom, 0px)); z-index: 9400;
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       min-height: 56px; padding: 0 18px; border-radius: 999px;
       background: #238636; border: 1px solid #2ea043; color: #fff;
       font: 700 14px var(--font-sans, sans-serif); cursor: pointer;
       box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+      touch-action: none; user-select: none;
     }
-    body.has-mobile-bottom-nav .voice-mobile-btn,
     body.has-mobile-bottom-nav .voice-panel {
       bottom: calc(80px + env(safe-area-inset-bottom, 0px));
     }

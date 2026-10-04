@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -83,8 +84,11 @@ _ALL_VOICES = set(VOICES_V1) | set(VOICES_V2)
 
 # Dynamic tools the backing Codex thread may call. Read-only by contract;
 # every mutation goes through ccc_propose_action -> assistant_actions.
-TOOL_NAMES = ("ccc_attention", "ccc_session", "ccc_sessions", "ccc_queues",
-              "ccc_propose_action")
+TOOL_NAMES = ("ccc_attention", "ccc_session", "ccc_sessions", "ccc_models", "ccc_ticket",
+              "ccc_queues", "ccc_triage_queue", "ccc_propose_action")
+
+_TICKET_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}-\d{1,7}$")
+_QUEUE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 _VOICE_PROMPT = (
     "You are the voice of Claude Command Center (CCC), a dashboard for the "
@@ -102,8 +106,11 @@ _VOICE_PROMPT = (
 _CODEX_INSTRUCTIONS = (
     "You back a CCC voice session. Use only the ccc_* tools for board "
     "state; do not run shell commands or read files. Keep tool results "
-    "compact. Anything that mutates CCC must go through ccc_propose_action; "
-    "you never execute changes yourself."
+    "compact. Use ccc_ticket to explain the recorded needs-input question and "
+    "recent ticket context, ccc_queues for named queue state, ccc_models to "
+    "resolve an explicit model name to its approved ID before triage selection, and "
+    "ccc_triage_queue to propose a senior triage session. Anything that mutates "
+    "CCC must go through ccc_propose_action; you never execute changes yourself."
 )
 
 _APPROVAL_DENY_METHODS = frozenset({
@@ -682,8 +689,14 @@ class VoiceSession:
                 return _fmt_tool_text(self._tool_session(args))
             if tool == "ccc_sessions":
                 return _fmt_tool_text(self._tool_sessions(args))
+            if tool == "ccc_models":
+                return _fmt_tool_text(self._tool_models(args))
+            if tool == "ccc_ticket":
+                return _fmt_tool_text(self._tool_ticket(args))
             if tool == "ccc_queues":
                 return _fmt_tool_text(self._tool_queues(args))
+            if tool == "ccc_triage_queue":
+                return _fmt_tool_text(self._tool_triage_queue(args))
             if tool == "ccc_propose_action":
                 return _fmt_tool_text(self._tool_propose(args))
             return _tool_err(f"unknown tool {tool!r}")
@@ -818,16 +831,213 @@ class VoiceSession:
             )
         return "\n".join(out)[:4000]
 
+    def _tool_models(self, args):
+        """List current catalog IDs suitable for a voice-selected route."""
+        engine = str(args.get("engine") or "").strip().lower()
+        query = self._compact_text(args.get("query"), 120).lower()
+        if engine and not re.fullmatch(r"[a-z0-9_-]{1,32}", engine):
+            return "error: engine has unexpected characters"
+        try:
+            payload = _core._build_engine_model_catalog(force_refresh=False) or {}
+        except Exception:
+            payload = {}
+        catalog = payload.get("catalog") if isinstance(payload, dict) else None
+        if not isinstance(catalog, dict):
+            return "Model catalog unavailable."
+        rows = []
+        for name in sorted(catalog):
+            if engine and name != engine:
+                continue
+            bucket = catalog.get(name) or {}
+            for item in bucket.get("models") or []:
+                if not isinstance(item, dict) or item.get("available") is False or item.get("policy_blocked"):
+                    continue
+                model_id = self._compact_text(item.get("id"), 100)
+                label = self._compact_text(item.get("label") or model_id, 120)
+                haystack = (model_id + " " + label).lower()
+                if not model_id or (query and query not in haystack):
+                    continue
+                efforts = item.get("reasoning_efforts")
+                efforts = [str(value) for value in efforts] if isinstance(efforts, (list, tuple)) else []
+                line = f"{name}: {model_id} ({label})"
+                if efforts:
+                    line += "; efforts: " + ", ".join(efforts[:8])
+                rows.append(line)
+        if not rows:
+            return "No approved available models match."
+        return ("Approved available models:\n" + "\n".join(rows[:30]))[:4000]
+
+    @staticmethod
+    def _compact_text(value, limit):
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def _tool_ticket(self, args):
+        """Read one WatchTower ticket, falling back to CCC's explicitly stale cache."""
+        ref = str(args.get("ref") or "").strip().upper()
+        if not _TICKET_REF_RE.fullmatch(ref):
+            return "error: ref must look like QUEUE-123"
+        item = None
+        stale = False
+        try:
+            item = _core._q.get(ref)
+        except Exception:
+            item = None
+        if not isinstance(item, dict):
+            try:
+                cached = _core._ux_fixes_list_items_cached(None, None) or []
+            except Exception:
+                cached = []
+            item = next((row for row in cached if isinstance(row, dict)
+                         and str(row.get("ref") or "").upper() == ref), None)
+            stale = isinstance(item, dict)
+        if not isinstance(item, dict):
+            return f"ticket {ref} not found"
+        out = [f"ticket {ref}" + (" (stale cached fallback)" if stale else "") + ":"]
+        title = self._compact_text(item.get("title"), 260)
+        if title:
+            out.append(f"title: {title}")
+        status = self._compact_text(item.get("status"), 80)
+        if status:
+            out.append(f"status: {status}")
+        body = self._compact_text(item.get("body") or item.get("text") or item.get("description"), 1200)
+        if body:
+            out.append(f"body: {body}")
+        if item.get("needs_input") or str(item.get("status") or "").lower() == "blocked":
+            question = self._compact_text(
+                item.get("block_question") or item.get("question")
+                or item.get("question_text") or item.get("needs_input_question"), 700)
+            out.append("needs input: " + (question or "question not recorded"))
+        comments = item.get("comments")
+        if isinstance(comments, list):
+            recent = []
+            for comment in comments[-4:]:
+                if isinstance(comment, dict):
+                    author = self._compact_text(comment.get("author") or comment.get("by") or "comment", 80)
+                    text = self._compact_text(comment.get("text") or comment.get("body") or comment.get("content"), 350)
+                else:
+                    author, text = "comment", self._compact_text(comment, 350)
+                if text:
+                    recent.append(f"{author}: {text}")
+            if recent:
+                out.append("recent comments: " + " | ".join(recent))
+        return "\n".join(out)[:4000]
+
     def _tool_queues(self, args):
-        roll = _core._watchtower_queue_rollup() or {}
-        if not roll:
+        requested = str(args.get("queue") or "").strip()
+        if requested and not _QUEUE_NAME_RE.fullmatch(requested):
+            return "error: queue must use letters, numbers, _ or -"
+        requested = requested.upper()
+        try:
+            health = _core.build_ux_fixes_health_payload() or {}
+        except Exception:
+            health = {}
+        health_rows = health.get("queues") if isinstance(health, dict) else []
+        health_rows = health_rows if isinstance(health_rows, list) else []
+        by_queue = {str(row.get("queue") or "").upper(): row for row in health_rows
+                    if isinstance(row, dict) and str(row.get("queue") or "").strip()}
+        try:
+            config = _core._wt_read_config() or {}
+        except Exception:
+            config = {}
+        config_names = {str(name).strip().upper() for name in config if str(name).strip()}
+        try:
+            items = _core._ux_fixes_list_items_cached(None, None) or []
+        except Exception:
+            items = []
+        item_queues = {str(item.get("project") or "").upper() for item in items
+                       if isinstance(item, dict) and str(item.get("project") or "").strip()}
+        names = sorted(set(by_queue) | config_names | item_queues)
+        if requested:
+            if requested not in names:
+                return f"error: queue {requested} is not configured or cached"
+            names = [requested]
+        if not names:
             return "WatchTower queue data unavailable."
-        return (
-            f"{roll.get('open_total', 0)} open ticket(s) across "
-            f"{roll.get('queues_total', 0)} queue(s); "
-            f"{roll.get('workers_live', 0)} live worker(s); "
-            f"{roll.get('stuck_total', 0)} stuck queue(s)."
+        out = []
+        for name in names[:20]:
+            row = by_queue.get(name) or {}
+            queue_items = [item for item in items if isinstance(item, dict)
+                           and str(item.get("project") or "").upper() == name]
+            depth = row.get("depth")
+            if depth is None:
+                depth = sum(1 for item in queue_items if item.get("status") != "closed")
+            needs = [str(item.get("ref") or "").upper() for item in queue_items
+                     if item.get("needs_input") or item.get("status") == "blocked"]
+            needs = [ref for ref in needs if _TICKET_REF_RE.fullmatch(ref)]
+            line = f"{name}: {int(depth or 0)} open"
+            if row.get("workers") is not None:
+                line += f", {int(row.get('workers') or 0)} worker(s)"
+            if row.get("stuck"):
+                line += ", stuck"
+            line += f"; {len(needs)} need input"
+            if needs:
+                line += " (" + ", ".join(needs[:12]) + ")"
+            out.append(line)
+        return "\n".join(out)[:4000]
+
+    def _tool_triage_queue(self, args):
+        """Create a confirm-only senior triage session proposal for one queue."""
+        queue = str(args.get("queue") or "").strip().upper()
+        if not _QUEUE_NAME_RE.fullmatch(queue):
+            return "error: queue must use letters, numbers, _ or -"
+        repo_path, error = _core._wt_queue_attend_resolve_repo(queue)
+        if error:
+            return f"error: {self._compact_text(error, 300)}"
+        explicit_engine = str(args.get("engine") or "").strip().lower()
+        explicit_model = str(args.get("model") or "").strip()
+        explicit_effort = str(args.get("effort") or "").strip().lower()
+        if bool(explicit_engine) != bool(explicit_model):
+            return "error: explicit engine and model must be provided together"
+        profile = str(args.get("profile") or "deep").strip().lower()
+        if profile not in ("deep", "default"):
+            return "error: profile must be deep or default"
+        if explicit_engine:
+            engine, model, effort = explicit_engine, explicit_model, explicit_effort
+        else:
+            try:
+                defaults = _core._load_spawn_defaults() or {}
+            except Exception:
+                defaults = {}
+            if profile == "deep":
+                routes = ((defaults.get("model_profiles") or {}).get("deep") or {}).get("models") or []
+                route = next((row for row in routes if isinstance(row, dict)
+                              and str(row.get("engine") or "").strip()
+                              and str(row.get("model") or "").strip()), None)
+                if route is None:
+                    return "error: configure a Deep profile in CCC Settings before proposing deep queue triage"
+                engine = str(route.get("engine") or "").strip().lower()
+                model = str(route.get("model") or "").strip()
+                effort = str(route.get("effort") or "").strip().lower()
+            else:
+                engine = str(defaults.get("worker_engine") or "").strip().lower()
+                model = str(defaults.get("worker_model") or "").strip()
+                effort = str(defaults.get("worker_reasoning_effort") or "").strip().lower()
+        if engine and not re.fullmatch(r"[a-z0-9_-]{1,32}", engine):
+            return "error: engine has unexpected characters"
+        if model and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:\[\]-]{0,63}", model):
+            return "error: model has unexpected characters"
+        if effort and not re.fullmatch(r"[a-z]+", effort):
+            return "error: effort has unexpected characters"
+        prompt = (
+            f"Act as the senior triage lead for WatchTower queue {queue}. Inspect its "
+            "tickets and blockers, explain every recorded needs input question using the "
+            "ticket evidence, inspect stale claims safely, prioritize the next work, "
+            "and report a concise triage summary. No blindly reclaiming live workers. "
+            "Do not implement ticket fixes or mutate ticket state unless the owner "
+            "explicitly asks after reviewing your report."
         )
+        params = {"cwd": str(repo_path), "prompt": prompt, "name": f"Triage {queue}"}
+        if engine:
+            params["engine"] = engine
+        if model:
+            params["model"] = model
+        if effort:
+            params["effort"] = effort
+        return self._tool_propose({
+            "kind": "spawn_session", "params": params,
+            "reason": f"Triage WatchTower queue {queue} with a senior session.",
+        })
 
     def _tool_propose(self, args):
         kind = str(args.get("kind") or "").strip()
@@ -912,7 +1122,7 @@ class VoiceSession:
             self._welcome_sent = True
         _, error = self.call("thread/realtime/appendSpeech", {
             "threadId": self.thread_id,
-            "text": "Hi, I'm here. What would you like to work on?",
+            "text": "Hi, what's up?",
         }, timeout=15)
         if error:
             # A later connected heartbeat can retry a rejected request.
@@ -1403,7 +1613,7 @@ def _looks_sideband(msg):
 
 
 def _tool_specs():
-    """dynamicTools surface: four read-only + one propose-only mutating tool."""
+    """dynamicTools surface: read-only tools plus confirm-only proposals."""
     return [
         {
             "type": "function",
@@ -1445,9 +1655,40 @@ def _tool_specs():
         },
         {
             "type": "function",
+            "name": "ccc_models",
+            "description": "List approved, currently available model IDs, labels, and supported efforts. Use before choosing an explicit engine/model triage route. Read-only.",
+            "inputSchema": {"type": "object", "properties": {
+                "engine": {"type": "string", "description": "optional engine name"},
+                "query": {"type": "string", "description": "optional model name spoken by the user"},
+            }},
+        },
+        {
+            "type": "function",
             "name": "ccc_queues",
-            "description": "WatchTower queue rollup: open tickets, live workers, stuck queues. Read-only.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "description": "WatchTower queue summaries, including cached needs-input refs. Pass queue for one named queue. Read-only.",
+            "inputSchema": {"type": "object", "properties": {
+                "queue": {"type": "string", "description": "optional WatchTower queue name"},
+            }},
+        },
+        {
+            "type": "function",
+            "name": "ccc_ticket",
+            "description": "Read a WatchTower ticket body, recorded needs-input question, and recent comments. Read-only.",
+            "inputSchema": {"type": "object", "properties": {
+                "ref": {"type": "string", "description": "ticket ref like QUEUE-42"},
+            }, "required": ["ref"]},
+        },
+        {
+            "type": "function",
+            "name": "ccc_triage_queue",
+            "description": "Propose a senior session to safely triage one queue. Never spawns until the user confirms its CCC card. Defaults to the configured Deep profile; pass profile=default for worker defaults, or explicit engine, model, and optional effort for a chosen route.",
+            "inputSchema": {"type": "object", "properties": {
+                "queue": {"type": "string"},
+                "profile": {"type": "string", "enum": ["deep", "default"]},
+                "engine": {"type": "string"},
+                "model": {"type": "string"},
+                "effort": {"type": "string"},
+            }, "required": ["queue"]},
         },
         {
             "type": "function",
