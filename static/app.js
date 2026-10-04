@@ -80651,6 +80651,9 @@
 
   function claudePrewarmSpec(opts) {
     opts = opts || {};
+    // Pre-warming is disabled: it spawned ~340 background claude processes a
+    // week that expired unused. New sessions cold-start instead.
+    return null;
     if (getSpawnEngine() !== 'claude') return null;
     const worktree = document.getElementById('inlineWorktreeToggle');
     if (worktree && worktree.checked) return null;
