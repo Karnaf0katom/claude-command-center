@@ -3142,6 +3142,28 @@ _TITLER_TURNS_LIMIT = 40
 _TITLER_PROMPT_PREFIX = "Produce a concise 4-8 word title"
 
 
+def _titler_targets(max_bytes=400_000):
+    """{titler_sid: {target_sid, target_mtime}} from the tail of
+    titler-targets.jsonl (written by session_graph._record_titler_target)."""
+    out = {}
+    try:
+        path = _core.COMMAND_CENTER_STATE_DIR / "titler-targets.jsonl"
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - max_bytes))
+            lines = f.read().decode("utf-8", "ignore").splitlines()
+    except Exception:
+        return out
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("titler_sid"):
+            out[d["titler_sid"]] = d
+    return out
+
+
 def _titler_turns_payload():
     """Last-24h auto-titler turns (headless title helper runs), newest first.
 
@@ -3164,6 +3186,7 @@ def _titler_turns_payload():
     for t in turns:
         _throughput_add_bucket(total_bucket, t)
     turns.sort(key=lambda t: t.get("t_end") or "", reverse=True)
+    targets = _titler_targets()
     payload = {
         "ok": True,
         "window_hours": 24,
@@ -3180,6 +3203,8 @@ def _titler_turns_payload():
                 "dur_sec": t.get("dur_sec") or 0,
                 "tokens": (t.get("tokens_in") or 0) + (t.get("tokens_out") or 0),
                 "output_tokens": t.get("tokens_out") or 0,
+                "target_sid": (targets.get(t.get("session_id")) or {}).get("target_sid") or "",
+                "target_mtime": (targets.get(t.get("session_id")) or {}).get("target_mtime"),
             }
             for t in turns[:_TITLER_TURNS_LIMIT]
         ],

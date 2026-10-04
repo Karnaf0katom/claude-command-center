@@ -1673,10 +1673,20 @@
         const name = document.createElement('span');
         name.textContent = t.title || t.session_id.slice(0, 8);
         name.style.cssText = 'flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;';
+        // mtime of the conversation this run titled (how stale it was).
+        const mt = document.createElement('span');
+        mt.style.cssText = 'flex:0 0 auto;opacity:.7;';
+        if (t.target_mtime) {
+          const sec = Math.max(0, Math.floor(Date.now() / 1000 - t.target_mtime));
+          mt.textContent = 'mtime ' + (sec < 3600 ? Math.floor(sec / 60) + 'm'
+            : sec < 86400 ? Math.floor(sec / 3600) + 'h' : Math.floor(sec / 86400) + 'd');
+          mt.title = 'Titled conversation last modified ' + new Date(t.target_mtime * 1000).toLocaleString()
+            + (t.target_sid ? ' (' + t.target_sid.slice(0, 8) + ')' : '');
+        }
         const tok = document.createElement('span');
         tok.textContent = _formatTokens(t.tokens || 0);
-        tok.style.cssText = 'flex:0 0 auto;';
-        row.appendChild(when); row.appendChild(name); row.appendChild(tok);
+        tok.style.cssText = 'flex:0 0 auto;min-width:30px;text-align:right;';
+        row.appendChild(when); row.appendChild(name); row.appendChild(mt); row.appendChild(tok);
         list.appendChild(row);
       });
       const top = d.turns && d.turns[0] ? d.turns[0].t_end + d.turns[0].session_id : '';

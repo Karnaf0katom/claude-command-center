@@ -1768,7 +1768,37 @@ def summarize_issue_title(issue_number, repo_path):
     return result
 
 
-def _summarize_title_text(first_msg, validate=False):
+TITLER_TARGETS_FILE = _core.COMMAND_CENTER_STATE_DIR / "titler-targets.jsonl"
+
+
+def _session_mtime_epoch(session_id):
+    """Transcript mtime (epoch) for a Claude or Codex session being titled, else None."""
+    for finder in (_core._find_session_jsonl, _core._resolve_codex_rollout_path):
+        try:
+            path = finder(session_id)
+            if path:
+                return os.path.getmtime(path)
+        except Exception:
+            continue
+    return None
+
+
+def _record_titler_target(titler_sid, target_sid, target_mtime):
+    """Append titler-run -> titled-session link. The titler's own transcript
+    never names its target, so the sidebar's auto-title section reads this to
+    show which conversation each run titled and how stale it was. One short
+    line per run; any process (server, archive-refresh subprocess) may append."""
+    try:
+        with open(TITLER_TARGETS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "titler_sid": titler_sid, "target_sid": target_sid,
+                "target_mtime": target_mtime, "ts": time.time(),
+            }) + "\n")
+    except OSError:
+        pass
+
+
+def _summarize_title_text(first_msg, validate=False, target_sid=""):
     """Use `claude -p` to produce a concise title for an opening prompt string.
 
     Engine-agnostic: callers resolve the opening prompt however fits their
@@ -1809,10 +1839,16 @@ def _summarize_title_text(first_msg, validate=False):
         result["error"] = claude_bin.get("reason") or "Claude Code CLI not found"
         result["code"] = claude_bin.get("code", "claude_unavailable")
         return result
+    # Pin the titler's own session id so its token usage can be tied back to
+    # the session it titled (see _record_titler_target).
+    titler_sid = str(uuid.uuid4())
+    if target_sid:
+        _record_titler_target(titler_sid, target_sid, _session_mtime_epoch(target_sid))
     try:
         proc = subprocess.run(
             [
                 claude_bin["bin"], "-p", "--model", "claude-haiku-4-5-20251001",
+                "--session-id", titler_sid,
                 "--strict-mcp-config", '--mcp-config={"mcpServers":{}}',  # skip user MCP servers -- pure text-in/text-out
                 # Pure text-in/text-out: no settings/hooks/CLAUDE.md, no tools, and a
                 # one-line system prompt. Cuts a run from ~32k input tokens to <1k.
@@ -1870,7 +1906,7 @@ def summarize_session_title(session_id, validate=False):
     _core._log_activity("autotitle", "SPAWN",
                         f"sid={session_id[:8]}{_auto_title_mtime_tag(session_id)} "
                         f"via={'auto' if validate else 'manual'}")
-    result = _summarize_title_text(first_msg, validate=validate)
+    result = _summarize_title_text(first_msg, validate=validate, target_sid=session_id)
     if not result.get("ok"):
         return result
     title = result["title"]
@@ -2079,14 +2115,9 @@ def _auto_title_needed(session_id):
 
 def _auto_title_mtime_tag(session_id):
     """`mtime=<UTC iso> age=<s>s` of the session transcript being titled, for
-    the activity log, so a burst of titles can be traced to stale or churning
-    sessions. Empty string when the transcript can't be found."""
-    try:
-        path = _core._find_session_jsonl(session_id)
-        if path is None:
-            return ""
-        mtime = os.path.getmtime(path)
-    except Exception:
+    the activity log. Empty string when the transcript can't be found."""
+    mtime = _session_mtime_epoch(session_id)
+    if mtime is None:
         return ""
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
     return f" mtime={stamp} age={int(time.time() - mtime)}s"
@@ -2171,7 +2202,7 @@ def _kimi_auto_title_worker(session_id):
         if not first_prompt or _core._is_transcript_control_text(first_prompt):
             _auto_title_release(session_id)
             return
-        result = _summarize_title_text(first_prompt, validate=True)
+        result = _summarize_title_text(first_prompt, validate=True, target_sid=session_id)
         if not result.get("ok"):
             _auto_title_release(session_id)
             _core._log_activity("autotitle", "FAILED",
@@ -2255,7 +2286,7 @@ def _codex_auto_title_worker(session_id, first_message):
         _auto_title_release(session_id)
         return
     try:
-        result = _summarize_title_text(first_message, validate=True)
+        result = _summarize_title_text(first_message, validate=True, target_sid=session_id)
         if not result.get("ok"):
             _auto_title_release(session_id)
             _core._log_activity("autotitle", "FAILED",
