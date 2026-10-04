@@ -33,3 +33,10 @@ class TitlerTurnsPayload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerPromptSkip(unittest.TestCase):
+    def test_worker_prompt_is_skipped_but_normal_prompt_is_not(self):
+        from ccc_server import session_graph as g
+        self.assertTrue(g._is_wt_worker_session("x", "Drain the CCC WatchTower queue and keep it empty."))
+        self.assertFalse(g._is_wt_worker_session("x", "Fix the login bug"))

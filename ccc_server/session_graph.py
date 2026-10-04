@@ -1814,6 +1814,10 @@ def _summarize_title_text(first_msg, validate=False):
             [
                 claude_bin["bin"], "-p", "--model", "claude-haiku-4-5-20251001",
                 "--strict-mcp-config", '--mcp-config={"mcpServers":{}}',  # skip user MCP servers -- pure text-in/text-out
+                # Pure text-in/text-out: no settings/hooks/CLAUDE.md, no tools, and a
+                # one-line system prompt. Cuts a run from ~32k input tokens to <1k.
+                "--setting-sources", "", "--tools", "",
+                "--system-prompt", "You write short session titles.",
                 instruction,
             ],
             capture_output=True,
@@ -2022,6 +2026,22 @@ def _auto_title_looks_bogus(title):
     return any(m in low for m in _AUTO_TITLE_REJECT_MARKERS)
 
 
+_WT_WORKER_PROMPT_RE = re.compile(r"^Drain the \S+ WatchTower queue")
+
+
+def _is_wt_worker_session(session_id, first_message=""):
+    """True for sessions WatchTower launched as queue workers. Their prompt is
+    the same "Drain the <Q> WatchTower queue ..." text every cycle, so a Haiku
+    title adds nothing, and a respawning worker fleet turned titling into
+    ~450 runs/day. The ledger only knows a few of them, so match the prompt too."""
+    if _WT_WORKER_PROMPT_RE.match((first_message or "").lstrip()):
+        return True
+    try:
+        return session_id in set(_core._wt_read_worker_session_ids())
+    except Exception:
+        return False
+
+
 def _auto_title_needed(session_id):
     """True when this session has no real title of its own.
 
@@ -2038,6 +2058,8 @@ def _auto_title_needed(session_id):
     # junk-titled sessions in four minutes.
     first = _extract_first_message(session_id) or ""
     if not first.strip() or first.startswith(_core._GENERATED_HELPER_SESSION_PREFIXES):
+        return False
+    if _is_wt_worker_session(session_id, first):
         return False
     if _core._is_transcript_control_text(first):
         return False
@@ -2271,7 +2293,7 @@ def _request_codex_auto_title(session_id, fresh=None):
         except Exception:
             fresh = None
     first_message = ((fresh or {}).get("first_user_message") or "").strip()
-    if not first_message:
+    if not first_message or _is_wt_worker_session(sid, first_message):
         return
     if not _auto_title_claim(sid):
         return
