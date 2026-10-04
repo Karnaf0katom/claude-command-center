@@ -26225,6 +26225,7 @@ _BACKGROUND_API_READ_PATHS = frozenset({
     "/api/system/scheduled-jobs",
     "/api/jobs",
     "/api/throughput/daily",
+    "/api/titler-turns",
     "/api/vercel-deploy",
     "/api/watchtower/service/status",
 })
@@ -27621,6 +27622,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(payload, status)
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e), "daily": []}, 200)
+            return
+        elif path == "/api/titler-turns":
+            # Last-24h auto-titler turns + token total for the sidebar section.
+            try:
+                self.send_json(_titler_turns_payload(), 200)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e), "turns": []}, 200)
             return
         elif path == "/api/throughput/week-rankings":
             # Per-session token contribution for the current weekly period,

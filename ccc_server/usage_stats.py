@@ -3136,6 +3136,59 @@ def _throughput_window_payload(start, end, engine_filter=None, limit=50):
     return payload, 200
 
 
+_TITLER_TURNS_CACHE = {"ts": 0.0, "payload": None}
+_TITLER_TURNS_CACHE_TTL = 15
+_TITLER_TURNS_LIMIT = 40
+_TITLER_PROMPT_PREFIX = "Produce a concise 4-8 word title"
+
+
+def _titler_turns_payload():
+    """Last-24h auto-titler turns (headless title helper runs), newest first.
+
+    Feeds the sidebar "auto-title" section. The titler is a `claude -p` run in
+    the scratch dir whose prompt starts with ``_TITLER_PROMPT_PREFIX``. Reuses
+    the per-file (mtime, size) turn cache behind /api/throughput/window plus a
+    short TTL, so a 15s poll never re-walks sessions. Totals cover every titler
+    turn in the window; ``turns`` is capped to the newest ``_TITLER_TURNS_LIMIT``.
+    """
+    now = time.time()
+    cached = _TITLER_TURNS_CACHE
+    if cached["payload"] is not None and now - cached["ts"] < _TITLER_TURNS_CACHE_TTL:
+        return cached["payload"]
+    turns = [
+        t for t in _throughput_window_turns(now - 86400, now + 60, None)
+        if "command-center-scratch" in (t.get("folder_path") or "")
+        and (t.get("trigger_preview") or "").startswith(_TITLER_PROMPT_PREFIX)
+    ]
+    total_bucket = _throughput_empty_bucket()
+    for t in turns:
+        _throughput_add_bucket(total_bucket, t)
+    turns.sort(key=lambda t: t.get("t_end") or "", reverse=True)
+    payload = {
+        "ok": True,
+        "window_hours": 24,
+        "turn_count": len(turns),
+        "total_tokens": total_bucket["total_tokens"],
+        "output_tokens": total_bucket["output_tokens"],
+        "cost_usd": round(total_bucket["cost_usd"], 4),
+        "turns": [
+            {
+                "session_id": t.get("session_id") or "",
+                "title": (t.get("assistant_preview") or "").strip(),
+                "model": t.get("model") or "",
+                "t_end": t.get("t_end") or "",
+                "dur_sec": t.get("dur_sec") or 0,
+                "tokens": (t.get("tokens_in") or 0) + (t.get("tokens_out") or 0),
+                "output_tokens": t.get("tokens_out") or 0,
+            }
+            for t in turns[:_TITLER_TURNS_LIMIT]
+        ],
+    }
+    cached["ts"] = now
+    cached["payload"] = payload
+    return payload
+
+
 def _throughput_local_day_bounds(date_str=None):
     """(start_epoch, end_epoch, iso_date) for a local calendar day."""
     local_midnight = datetime.now().astimezone().replace(
