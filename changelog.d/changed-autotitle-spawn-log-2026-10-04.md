@@ -1,0 +1,1 @@
+- Every auto-title spawn (including manual and "Summarize all") now writes an activity-log line with the session mtime.

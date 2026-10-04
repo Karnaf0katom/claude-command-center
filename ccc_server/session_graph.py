@@ -1861,6 +1861,11 @@ def summarize_session_title(session_id, validate=False):
     summarizer asking us for a prompt, rather than writing it onto the row.
     """
     first_msg = _extract_first_message(session_id)
+    # Every titler spawn passes through here (auto-titler, /summarize, "Summarize
+    # all"), so this is the one line that attributes token burn to a session.
+    _core._log_activity("autotitle", "SPAWN",
+                        f"sid={session_id[:8]}{_auto_title_mtime_tag(session_id)} "
+                        f"via={'auto' if validate else 'manual'}")
     result = _summarize_title_text(first_msg, validate=validate)
     if not result.get("ok"):
         return result
