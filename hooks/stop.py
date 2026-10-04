@@ -20,6 +20,7 @@ except ImportError:
         pass
 
 LIVE_STATE_DIR = os.path.expanduser("~/.claude/command-center/live-state")
+STATE_DIR = os.path.expanduser("~/.claude/command-center")
 PORT_FILE = os.path.expanduser("~/.claude/command-center/port.txt")
 
 
@@ -50,10 +51,35 @@ def request_auto_title(session_id):
         pass  # server down, no port file, anything — titling is best-effort
 
 
-def session_title(transcript_path):
-    """Best-effort session name for the banner subtitle: /rename title, else
-    Claude's ai-title. Reads only the tail of the transcript (hook must stay
-    fast); returns "" when none is found."""
+def _sidecar_title(session_id):
+    """Names CCC itself holds, in the same priority the sidebar uses: a user
+    rename, then the auto-title. Both are tiny files; no transcript parse."""
+    try:
+        with open(os.path.join(STATE_DIR, "session-names.json")) as f:
+            name = (json.load(f) or {}).get(session_id)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(LIVE_STATE_DIR, f"{session_id}_autotitled")) as f:
+            title = (json.load(f) or {}).get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def session_title(session_id, transcript_path):
+    """Current session name for the banner subtitle. Prefers CCC's own names
+    (rename, auto-title) because the transcript's custom-title is often just
+    the launch slug (e.g. "prewarm-<repo>") that CCC re-appends every turn.
+    Falls back to the transcript's /rename title, then Claude's ai-title.
+    Reads only the transcript tail (hook must stay fast); "" when none."""
+    name = _sidecar_title(session_id)
+    if name:
+        return name
     try:
         size = os.path.getsize(transcript_path)
         with open(transcript_path, "rb") as f:
@@ -61,7 +87,7 @@ def session_title(transcript_path):
             tail = f.read().decode("utf-8", "ignore")
     except Exception:
         return ""
-    custom = ai = ""
+    custom = ai = agent = ""
     for line in tail.splitlines():
         if '"customTitle"' in line:
             try:
@@ -73,6 +99,13 @@ def session_title(transcript_path):
                 ai = json.loads(line).get("aiTitle") or ai
             except Exception:
                 pass
+        elif '"agentName"' in line:
+            try:
+                agent = json.loads(line).get("agentName") or agent
+            except Exception:
+                pass
+    if custom and (custom == agent or custom.startswith("prewarm-")):
+        custom = ""  # launch slug, not a real name
     return custom or ai
 
 
@@ -122,7 +155,7 @@ def main():
             notify(
                 title="Claude Command Center",
                 message="Ready for your input",
-                subtitle=session_title(data.get("transcript_path") or "") or session_id[:8],
+                subtitle=session_title(session_id, data.get("transcript_path") or "") or session_id[:8],
                 session_id=session_id,
             )
 

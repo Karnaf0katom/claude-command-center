@@ -1,0 +1,1 @@
+- The "Ready for your input" banner shows the current session name (rename or auto-title) instead of a stale launch slug like "prewarm-<repo>".
