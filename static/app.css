@@ -5223,6 +5223,12 @@
   .stream-bubble:not(.stream-bubble-has-content) .stream-bubble-header {
     display: none;
   }
+  /* OPS-1351: a bubble created by a thinking-only/empty spawn event rendered
+   * as an empty dashed box that popped in and out, shifting the transcript by
+   * a row each time. Keep the whole bubble out of layout until it has content. */
+  .stream-bubble:not(.stream-bubble-has-content) {
+    display: none;
+  }
   .stream-block-text { white-space: normal; }
   .stream-block-tool {
     display: inline-flex; align-items: center; gap: 6px;
