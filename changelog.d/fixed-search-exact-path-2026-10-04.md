@@ -1,0 +1,1 @@
+- Searching for an exact path or filename (e.g. a pasted-image path) now matches only sessions containing that exact string, instead of every session that shares any of its words.

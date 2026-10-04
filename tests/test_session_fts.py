@@ -116,6 +116,24 @@ def test_search_sessions_finds_claude_prompt(fts_env):
     assert "score" in results[0]
 
 
+def test_search_sessions_path_query_matches_exactly(fts_env):
+    """CCC-1256: a pasted path must match only the session that has that
+    exact path, not every session mentioning any pasted image."""
+    target = "aaaaaaaa-0000-0000-0000-000000000001"
+    other = "aaaaaaaa-0000-0000-0000-000000000002"
+    for sid, num in ((target, "1791146905566"), (other, "1791124336680")):
+        _write_claude_jsonl(fts_env["projects"] / "repo-p" / f"{sid}.jsonl", sid, [{
+            "type": "user",
+            "cwd": "/Users/test/repo-p",
+            "message": {"role": "user", "content": f"look at /Users/test/pasted-images/paste-{num}.png please"},
+        }])
+
+    hits = session_fts.search_sessions("/Users/test/pasted-images/paste-1791146905566.png")
+    assert [h["session_id"] for h in hits] == [target]
+    assert session_fts.search_sessions("/Users/test/pasted-images/paste-999.png") == []
+    assert session_fts._literal_phrase_query("two words") == "two words"
+
+
 def test_search_sessions_finds_assistant_text(fts_env):
     sid = "22222222-3333-4444-5555-666666666666"
     file_path = fts_env["projects"] / "repo-b" / f"{sid}.jsonl"

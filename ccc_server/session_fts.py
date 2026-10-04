@@ -1632,12 +1632,29 @@ def index_health() -> dict:
     }
 
 
+def _literal_phrase_query(q: str) -> str:
+    """A whitespace-free literal made of several tokens (a file path, URL,
+    filename, dotted/hyphenated identifier) becomes one quoted FTS5 phrase,
+    so it matches that exact token sequence instead of OR-matching its
+    pieces -- otherwise ".../paste-123.png" hits every session that ever
+    mentioned any pasted image (CCC-1256). Anything else is returned as-is."""
+    if not q or any(ch.isspace() for ch in q) or '"' in q:
+        return q
+    tokens = _HISTORY_LITERAL_TOKEN_RE.findall(q)
+    if len(tokens) < 2:
+        return q
+    return '"' + " ".join(tokens) + '"'
+
+
+_HISTORY_LITERAL_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
 def search_sessions(query: str, limit: int = 20, force_refresh: bool = False) -> list[dict]:
     """Search indexed sessions with BM25.
 
     Returns a list of dicts with 'session_id', ranked best first.
     """
-    q = (query or "").strip()
+    q = _literal_phrase_query((query or "").strip())
     if not q:
         return []
 
@@ -1850,8 +1867,12 @@ def search_sessions_enriched(
     sids = [h["session_id"] for h in hits]
     meta = _meta_for_sids(conn, sids)
 
-    terms = extract_history_terms(q, max_terms=25)
-    or_q = " OR ".join(f'"{t}"' for t in terms) if terms else ""
+    phrase_q = _literal_phrase_query(q)
+    if phrase_q != q:
+        or_q = phrase_q
+    else:
+        terms = extract_history_terms(q, max_terms=25)
+        or_q = " OR ".join(f'"{t}"' for t in terms) if terms else ""
     marked = _snippet_for_sids(conn, sids, or_q)
     plain: dict[str, str] | None = None
     hermes_snips: dict[str, str] | None = None
