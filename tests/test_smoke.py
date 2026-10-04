@@ -7662,6 +7662,7 @@ class TestRepoContextHelpers(unittest.TestCase):
     def setUp(self):
         self.tmp_home = tempfile.mkdtemp(prefix="ccc-repo-context-home-")
         self._prev_home = os.environ.get("HOME")
+        self._prev_userprofile = os.environ.get("USERPROFILE")
         self._prev_watchtower_env = {
             var: os.environ.get(var) for var in self._WATCHTOWER_ENV_FILES
         }
@@ -7669,6 +7670,7 @@ class TestRepoContextHelpers(unittest.TestCase):
             "WATCHTOWER_STOP_SIGNALS_DIR"
         )
         os.environ["HOME"] = str(pathlib.Path(self.tmp_home).resolve())
+        os.environ["USERPROFILE"] = str(pathlib.Path(self.tmp_home).resolve())
         # server._q is watchtower.queue (a hard dependency). Without pointing
         # ALL of its store/config/workers files at this test's tmp_home,
         # enqueue_annotation_ux_fixes_queue() writes real tickets into the live
@@ -7699,6 +7701,10 @@ class TestRepoContextHelpers(unittest.TestCase):
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = self._prev_home
+        if self._prev_userprofile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = self._prev_userprofile
         for var, prev in self._prev_watchtower_env.items():
             if prev is None:
                 os.environ.pop(var, None)
@@ -14225,7 +14231,7 @@ class TestRepoContextHelpers(unittest.TestCase):
 
     def test_codex_shared_state_holders_exclude_own_process_group(self):
         server = self.server
-        codex_home = pathlib.Path.home() / ".codex"
+        codex_home = pathlib.Path(self.tmp_home) / ".codex"
         codex_home.mkdir(parents=True, exist_ok=True)
         state_db = codex_home / "state_5.sqlite"
         logs_db = codex_home / "logs_2.sqlite"
@@ -18874,7 +18880,9 @@ class TestQuestionRelay(unittest.TestCase):
     def setUp(self):
         self.tmp_home = tempfile.mkdtemp(prefix="ccc-question-relay-home-")
         self._prev_home = os.environ.get("HOME")
+        self._prev_userprofile = os.environ.get("USERPROFILE")
         os.environ["HOME"] = str(pathlib.Path(self.tmp_home).resolve())
+        os.environ["USERPROFILE"] = str(pathlib.Path(self.tmp_home).resolve())
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)
         self.server = importlib.import_module("server")
@@ -18884,6 +18892,10 @@ class TestQuestionRelay(unittest.TestCase):
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = self._prev_home
+        if self._prev_userprofile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = self._prev_userprofile
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)
         shutil.rmtree(self.tmp_home, ignore_errors=True)
@@ -21048,7 +21060,7 @@ def test_wt_receipt_route_and_staged_send_feedback():
     wt_msg_py = pathlib.Path(PROJECT_ROOT, "ccc_server", "watchtower_msg.py").read_text(encoding="utf-8")
     assert '"--no-queue", "--json"' in wt_msg_py
     assert 'elif path.startswith("/api/wt/receipt/"):' in server_py
-    assert '["wt", "receipts", "get", rid]' in server_py
+    assert '[wt_bin, "receipts", "get", rid]' in server_py
     assert '"skip_wt": bool(payload.get("skip_wt"))' in server_py
     assert "**inject_options" in server_py
     app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")

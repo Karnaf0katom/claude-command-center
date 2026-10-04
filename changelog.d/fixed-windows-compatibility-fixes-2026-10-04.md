@@ -1,0 +1,1 @@
+- Fixed Windows compatibility across process liveness checking, WatchTower CLI discovery, detached daemon startup, hook script sync, FIFO fallbacks, project root boundary detection, test isolation, and Desktop app deep links.

@@ -63,6 +63,18 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
     tomllib = None
 
+if sys.platform == "win32":
+    if not os.environ.get("PYTHONUTF8"):
+        os.environ["PYTHONUTF8"] = "1"
+    if not os.environ.get("PYTHONIOENCODING"):
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # run.sh execs this file directly, so it runs as __main__. Extracted
 # ccc_server/* modules do `import server` to reach names still living here;
 # without this alias that import would re-execute the file as a second module
@@ -527,9 +539,7 @@ def _retire_wedged_control_plane_worker():
         else:
             deadline = time.time() + 5
             while time.time() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
+                if not _is_pid_alive(pid):
                     stopped = True
                     break
                 time.sleep(0.1)
@@ -1321,9 +1331,10 @@ def _watchtower_service_status(*, probe_api=True, include_queues=False):
     pid_alive = False
     try:
         pid = int(_watchtower_daemon_pid_path().read_text().strip())
-        os.kill(pid, 0)
-        pid_alive = True
-    except (OSError, ValueError, ProcessLookupError):
+        pid_alive = _is_pid_alive(pid)
+        if not pid_alive:
+            pid = None
+    except (OSError, ValueError):
         pid = None
     argv = _watchtower_process_argv(pid) if pid_alive else []
     command_verified = bool(pid_alive and _watchtower_daemon_command(argv))
@@ -1436,48 +1447,81 @@ def _watchtower_service_action(action):
                     "ok": False,
                     "error": "WatchTower process identity could not be verified",
                 }
-            try:
-                stopped = subprocess.run(
-                    [wt_cli, "stop"],
-                    capture_output=True, text=True, timeout=20,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                return {"ok": False, "error": f"WatchTower stop failed: {exc}"}
-            if stopped.returncode != 0:
-                return {
-                    "ok": False,
-                    "error": (
-                        (stopped.stderr or stopped.stdout or "").strip()
-                        or f"WatchTower stop exited {stopped.returncode}"
-                    ),
-                }
-            # The pid is dead now, so its memoised argv is the one thing that
-            # could survive into a pid-reuse false positive. Drop it.
-            _watchtower_forget_process_argv(before.get("pid"))
-            _watchtower_forget_api_probe()
+            if sys.platform == "win32":
+                pid = before.get("pid")
+                if pid:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                _watchtower_forget_process_argv(pid)
+                _watchtower_forget_api_probe()
+                try:
+                    _watchtower_daemon_pid_path().unlink()
+                except OSError:
+                    pass
+            else:
+                try:
+                    stopped = subprocess.run(
+                        [wt_cli, "stop"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    return {"ok": False, "error": f"WatchTower stop failed: {exc}"}
+                if stopped.returncode != 0:
+                    return {
+                        "ok": False,
+                        "error": (
+                            (stopped.stderr or stopped.stdout or "").strip()
+                            or f"WatchTower stop exited {stopped.returncode}"
+                        ),
+                    }
+                # The pid is dead now, so its memoised argv is the one thing that
+                # could survive into a pid-reuse false positive. Drop it.
+                _watchtower_forget_process_argv(before.get("pid"))
+                _watchtower_forget_api_probe()
             deadline = time.time() + 5
             while time.time() < deadline:
                 if not _watchtower_service_status(probe_api=False).get("running"):
                     break
                 time.sleep(0.1)
-        command = [wt_cli, "start"]
-        if platform.system() != "Darwin":
-            command.extend(_watchtower_restart_options(old_argv))
-        try:
-            started = subprocess.run(
-                command,
-                capture_output=True, text=True, timeout=25,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"ok": False, "error": f"WatchTower start failed: {exc}"}
-        if started.returncode != 0:
-            return {
-                "ok": False,
-                "error": (
-                    (started.stderr or started.stdout or "").strip()
-                    or f"WatchTower start exited {started.returncode}"
-                ),
-            }
+        if sys.platform == "win32":
+            detached_flag = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            group_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            creationflags = detached_flag | group_flag
+            command = [
+                sys.executable, "-m", "watchtower.cli", "start", "--foreground",
+                *_watchtower_restart_options(old_argv),
+            ]
+            try:
+                subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                return {"ok": False, "error": f"WatchTower start failed: {exc}"}
+        else:
+            command = [wt_cli, "start"]
+            if platform.system() != "Darwin":
+                command.extend(_watchtower_restart_options(old_argv))
+            try:
+                started = subprocess.run(
+                    command,
+                    capture_output=True, text=True, timeout=25,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return {"ok": False, "error": f"WatchTower start failed: {exc}"}
+            if started.returncode != 0:
+                return {
+                    "ok": False,
+                    "error": (
+                        (started.stderr or started.stdout or "").strip()
+                        or f"WatchTower start exited {started.returncode}"
+                    ),
+                }
         deadline = time.time() + 8
         current = _watchtower_service_status(probe_api=False)
         while time.time() < deadline and not current.get("running"):
@@ -2723,17 +2767,7 @@ def _wt_read_workers(include_activity=True):
             pid = int(w.get("pid", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             continue
-        alive = False
-        if pid:
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except ProcessLookupError:
-                alive = False
-            except PermissionError:
-                alive = True
-            except OSError:
-                alive = False
+        alive = bool(pid and _is_pid_alive(pid))
         if not alive:
             continue
         row = dict(w)
@@ -9388,6 +9422,9 @@ def _spawn_env(auto_compact_k=None):
     tokens = _spawn_auto_compact_k_tokens(auto_compact_k=auto_compact_k)
     if tokens:
         env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(tokens)
+    if sys.platform == "win32":
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
 
@@ -20737,7 +20774,7 @@ HOOK_SCRIPTS_DIR = Path.home() / ".claude" / "command-center" / "hooks"
 HOOK_MARKER = "command-center/hooks/"
 CCC_HOOK_SCRIPT_NAMES = (
     "pre-tool-use.py", "post-tool-use.py", "notification.py", "stop.py",
-    "pre-compact.py", "post-compact.py",
+    "pre-compact.py", "post-compact.py", "session-start.py", "_notify.py",
     # Codex hooks (installed into ~/.codex/hooks.json, not settings.json —
     # see ensure_codex_hooks_installed) share this same copy step and the
     # same HOOK_SCRIPTS_DIR location so both engines' scripts stay in sync
@@ -26808,8 +26845,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "wt CLI not available"}, 503)
             else:
                 try:
+                    wt_bin = _wt_cli_path() or "wt"
                     proc = subprocess.run(
-                        ["wt", "receipts", "get", rid],
+                        [wt_bin, "receipts", "get", rid],
                         capture_output=True, text=True, timeout=15,
                     )
                 except (OSError, subprocess.TimeoutExpired, ValueError) as e:

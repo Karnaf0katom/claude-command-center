@@ -3844,11 +3844,11 @@ _SESSION_UUID_RE = re.compile(
 
 
 def open_session_in_claude_desktop(session_id):
-    """Open the macOS Claude Desktop app and resume `session_id`.
+    """Open the Claude Desktop app and resume `session_id`.
 
     Uses the registered `claude://resume?session=<uuid>` deep-link, which
     the desktop app handles by importing the CLI session and navigating
-    to it. macOS only — relies on `open(1)`.
+    to it. Supported on macOS (via `open(1)`) and Windows (via `os.startfile`).
 
     Returns {ok, error?, url?}.
     """
@@ -3856,17 +3856,20 @@ def open_session_in_claude_desktop(session_id):
         return {"ok": False, "error": "missing session_id"}
     if not _SESSION_UUID_RE.match(session_id):
         return {"ok": False, "error": "invalid session_id (expected UUID)"}
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" and sys.platform != "win32":
         _core._log_macos_only("desktopDeepLinks")
-        return {"ok": False, "error": "Claude Desktop deep-link is macOS-only"}
+        return {"ok": False, "error": "Claude Desktop deep-link is not supported on this platform"}
     url = f"claude://resume?session={session_id}"
     try:
         ctx = _core.repo_from_session(session_id)
         log_dir = _core.repo_log_dir(ctx["repo_path"])
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"desktop-{session_id[:8]}.log"
-        lf = open(log_path, "w")
-        subprocess.Popen(["open", url], stdout=lf, stderr=lf)
+        if sys.platform == "win32":
+            os.startfile(url)
+        else:
+            lf = open(log_path, "w")
+            subprocess.Popen(["open", url], stdout=lf, stderr=lf)
     except _core.RepoContextError as e:
         return e.as_payload()
     except (FileNotFoundError, OSError) as e:
@@ -3876,11 +3879,12 @@ def open_session_in_claude_desktop(session_id):
 
 
 def open_session_in_codex_desktop(session_id, cwd=None):
-    """Open the macOS Codex app for a Codex session.
+    """Open the Codex app for a Codex session.
 
-    Codex.app registers a `codex://` URL scheme. We mirror the Claude
+    Codex registers a `codex://` URL scheme. We mirror the Claude
     Desktop launch path with a canonical thread URL so the UI can expose a
-    distinct app destination next to the terminal fallback.
+    distinct app destination next to the terminal fallback. Supported on macOS
+    and Windows.
     """
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
@@ -3893,9 +3897,9 @@ def open_session_in_codex_desktop(session_id, cwd=None):
         _is_cloud = False
     if not _core._is_codex_session(session_id) and not _is_cloud:
         return {"ok": False, "error": "Codex launch only handles Codex sessions"}
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" and sys.platform != "win32":
         _core._log_macos_only("desktopDeepLinks")
-        return {"ok": False, "error": "Codex app launch is macOS-only"}
+        return {"ok": False, "error": "Codex app launch is not supported on this platform"}
     # Existing chats retain their recorded workspace. The supported thread
     # link needs only the ID, so caller-supplied cwd cannot replace it.
     url = "codex://threads/" + urllib.parse.quote(str(session_id), safe="")
@@ -3904,10 +3908,13 @@ def open_session_in_codex_desktop(session_id, cwd=None):
         log_dir = _core.repo_log_dir(ctx["repo_path"])
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"codex-desktop-{session_id[:8]}.log"
-        with open(log_path, "w") as lf:
-            launched = subprocess.run(["open", "-b", "com.openai.codex", url], stdout=lf, stderr=lf, timeout=10)
-        if launched.returncode:
-            return {"ok": False, "error": "Codex Desktop did not accept the conversation link. Try opening it again.", "url": url}
+        if sys.platform == "win32":
+            os.startfile(url)
+        else:
+            with open(log_path, "w") as lf:
+                launched = subprocess.run(["open", "-b", "com.openai.codex", url], stdout=lf, stderr=lf, timeout=10)
+            if launched.returncode:
+                return {"ok": False, "error": "Codex Desktop did not accept the conversation link. Try opening it again.", "url": url}
     except _core.RepoContextError as e:
         return e.as_payload()
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
@@ -5790,6 +5797,10 @@ _desktop_meta_cache_mtime = 0
 
 
 def _claude_desktop_sessions_root():
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Claude" / "claude-code-sessions"
     return (
         Path.home()
         / "Library"

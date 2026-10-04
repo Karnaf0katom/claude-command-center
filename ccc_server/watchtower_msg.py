@@ -125,14 +125,50 @@ def _find_wt_cli():
     not installed" in the dashboard, `wt` start/restart fails, and every
     queue affordance silently disables itself."""
     found = _core.shutil.which("wt") or ""
+    if sys.platform == "win32" and found and "windowsapps" in found.lower():
+        found = ""
     if not found:
-        try:
-            scheme = "posix_user" if os.name == "posix" else "nt_user"
-            candidate = os.path.join(sysconfig.get_path("scripts", scheme=scheme), "wt")
-            if os.access(candidate, os.X_OK):
-                found = candidate
-        except Exception:
-            pass
+        if sys.platform == "win32":
+            exe_names = ("wt.exe", "wt.cmd", "wt.bat")
+            candidates = []
+            try:
+                scripts_dir = sysconfig.get_path("scripts", scheme="nt_user")
+                candidates.extend(os.path.join(scripts_dir, name) for name in exe_names)
+            except Exception:
+                pass
+            try:
+                scripts_dir = sysconfig.get_path("scripts")
+                candidates.extend(os.path.join(scripts_dir, name) for name in exe_names)
+            except Exception:
+                pass
+            try:
+                prefix_scripts = os.path.join(sys.prefix, "Scripts")
+                candidates.extend(os.path.join(prefix_scripts, name) for name in exe_names)
+            except Exception:
+                pass
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                py_ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
+                candidates.extend(os.path.join(appdata, "Python", py_ver, "Scripts", name) for name in exe_names)
+            candidates.extend(os.path.join(str(Path.home()), ".local", "bin", name) for name in exe_names)
+
+            for candidate in candidates:
+                try:
+                    if os.path.isfile(candidate):
+                        if "windowsapps" in candidate.lower():
+                            continue
+                        found = candidate
+                        break
+                except Exception:
+                    continue
+        else:
+            try:
+                scheme = "posix_user" if os.name == "posix" else "nt_user"
+                candidate = os.path.join(sysconfig.get_path("scripts", scheme=scheme), "wt")
+                if os.access(candidate, os.X_OK):
+                    found = candidate
+            except Exception:
+                pass
     return found
 
 
@@ -169,8 +205,9 @@ def _wt_import_available():
         _core._WT_IMPORT_AVAILABLE_CACHE = False
         if _core._wt_cli_available():
             try:
+                wt_bin = _core._wt_cli_path() or "wt"
                 proc = _core.subprocess.run(
-                    ["wt", "import", "--help"],
+                    [wt_bin, "import", "--help"],
                     capture_output=True, text=True, timeout=10,
                 )
                 _core._WT_IMPORT_AVAILABLE_CACHE = proc.returncode == 0
@@ -298,7 +335,8 @@ def _run_wt_import(doc_path, queue, *, apply=False, item_type=None):
     argv list only (never a shell string), so path/queue can't inject shell.
     Mirrors `_try_wt_send_for_headless_delivery`'s subprocess posture: bounded
     timeout, catch the OS/timeout family, degrade to a clear error dict."""
-    cmd = ["wt", "import", str(doc_path), "-q", queue]
+    wt_bin = _core._wt_cli_path() or "wt"
+    cmd = [wt_bin, "import", str(doc_path), "-q", queue]
     if apply:
         cmd.append("--apply")
     if item_type in ("bug", "feature"):
@@ -767,8 +805,9 @@ def _try_wt_send_for_headless_delivery(session_id, text):
     env = dict(os.environ)
     env["WATCHTOWER_DELEGATE_URL"] = "off"
     try:
+        wt_bin = _core._wt_cli_path() or "wt"
         proc = _core.subprocess.run(
-            ["wt", "send", session_id, text, "--no-queue", "--json"],
+            [wt_bin, "send", session_id, text, "--no-queue", "--json"],
             capture_output=True, text=True, timeout=30, env=env,
         )
     except (OSError, _core.subprocess.TimeoutExpired, ValueError):
@@ -855,8 +894,9 @@ def _try_wt_ask_for_headless_delivery(session_id, text, timeout_ms):
         return None
     timeout_s = max(1, math.ceil(timeout_ms / 1000.0))
     try:
+        wt_bin = _core._wt_cli_path() or "wt"
         proc = _core.subprocess.run(
-            ["wt", "ask", session_id, text, "--timeout", str(timeout_s), "--json"],
+            [wt_bin, "ask", session_id, text, "--timeout", str(timeout_s), "--json"],
             capture_output=True, text=True, timeout=timeout_s + 15,
         )
     except (OSError, _core.subprocess.TimeoutExpired, ValueError):

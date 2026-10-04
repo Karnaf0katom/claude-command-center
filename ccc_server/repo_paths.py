@@ -300,12 +300,14 @@ def _has_project_marker(path):
         p = Path(path).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
         return False
+    if p.parent == p or p == Path(p.anchor) or p == Path.home().resolve():
+        return False
     try:
         if (p / ".git").exists():
             return True
         if not (p / ".claude").is_dir():
             return False
-        return p != Path.home().resolve()
+        return True
     except (OSError, ValueError, RuntimeError):
         return False
 

@@ -98,6 +98,43 @@ def _iter_common_cli_candidates(cmd):
             yield p
 
 
+def _is_pid_alive(pid):
+    """Check if a process is alive without sending a terminating signal.
+
+    On Unix, `os.kill(pid, 0)` performs an error check only (does not send a signal).
+    On Windows, `os.kill(pid, 0)` maps signal 0 to CTRL_C_EVENT and terminates the
+    target process. We use Win32 OpenProcess + WaitForSingleObject on Windows.
+    """
+    try:
+        pid = int(pid)
+    except (ValueError, TypeError):
+        return False
+    if pid <= 0:
+        return False
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if not handle:
+                return kernel32.GetLastError() == 5  # ERROR_ACCESS_DENIED means process exists
+            try:
+                # 258 = WAIT_TIMEOUT (still running), 0 = WAIT_OBJECT_0 (terminated)
+                return kernel32.WaitForSingleObject(handle, 0) == 258
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def _path_is_within(child, parent):
     try:
         child_p = Path(child).expanduser().resolve(strict=False)

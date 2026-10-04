@@ -460,8 +460,10 @@ class TestFindConversationsOnMockFixture(unittest.TestCase):
         # real user's command-center state — no test pollution.
         cls._prev_env = {
             "HOME": os.environ.get("HOME"),
+            "USERPROFILE": os.environ.get("USERPROFILE"),
         }
         os.environ["HOME"] = str(resolved_home)
+        os.environ["USERPROFILE"] = str(resolved_home)
 
         cls.server = _fresh_server()
         cls.resolved_home = resolved_home

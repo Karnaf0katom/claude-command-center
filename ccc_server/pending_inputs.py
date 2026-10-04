@@ -5276,8 +5276,9 @@ def _verify_terminal_drain_receipts(now=None):
         item["last_check"] = now
         rec = None
         try:
+            wt_bin = _core._wt_cli_path() or "wt"
             proc = subprocess.run(
-                ["wt", "receipts", "get", item["receipt_id"]],
+                [wt_bin, "receipts", "get", item["receipt_id"]],
                 capture_output=True, text=True, timeout=10,
             )
             if proc.returncode == 0:

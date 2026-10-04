@@ -6807,6 +6807,8 @@ def _make_stdin_fifo(log_path):
     to subprocess.PIPE in that case — same behavior as before this
     feature shipped.
     """
+    if not hasattr(os, "mkfifo"):
+        return None, None
     try:
         log_path = Path(log_path)
         fifo_dir = _core.COMMAND_CENTER_STATE_DIR / "fifos"
@@ -6825,7 +6827,7 @@ def _make_stdin_fifo(log_path):
         # would deadlock the spawn flow.
         fd = os.open(str(fifo_path), os.O_RDWR | os.O_CLOEXEC)
         return str(fifo_path), fd
-    except OSError as e:
+    except (OSError, AttributeError) as e:
         print(f"  [spawn-fifo] mkfifo failed for {log_path} ({e}); falling back to PIPE")
         return None, None
 
@@ -7077,14 +7079,31 @@ def _write_fd_nonblocking(fd, line_bytes, timeout=0.25):
     return True
 
 
-def _write_via_pipe(proc, line_bytes):
+def _write_via_pipe(proc, line_bytes, timeout=0.25):
     if proc is None or getattr(proc, "stdin", None) is None:
         return False
+    if sys.platform == "win32":
+        box = [False]
+        def _worker():
+            try:
+                if hasattr(proc.stdin, "buffer"):
+                    proc.stdin.buffer.write(line_bytes)
+                    proc.stdin.buffer.flush()
+                else:
+                    proc.stdin.write(line_bytes)
+                    proc.stdin.flush()
+                box[0] = True
+            except (OSError, ValueError):
+                box[0] = False
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        return box[0]
     try:
         fd = proc.stdin.fileno()
     except (OSError, ValueError, AttributeError):
         return False
-    return _write_fd_nonblocking(fd, line_bytes)
+    return _write_fd_nonblocking(fd, line_bytes, timeout=timeout)
 
 
 def _write_via_spawn_fd(target, line, timeout=0.25):
@@ -7147,7 +7166,7 @@ def _write_stream_json_user_message(target, text, timeout=0.25):
             pending_commands = _pending_input_command_uuids(target)
             delivered = _core._write_via_spawn_fd(target, line, timeout=timeout)
             if not delivered:
-                delivered = _core._write_via_pipe(target.get("proc"), line)
+                delivered = _core._write_via_pipe(target.get("proc"), line, timeout=timeout)
             if not delivered:
                 return False
 
@@ -7161,7 +7180,7 @@ def _write_stream_json_user_message(target, text, timeout=0.25):
             )
             return True
 
-    return _core._write_via_pipe(target, line)
+    return _core._write_via_pipe(target, line, timeout=timeout)
 
 
 def _write_fifo_line_once(fifo_path, text, timeout=0.25):
@@ -7214,9 +7233,9 @@ def _write_stream_json_interrupt(target, timeout=0.25):
     if isinstance(target, dict):
         if _core._write_via_spawn_fd(target, line, timeout=timeout):
             return True
-        return _core._write_via_pipe(target.get("proc"), line)
+        return _core._write_via_pipe(target.get("proc"), line, timeout=timeout)
 
-    return _core._write_via_pipe(target, line)
+    return _core._write_via_pipe(target, line, timeout=timeout)
 
 
 def inject_into_spawned(pid, text):

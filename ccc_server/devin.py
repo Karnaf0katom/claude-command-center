@@ -918,10 +918,7 @@ def _devin_cli_pid_alive(pid):
     exits unreaped, its pid stays in the session lock and the durable queue
     parks every message as "external-owner" forever. Reap it here instead.
     """
-    try:
-        pid = int(pid)
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError, ValueError, TypeError):
+    if not _core._is_pid_alive(pid):
         return False
     try:
         reaped, _status = os.waitpid(pid, os.WNOHANG)
