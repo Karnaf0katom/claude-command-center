@@ -119,8 +119,10 @@ def test_recall_enriches_hits_with_title_repo_date_snippet(mock_memory_env):
     assert row["date"] == "2026-09-20"
     assert row["snippet"]
     assert isinstance(row["title"], str)
-    # Every result carries exactly the ticket's four enrichment fields.
-    assert set(row) == {"session_id", "title", "repo", "date", "snippet"}
+    # Every result carries the ticket's four enrichment fields, plus the
+    # last-activity time the multi-machine merge (S4) dedupes on. Lease
+    # fields appear only for sessions that were handed off.
+    assert set(row) == {"session_id", "title", "repo", "date", "snippet", "last_activity_ts"}
 
 
 def test_recall_empty_query_returns_no_results(mock_memory_env):

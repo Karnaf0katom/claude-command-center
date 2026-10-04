@@ -26249,6 +26249,13 @@ def _annotate_engine_not_installed(data, path):
     return data
 
 
+def _memory_scope(qs):
+    """`scope=all` fans /api/memory/* out to paired peers (multi-machine S4).
+    Anything else is local: the API default stays local so a caller resuming
+    by bare session_id never gets a peer's session (spec Q1)."""
+    return "all" if (qs.get("scope", ["local"])[0] or "").strip().lower() == "all" else "local"
+
+
 class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
     def _is_morning_path(self, path):
         """True if the request targets the (opt-in) Morning sub-feature."""
@@ -29316,7 +29323,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     limit = max(1, min(int(limit_raw), 50))
                 except ValueError:
                     limit = 20
-                self.send_json(_memory_recall(q, limit=limit))
+                self.send_json(_memory_recall(q, limit=limit, scope=_memory_scope(qs)))
         elif path == "/api/memory/shipped":
             # ccc_server/ship_graph.is_shipped(), contract as-is — see
             # ccc_server/memory_api.py. Powers `ccc shipped` and any agent
@@ -29327,7 +29334,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not topic:
                 self.send_json({"error": "missing topic"}, 400)
             else:
-                self.send_json(_memory_shipped(topic))
+                self.send_json(_memory_shipped(topic, scope=_memory_scope(qs)))
         elif path == "/api/memory/file-history":
             # ccc_server/ship_graph's commits/session_meta tables, joined for
             # one path — see ccc_server/memory_api.py. Powers `ccc history`.
@@ -29343,7 +29350,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     limit = max(1, min(int(limit_raw), 50))
                 except ValueError:
                     limit = 20
-                self.send_json(_memory_file_history(file_path, repo=repo_q, limit=limit))
+                self.send_json(_memory_file_history(file_path, repo=repo_q, limit=limit,
+                                                    scope=_memory_scope(qs)))
         elif re.match(r"^/api/memory/brief/.+$", path):
             # ccc_server/session_brief.py — "where did this session leave
             # off and how do I resume it?" for one session. Powers
@@ -29351,7 +29359,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # handoff prompt's first move.
             from ccc_server.session_brief import brief as _memory_brief
             query = urllib.parse.unquote(path[len("/api/memory/brief/"):])
-            self.send_json(_memory_brief(query))
+            if _memory_scope(urllib.parse.parse_qs(parsed.query)) == "all":
+                from ccc_server.memory_fanout import brief_all as _memory_brief_all
+                self.send_json(_memory_brief_all(query, _memory_brief))
+            else:
+                self.send_json(_memory_brief(query))
         elif re.match(r"^/api/memory/where/.+$", path):
             # ccc_server/where_answer.py — "where are we?" across a session's
             # whole lineage chain: one cached, read-only headless Sonnet call

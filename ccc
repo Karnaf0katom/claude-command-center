@@ -178,6 +178,34 @@ def _get_json(base, path, timeout=10):
         return json.loads(resp.read().decode("utf-8"))
 
 
+_NODE_STATUS_TEXT = {
+    "timeout": "timed out",
+    "peer_offline": "offline",
+    "unsupported_capability": "needs a CCC update for memory federation",
+    "skipped_backoff": "skipped (backing off after a failure)",
+    "unpaired_peer": "not paired back with this machine",
+    "error": "error",
+}
+
+
+def _node_status_lines(payload):
+    """`[hermes timed out]`-style lines for every peer that didn't answer a
+    scope=all memory query. Peers that answered print nothing. `nodes` is
+    the fan-out list on recall/shipped/history; brief uses `node_status`
+    (its `nodes` key was already a lineage-ref map)."""
+    nodes = payload.get("node_status") if "node_status" in payload else payload.get("nodes")
+    lines = []
+    for n in nodes if isinstance(nodes, list) else []:
+        if not isinstance(n, dict) or n.get("self") or n.get("status") == "ok":
+            continue
+        text = _NODE_STATUS_TEXT.get(n.get("status"), n.get("status") or "?")
+        if n.get("stale"):
+            age = n.get("cache_age_s")
+            text += f"; showing its answer from {max(0, int(age or 0) // 60)} min ago"
+        lines.append(f"[{n.get('name') or '?'} {text}]")
+    return lines
+
+
 def _post_json(base, path, payload, timeout=60):
     """POST JSON, returning (status, payload). HTTP error statuses still carry
     a JSON body on /api/sessions/spawn (error + supported_engines et al), so
@@ -519,7 +547,7 @@ def cmd_recall(args):
         print("ccc recall: missing query (pass it as an argument or pipe it on stdin)",
               file=sys.stderr)
         return 2
-    qs = urllib.parse.urlencode({"q": text, "limit": args.limit})
+    qs = urllib.parse.urlencode({"q": text, "limit": args.limit, "scope": getattr(args, "scope", "all")})
     try:
         payload = _get_json(base, f"/api/memory/recall?{qs}", timeout=15)
     except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
@@ -534,6 +562,8 @@ def cmd_recall(args):
             print(f"(indexing: true — no sessions found yet for {text!r}, still warming up)")
         else:
             print(f"(no sessions found for {text!r})")
+        for line in _node_status_lines(payload):
+            print(line)
         return 0
     tty = sys.stdout.isatty()
     width = shutil.get_terminal_size((100, 20)).columns if tty else 100
@@ -553,11 +583,16 @@ def cmd_recall(args):
         sid = str(r.get("session_id") or "?")
         short = sid.removeprefix("session_")[:8]
         title = _clean(r.get("title")) or "(untitled)"
+        tag = f"[{r.get('node_name')}] " if r.get("local") is False else ""
         head = f"{i:>2}. {short}  "
-        print(head + bold(_fit(title, width - len(head))))
+        print(head + bold(_fit(tag + title, width - len(head))))
         collapsed = r.get("chain_collapsed") or 0
+        also = ", ".join(a.get("node_name") or "?" for a in r.get("also_on") or [])
+        fork = f"fork of {r['fork_of']} at {r.get('fork_at')}" if r.get("fork_of") else ""
         meta = "  ·  ".join(x for x in (r.get("repo"), r.get("date"),
-                                        f"+{collapsed} related" if collapsed else "") if x)
+                                        f"+{collapsed} related" if collapsed else "",
+                                        f"also on {also}" if also else "", fork,
+                                        "cached" if r.get("stale") else "") if x)
         pad = " " * len(head)
         print(pad + dim(meta))
         m = r.get("match") or {}
@@ -568,6 +603,8 @@ def cmd_recall(args):
         print()
     if results:
         print(dim(f"full id / resume: ccc brief <id>   ·   raw: --json"))
+    for line in _node_status_lines(payload):
+        print(line)
     if payload.get("indexing"):
         print("(indexing: true — still warming up, results may be incomplete)")
     return 0
@@ -590,7 +627,8 @@ def cmd_brief(args):
               file=sys.stderr)
         return 2
     try:
-        payload = _get_json(base, f"/api/memory/brief/{urllib.parse.quote(text, safe='')}", timeout=20)
+        qs = urllib.parse.urlencode({"scope": getattr(args, "scope", "all")})
+        payload = _get_json(base, f"/api/memory/brief/{urllib.parse.quote(text, safe='')}?{qs}", timeout=20)
     except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
         print(f"ccc: cannot reach CCC at {base} ({e}) — is CCC running?", file=sys.stderr)
         return 1
@@ -601,8 +639,11 @@ def cmd_brief(args):
         print(f"(no session found for {text!r})")
         for alt in payload.get("alternates") or []:
             print(f"  maybe: {alt}")
+        for line in _node_status_lines(payload):
+            print(line)
         return 1
-    print(f"{payload['session_id']}  {payload.get('title') or '(untitled)'}")
+    tag = f"[{payload.get('node_name')}] " if payload.get("local") is False else ""
+    print(f"{tag}{payload['session_id']}  {payload.get('title') or '(untitled)'}")
     meta = " | ".join(x for x in (payload.get("repo"), payload.get("engine"),
                                   payload.get("start_date"), payload.get("end_date")) if x)
     if meta:
@@ -726,7 +767,7 @@ def cmd_shipped(args):
         print("ccc shipped: missing topic (pass it as an argument or pipe it on stdin)",
               file=sys.stderr)
         return 2
-    qs = urllib.parse.urlencode({"topic": text})
+    qs = urllib.parse.urlencode({"topic": text, "scope": getattr(args, "scope", "all")})
     try:
         payload = _get_json(base, f"/api/memory/shipped?{qs}", timeout=15)
     except OSError as e:  # URLError, plus raw TimeoutError from mid-read stalls
@@ -752,10 +793,13 @@ def cmd_shipped(args):
     for ev in payload.get("evidence") or []:
         subj = ev.get("subject") or ""
         state = f"  ({ev['state']})" if ev.get("state") else ""
-        print(f"  {ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}{state}")
+        node = f"[{ev['node_name']}] " if ev.get("node_name") and payload.get("scope") == "all" else ""
+        print(f"  {node}{ev.get('repo') or '?'} {ev.get('commit') or ''}  {subj}{state}")
     tickets = payload.get("tickets") or []
     if tickets:
         print(f"  tickets: {', '.join(tickets)}")
+    for line in _node_status_lines(payload):
+        print(f"  {line}")
     return 0
 
 
@@ -776,7 +820,7 @@ def cmd_history(args):
         print("ccc history: missing path (pass it as an argument or pipe it on stdin)",
               file=sys.stderr)
         return 2
-    params = {"path": text, "limit": args.limit}
+    params = {"path": text, "limit": args.limit, "scope": getattr(args, "scope", "all")}
     if args.repo:
         params["repo"] = args.repo
     qs = urllib.parse.urlencode(params)
@@ -791,15 +835,21 @@ def cmd_history(args):
     entries = payload.get("history") or []
     if not entries:
         print(f"(no history found for {text!r})")
+        for line in _node_status_lines(payload):
+            print(line)
         return 0
     for e in entries:
         date = e.get("date") or "?"
         why = e.get("why") or ""
+        if e.get("local") is False:
+            why = f"[{e.get('node_name')}] {why}"
         if e.get("kind") == "commit":
             print(f"{date:<12} commit  {e.get('hash') or '?':<10} {why}")
         else:
             op = e.get("op") or "wrote"
             print(f"{date:<12} {op:<7} {e.get('session_id') or '?':<38} {why}")
+    for line in _node_status_lines(payload):
+        print(line)
     return 0
 
 
@@ -2100,6 +2150,8 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=10, metavar="N",
                    help="max sessions to return (default 10, server caps at 50)")
     p.add_argument("--json", action="store_true", help="raw recall result JSON")
+    p.add_argument("--scope", choices=("all", "local"), default="all",
+                   help="all (default): also ask paired CCC machines; local: this machine only")
     p.set_defaults(func=cmd_recall)
 
     p = sub.add_parser(
@@ -2111,6 +2163,8 @@ def main(argv=None):
     )
     p.add_argument("topic", nargs="*", help="the feature/topic (or pipe it on stdin)")
     p.add_argument("--json", action="store_true", help="raw shipped result JSON")
+    p.add_argument("--scope", choices=("all", "local"), default="all",
+                   help="all (default): also ask paired CCC machines; local: this machine only")
     p.set_defaults(func=cmd_shipped)
 
     p = sub.add_parser(
@@ -2126,6 +2180,8 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=20, metavar="N",
                    help="max entries to return (default 20, server caps at 50)")
     p.add_argument("--json", action="store_true", help="raw file-history result JSON")
+    p.add_argument("--scope", choices=("all", "local"), default="all",
+                   help="all (default): also ask paired CCC machines; local: this machine only")
     p.set_defaults(func=cmd_history)
 
     p = sub.add_parser(
@@ -2155,6 +2211,9 @@ def main(argv=None):
     p.add_argument("session", nargs="*",
                    help="session id, id prefix, or a recall-style query (or pipe it on stdin)")
     p.add_argument("--json", action="store_true", help="raw brief result JSON")
+    p.add_argument("--scope", choices=("all", "local"), default="all",
+                   help="all (default): ask paired CCC machines when this one "
+                        "doesn't have the session; local: this machine only")
     p.set_defaults(func=cmd_brief)
 
     p = sub.add_parser(

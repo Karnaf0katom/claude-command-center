@@ -121,6 +121,40 @@ plans stop safely, and a CCC restart can resume the job without repeating
 completed external mutations (each executor checks whether the end state
 already holds).
 
+## Memory across machines
+
+`ccc recall`, `ccc shipped`, `ccc brief` and `ccc history` ask every paired
+peer by default (`--scope local` for this machine only). Each machine indexes
+only its own disks; nothing is copied between them. The requesting node runs
+its own search and, at the same time, sends each peer the read-only
+`memory_recall` / `memory_shipped` / `memory_brief` / `memory_file_history`
+route action. A peer always answers from its own index, so fan-out is one hop
+and never recursive.
+
+- **Deadline.** 1.5 s per peer. A peer that misses it shows as
+  `[hermes timed out]`; its call keeps running in the background, so a cold
+  SSH connect still warms the link and fills the cache for the next query.
+- **Circuit breaker.** A peer that is offline or whose transport times out is
+  skipped for 60 s, doubling to 10 min (`skipped_backoff`). A late success
+  closes it.
+- **Last-answer cache.** 10 min, used only when a live call fails, and always
+  labelled stale with its age.
+- **Merge.** Per-node ranked lists are combined with RRF (k=60, equal node
+  weight), ties broken by recency, then deduped by native session id. The
+  copy owned by the handoff lease wins (else the most recently active one)
+  and lists the others in `also_on`. If both copies were active after the
+  last handoff, the session forked: both rows stay, labelled `fork_of`.
+- **Shipped honesty.** With a peer unreachable the verdict is
+  `NOT FOUND on reachable nodes (...; hermes unreachable since 14:02)`,
+  never `NOT SHIPPED`.
+
+The HTTP API (`/api/memory/*?scope=all`) defaults to `scope=local`, so a
+caller that resumes by bare `session_id` never gets a peer's session. Every
+merged row carries `node_id`, `node_name`, `ref` and `local`; the response
+adds `nodes[]` (per-node status and latency), `peers_unreachable` and
+`partial` (brief: `node_status`, since its `nodes` key is the lineage map).
+The pre-spawn shipped check never fans out.
+
 ## Attribution
 
 "Who owns this dirty file?" follows an evidence hierarchy — hook write
