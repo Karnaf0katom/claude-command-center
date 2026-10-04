@@ -1,0 +1,1 @@
+- Mobile conversation view: Compact/Normal toggle in the top bar; Codex Desktop handover moved into the ⋮ menu.

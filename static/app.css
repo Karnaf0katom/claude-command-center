@@ -16425,6 +16425,9 @@
        .mobile-actions-wrap{display:none} base rule later in this file —
        same specificity, later source order would otherwise win. */
     #convToolbar .mobile-actions-wrap { display: inline-flex; margin-left: 8px; order: 100; }
+    #convToolbar .mobile-view-seg { display: inline-flex; margin-left: auto; order: 99; }
+    /* The ⋮ menu carries the Codex handover on phones. */
+    #convToolbar #codexHandoverBtn { display: none !important; }
     /* Root cause of the dropdown rendering "behind the conversation":
        .toolbar (base rule, line ~314) sets `overflow: hidden`. The dropdown
        (.mobile-actions-menu) is absolutely positioned relative to
@@ -30709,4 +30712,5 @@ body[data-conv-view="normal"] .conv-view-seg > [data-conv-view="normal"],
 body[data-conv-view="verbose"] .conv-view-seg > [data-conv-view="verbose"] {
   background: rgba(88,166,255,0.18); color: var(--text);
 }
+.mobile-view-seg { display: none; }
 .conv-pane-more-menu .conv-view-seg { margin: 2px 6px 4px; }

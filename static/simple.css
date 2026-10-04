@@ -900,7 +900,7 @@ body.ccc-mobile-redesign.ccc-simple-mode.ccc-simple-conv-open #convToolbar:has(.
 body.ccc-mobile-redesign.ccc-simple-mode.ccc-simple-conv-open .simple-conv-title {
   flex-basis: 0;
 }
-body.ccc-mobile-redesign.ccc-simple-mode.ccc-simple-conv-open #convToolbar > :not(#mobileBackBtn):not(#simpleConvTitle):not(.mobile-actions-wrap) {
+body.ccc-mobile-redesign.ccc-simple-mode.ccc-simple-conv-open #convToolbar > :not(#mobileBackBtn):not(#simpleConvTitle):not(.mobile-actions-wrap):not(.mobile-view-seg) {
   display: none !important;
 }
 /* Advanced pane chrome: pane header (proc pills, verbose/replay/annotate

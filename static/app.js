@@ -5457,6 +5457,8 @@
     const session = currentSession || {};
     if (codexHandoverWait && codexHandoverWait.id !== session.id) cancelCodexDesktopHandover();
     $codexHandoverBtn.style.display = session.source === 'codex' && session.id ? '' : 'none';
+    const mobileItem = document.getElementById('mobileCodexHandoverItem');
+    if (mobileItem) mobileItem.hidden = !(session.source === 'codex' && session.id);
   }
 
   async function handOverToCodexDesktop() {
@@ -16967,6 +16969,9 @@
         if (picker) picker.click();
       } else if (action === 'technical-details') {
         _simpleToggleTechStrip();
+      } else if (action === 'codex-handover') {
+        const handoverBtn = document.getElementById('codexHandoverBtn');
+        if (handoverBtn) handoverBtn.click();
       } else if (action === 'annotate') {
         const annBtn = document.getElementById('annotationStartBtn');
         if (annBtn) annBtn.click();
