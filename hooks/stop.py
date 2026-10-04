@@ -50,6 +50,32 @@ def request_auto_title(session_id):
         pass  # server down, no port file, anything — titling is best-effort
 
 
+def session_title(transcript_path):
+    """Best-effort session name for the banner subtitle: /rename title, else
+    Claude's ai-title. Reads only the tail of the transcript (hook must stay
+    fast); returns "" when none is found."""
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as f:
+            f.seek(max(0, size - 1_000_000))
+            tail = f.read().decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    custom = ai = ""
+    for line in tail.splitlines():
+        if '"customTitle"' in line:
+            try:
+                custom = json.loads(line).get("customTitle") or custom
+            except Exception:
+                pass
+        elif '"aiTitle"' in line:
+            try:
+                ai = json.loads(line).get("aiTitle") or ai
+            except Exception:
+                pass
+    return custom or ai
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -88,16 +114,15 @@ def main():
         except FileNotFoundError:
             pass
 
-        # Subtitle = short session id so the user can match the banner to a
-        # card in the kanban without us having to open the JSONL to fetch
-        # the prompt. Trade-off: less context, but stays fast.
+        # Subtitle = session name (falls back to the short id) so the user can
+        # match the banner to a card in the kanban.
         # CCC's own helper runs (auto-titler etc.) live in the scratch dir and
         # never wait on a human, so a banner for them is pure noise.
         if "command-center/scratch" not in (data.get("cwd") or ""):
             notify(
                 title="Claude Command Center",
                 message="Ready for your input",
-                subtitle=session_id[:8],
+                subtitle=session_title(data.get("transcript_path") or "") or session_id[:8],
                 session_id=session_id,
             )
 
