@@ -91,12 +91,15 @@ def main():
         # Subtitle = short session id so the user can match the banner to a
         # card in the kanban without us having to open the JSONL to fetch
         # the prompt. Trade-off: less context, but stays fast.
-        notify(
-            title="Claude Command Center",
-            message="Ready for your input",
-            subtitle=session_id[:8],
-            session_id=session_id,
-        )
+        # CCC's own helper runs (auto-titler etc.) live in the scratch dir and
+        # never wait on a human, so a banner for them is pure noise.
+        if "command-center/scratch" not in (data.get("cwd") or ""):
+            notify(
+                title="Claude Command Center",
+                message="Ready for your input",
+                subtitle=session_id[:8],
+                session_id=session_id,
+            )
 
         request_auto_title(session_id)
 
