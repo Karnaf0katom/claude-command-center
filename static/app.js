@@ -43400,6 +43400,13 @@
         submitPlus(paneId);
       });
     }
+    // cloneNode drops listeners and ids, so the [+] attach button in a split
+    // pane needs its own binding, uploading into this pane's composer.
+    attachFilePickerButton(
+      clone.querySelector('input[type="file"][multiple]'),
+      clone.querySelector('.attach-btn'),
+      () => clone.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]'),
+    );
     const sendQueueBtn = clone.querySelector('.send-queue-btn');
     if (sendQueueBtn) {
       sendQueueBtn.addEventListener('click', (ev) => {
@@ -72139,10 +72146,10 @@
   // capture restriction (see the markup comment) so it covers files, photo
   // library, and camera in one control. Wired to whichever composer(s) carry
   // a matching hidden file input + attach button pair.
-  function attachFilePickerButton(inputEl, buttonEl) {
+  function attachFilePickerButton(inputEl, buttonEl, getTarget) {
     if (!inputEl || !buttonEl || buttonEl._filePickerBound) return;
     buttonEl._filePickerBound = true;
-    const targetEl = () => document.getElementById('convInput');
+    const targetEl = getTarget || (() => document.getElementById('convInput'));
     buttonEl.addEventListener('click', (ev) => {
       ev.preventDefault();
       inputEl.click();

@@ -1,0 +1,1 @@
+- Split-pane [+] attach: buildPaneElement clones drop listeners; fixed by binding attachFilePickerButton per clone.
