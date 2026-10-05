@@ -76755,6 +76755,31 @@
     return units;
   }
   let _ccRunSeq = 0;
+  // Orchestration chips: a folded run that used the WatchTower CLI (wt),
+  // the CCC CLI, or the CCC HTTP API gets a purple chip per distinct command,
+  // so delegation stays visible while the tool calls are folded away.
+  const _CC_ORCH_RES = [
+    [/(?:^|[\s;&|(`])wt\s+([a-z][\w-]*)/g, (m) => 'wt ' + m[1]],
+    [/(?:^|[\s;&|(`])ccc\s+([a-z][\w-]*)/g, (m) => 'ccc ' + m[1]],
+    [/(?:localhost|127\.0\.0\.1|\$\{?CCC[A-Z_]*\}?)(?::809[01])?(\/api\/[\w\-./]*)/g,
+      (m) => 'CCC API ' + m[1].replace(/\/[0-9a-f]{8}-[0-9a-f-]{27}/gi, '/<id>').replace(/\/$/, '')],
+  ];
+  function _ccOrchLabels(units) {
+    const seen = new Set();
+    for (const { el } of units) {
+      const calls = el.classList.contains('tool-call') ? [el] : el.querySelectorAll('.tool-call');
+      for (const tc of calls) {
+        const text = tc.dataset.toolDetail || '';
+        if (!text) continue;
+        for (const [re, fmt] of _CC_ORCH_RES) {
+          re.lastIndex = 0;
+          let m;
+          while ((m = re.exec(text))) seen.add(fmt(m));
+        }
+      }
+    }
+    return Array.from(seen);
+  }
   // Where a folded run's chip goes: the end of the last paragraph / list
   // item of the text message right before the run.
   function _ccChipHost(text) {
@@ -76768,6 +76793,7 @@
   function _ccMarkRuns(view) {
     const stale = new Set(view.querySelectorAll('[data-cc-run]'));
     const staleChips = new Set(view.querySelectorAll('.cc-run-chip'));
+    const staleOrch = new Set(view.querySelectorAll('.cc-orch-chip'));
     const staleFinals = new Set(view.querySelectorAll('.assistant-text.cc-final'));
     // The last text of each turn (right before the next user message, or
     // the end of the view) is the turn's summary: compact keeps it as a card.
@@ -76823,6 +76849,28 @@
           chip.classList.toggle('cc-run-open', open);
         }
         head.classList.toggle('cc-run-chipped', !!chip);
+        // Purple orchestration chips ride next to the run chip (or in the
+        // standalone head line when no text precedes the run).
+        const orch = _ccOrchLabels(active);
+        const orchHost = chip ? chip.parentNode : (head.classList.contains('tool-call-group')
+          ? head.querySelector(':scope > .tool-call-group-header') : head);
+        if (orchHost) {
+          const sel = '.cc-orch-chip[data-cc-orch-for="' + id + '"]';
+          const have = Array.from(orchHost.querySelectorAll(sel));
+          const want = orch.slice(0, 4).concat(orch.length > 4 ? ['+' + (orch.length - 4)] : []);
+          if (have.map(c => c.dataset.ccOrch).join('|') !== want.join('|')) {
+            have.forEach(c => c.remove());
+            want.forEach(l => {
+              const c = document.createElement('span');
+              c.className = 'cc-orch-chip';
+              c.dataset.ccOrchFor = id;
+              c.dataset.ccOrch = l;
+              if (chip) chip.insertAdjacentElement('afterend', c);
+              else orchHost.appendChild(c);
+            });
+          }
+          orchHost.querySelectorAll(sel).forEach(c => staleOrch.delete(c));
+        }
       }
       run = [];
     };
@@ -76846,6 +76894,7 @@
       delete el.dataset.ccRun;
     });
     staleChips.forEach(c => c.remove());
+    staleOrch.forEach(c => c.remove());
   }
   let _ccRunsRaf = 0;
   function _ccScheduleRuns() {

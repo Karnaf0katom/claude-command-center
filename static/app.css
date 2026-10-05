@@ -30682,6 +30682,18 @@ body.conv-compact .conversations-view .cc-run-chip.cc-run-open::before { content
 body.conv-compact .conversations-view .cc-run-chip:hover { color: var(--text); opacity: 1; }
 body.conv-compact.conv-compact .conversations-view .cc-run-head.cc-run-chipped:not(.cc-run-open) { display: none !important; }
 
+/* Orchestration chip: purple pill for wt / ccc CLI and CCC API use inside a
+   folded run. Empty span + ::before (like .cc-run-chip) so copy/read-aloud
+   never pick it up; shown in compact only, where the calls are folded away. */
+.cc-orch-chip { display: none; }
+body.conv-compact .conversations-view .cc-orch-chip {
+  display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 9px;
+  font-size: 11px; font-weight: 600; line-height: 16px; white-space: nowrap;
+  vertical-align: baseline; color: #d2b4ff; background: rgba(163,113,247,0.16);
+  border: 1px solid rgba(163,113,247,0.45);
+}
+body.conv-compact .conversations-view .cc-orch-chip::before { content: attr(data-cc-orch); }
+
 /* Toned-down narration in compact: no cards, no heavy weight or wide
    tracking, so it reads as plain prose. User messages keep their theme
    bubble on purpose (user ask). `:not(#cc-compact)` adds ID-level specificity
