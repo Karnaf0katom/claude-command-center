@@ -278,6 +278,17 @@ class TestWorkerServiceDefinition(unittest.TestCase):
         )
         self.assertIn('"engine-execution-v1" in capabilities', source)
         self.assertIn('kill "$existing_worker_pid"', source)
+
+    def test_worker_units_never_kill_the_sessions_they_launched(self):
+        """A worker restart must not take every session with it: the user
+        unit run.sh writes and the system unit both need KillMode=process
+        (the user unit lacked it, 2026-10-05)."""
+        source = pathlib.Path("run.sh").read_text(encoding="utf-8")
+        worker_unit = source[source.index('cat > "$WORKER_SYSTEMD_UNIT_PATH" <<EOF'):]
+        worker_unit = worker_unit[:worker_unit.index("\nEOF\n")]
+        self.assertIn("KillMode=process", worker_unit)
+        system_unit = pathlib.Path("systemd/ccc-worker.service").read_text(encoding="utf-8")
+        self.assertIn("KillMode=process", system_unit)
         self.assertIn("Never roll an older worker with unresolved work.", source)
 
     def test_restart_handler_has_no_function_local_uuid_shadow(self):

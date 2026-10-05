@@ -383,6 +383,10 @@ ExecStart=/usr/bin/env python3 $HERE/ccc_worker.py
 Restart=always
 RestartSec=2
 LimitNOFILE=2048
+# Signal only the worker on stop/restart. The sessions it launched talk to it
+# through on-disk FIFOs and logs, and a new worker reattaches them; the default
+# (control-group) killed every live session on each worker restart.
+KillMode=process
 ${env_lines}
 [Install]
 WantedBy=default.target
