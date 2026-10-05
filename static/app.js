@@ -62032,7 +62032,7 @@
             // A permission prompt must never collapse into the "Ran N commands"
             // group — the option buttons are the only way to answer it.
             if (b.approval_required) hasNonTool = true;
-            blockParts.push('<div class="tool-call' + toolClass + detail.className + commandClass + acpPermClass + toolStatusClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '" data-tool-use-id="' + escapeAttr(toolUseId) + '">'
+            blockParts.push('<div class="tool-call' + toolClass + detail.className + commandClass + acpPermClass + toolStatusClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-cc-orch="' + escapeAttr(Array.from(_ccOrchScan(b.command || '', _ccOrchScan(detail.full))).join('|')) + '" data-tool-source="' + escapeAttr(source) + '" data-tool-use-id="' + escapeAttr(toolUseId) + '">'
               + '<span class="arrow">-></span> '
               + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
@@ -76771,18 +76771,23 @@
     [/(?:localhost|127\.0\.0\.1|\$\{?CCC[A-Z_]*\}?)(?::809[01])?(\/api\/[\w\-./]*)/g,
       (m) => 'CCC API ' + m[1].replace(/\/[0-9a-f]{8}-[0-9a-f-]{27}/gi, '/<id>').replace(/\/$/, '')],
   ];
+  // Scan command text for orchestration use; returns distinct labels.
+  function _ccOrchScan(text, seen) {
+    seen = seen || new Set();
+    if (!text) return seen;
+    for (const [re, fmt] of _CC_ORCH_RES) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) seen.add(fmt(m));
+    }
+    return seen;
+  }
   function _ccOrchLabels(units) {
     const seen = new Set();
     for (const { el } of units) {
       const calls = el.classList.contains('tool-call') ? [el] : el.querySelectorAll('.tool-call');
       for (const tc of calls) {
-        const text = tc.dataset.toolDetail || '';
-        if (!text) continue;
-        for (const [re, fmt] of _CC_ORCH_RES) {
-          re.lastIndex = 0;
-          let m;
-          while ((m = re.exec(text))) seen.add(fmt(m));
-        }
+        (tc.dataset.ccOrch || '').split('|').filter(Boolean).forEach(l => seen.add(l));
       }
     }
     return Array.from(seen);
