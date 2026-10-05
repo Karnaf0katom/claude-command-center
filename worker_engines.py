@@ -23,6 +23,8 @@ ASYNC_OPERATIONS = {
     ("kimi", "prompt"),
     ("grok", "spawn"),
     ("grok", "prompt"),
+    ("devin", "prompt"),
+    ("devin", "acp_spawn"),
     ("codex", "spawn"),
     ("codex", "resume"),
     ("claude", "spawn"),
@@ -180,7 +182,7 @@ class EngineHost:
                     live = live or legacy._codex_app_server_thread_is_active(
                         sid, start_if_needed=True
                     )
-            elif engine in ("kimi", "grok") and sid:
+            elif engine in ("kimi", "grok", "devin") and sid:
                 legacy._acp_maybe_attach_on_view(engine, sid)
                 snap = legacy._acp_session_snapshot(engine, sid) or {}
                 live = snap.get("status") == "active"
@@ -428,13 +430,16 @@ class EngineHost:
 
     def _call(self, engine, operation, args, query=False):
         legacy = self._legacy()
-        if engine in ("kimi", "grok"):
+        if engine in ("kimi", "grok", "devin"):
             if operation == "availability":
-                resolve = (
-                    legacy._resolve_kimi_bin if engine == "kimi"
-                    else legacy._resolve_grok_bin
-                )
-                info = resolve()
+                if engine == "devin":
+                    info = legacy._acp_resolve_bin("devin")
+                else:
+                    resolve = (
+                        legacy._resolve_kimi_bin if engine == "kimi"
+                        else legacy._resolve_grok_bin
+                    )
+                    info = resolve()
                 info["model"] = legacy._spawn_model_for_engine(engine)
                 conn = legacy._acp_conn(engine)
                 info["acp"] = bool(
@@ -447,7 +452,19 @@ class EngineHost:
                 if engine != "kimi":
                     return {"ok": False, "error": "verify is kimi-only"}
                 return legacy._kimi_setup_verify()
-            if operation == "spawn":
+            if operation == "acp_spawn" and engine == "devin":
+                return legacy._devin_acp_spawn_new_session(
+                    args.get("prompt") or "",
+                    args.get("cwd") or "",
+                    model=args.get("model"),
+                    permission_mode=args.get("permission_mode"),
+                    reasoning_effort=args.get("reasoning_effort"),
+                )
+            if operation == "conn_pid":
+                return {"ok": True, "pid": legacy._acp_conn_pid(engine)}
+            if operation == "close_idle_conn":
+                return legacy._acp_close_idle_conn(engine)
+            if operation == "spawn" and engine != "devin":
                 spawn_fn = (
                     legacy.spawn_session_kimi if engine == "kimi"
                     else legacy.spawn_session_grok
@@ -460,6 +477,7 @@ class EngineHost:
                     args.get("text") or "",
                     mode=args.get("mode") or "send",
                     from_queue=bool(args.get("from_queue")),
+                    cwd=args.get("cwd") or None,
                 )
             if operation == "ask":
                 return legacy._acp_ask_and_wait(
@@ -756,7 +774,7 @@ class EngineHost:
     @staticmethod
     def _async_state(legacy, engine, operation, sid, result, args=None):
         args = args if isinstance(args, dict) else {}
-        if engine in ("kimi", "grok"):
+        if engine in ("kimi", "grok", "devin"):
             snap = legacy._acp_session_snapshot(engine, sid) or {}
             active = snap.get("status") == "active"
             return active, not active, {

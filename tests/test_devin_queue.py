@@ -62,6 +62,7 @@ class DevinQueueTests(unittest.TestCase):
              mock.patch.object(server, "_pump_devin_resume_queue") as pump, \
              mock.patch.object(server, "_save_pending_inputs") as save, \
              mock.patch.object(server, "resume_session_devin") as resume, \
+             mock.patch.object(server, "_devin_acp_try_steer", return_value=None), \
              mock.patch.object(server, "_control_plane_engine_call") as cp:
             result = server._inject_text_into_session(sid, "follow up")
 

@@ -856,10 +856,7 @@ def _compact_session_context_impl(session_id, *, terminal_app=None, _from_termin
         # the next prompt when the turn ends.
         raw_id = _core._devin_cli_raw_id(sid)
         cwd = _core.find_session_cwd(sid) or ""
-        if cwd:
-            with _core._ACP_LOCK:
-                _core._acp_session("devin", raw_id, create=True, cwd=cwd)
-        result = _core._acp_prompt("devin", raw_id, "/compact")
+        result = _core._acp_prompt("devin", raw_id, "/compact", cwd=cwd or None)
         if not result.get("ok"):
             # _queue_devin_steer returns a bool, not a result dict — calling
             # .setdefault on it raised AttributeError and 500'd the request.

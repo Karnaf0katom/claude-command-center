@@ -122,19 +122,13 @@ _ACP_HARNESSES = {
     },
 }
 
-# Harnesses whose ACP subprocess lives in the persistent worker (same
-# control-plane hop as Kimi). Dashboard HTTP handlers must route through
-# _control_plane_engine_call so they do not start a second grok/kimi agent.
-#
-# Devin is deliberately NOT here even though it is a registered ACP harness
-# above: kimi/grok are worker-routed because CCC drives them EXCLUSIVELY
-# through ACP (there is no other transport, so every session lives on one
-# connection the worker must own to avoid a second agent process). Devin's
-# canonical transport is still the one-shot CLI, which already runs
-# wherever the request lands (dashboard or worker) with no control-plane
-# hop, and its ACP connection is attach-on-demand: whichever process runs
-# the first steer/load owns it, exactly like "glm".
-_ACP_WORKER_HARNESSES = frozenset({"kimi", "grok"})
+# Harnesses whose ACP subprocess lives in the persistent worker. Dashboard
+# HTTP handlers must route through _control_plane_engine_call so they do not
+# start a second agent. The ACP server talks over stdio pipes to the process
+# that spawned it, so it dies with that process: owned by the dashboard, every
+# dashboard restart (each CCC auto-pull) cut off its running turns. Devin's
+# one-shot `devin -p` CLI path still runs wherever the request lands.
+_ACP_WORKER_HARNESSES = frozenset({"kimi", "grok", "devin"})
 
 _ACP_LOCK = threading.Condition()
 _ACP_CONNS = {}          # harness -> {"proc","reader","initialized","initializing","next_id","caps","send_lock"}
@@ -567,15 +561,9 @@ def _devin_acp_session_loaded(sid):
     right now" flag to the UI (Devin, unlike Kimi/Grok, has a large
     population of sessions with NO ACP connection at all -- most Devin
     sessions run one-shot CLI turns only)."""
-    with _core._ACP_LOCK:
-        conn = _core._ACP_CONNS.get("devin")
-        if conn is None:
-            return False
-        transport = conn.get("transport")
-        if transport is None or not transport.alive():
-            return False
-        state = _core._acp_session("devin", sid)
-        return state is not None and state.get("loaded_conn") == id(conn)
+    # Asked of the conn owner (the worker), which computes "loaded" locally.
+    snap = _core._acp_session_snapshot("devin", sid)
+    return bool((snap or {}).get("loaded"))
 
 
 def _devin_acp_steer_capable():
@@ -623,11 +611,9 @@ def _devin_acp_try_steer(session_id, raw_id, cwd, text, *, mode="steer",
     if not _devin_acp_steer_capable():
         return None
     try:
-        if cwd:
-            with _core._ACP_LOCK:
-                _core._acp_session("devin", raw_id, create=True, cwd=cwd)
         result = _core._acp_prompt(
             "devin", raw_id, text, mode=mode, idempotency_key=idempotency_key,
+            cwd=cwd,
         )
         if mode == "steer" and result.get("code") == "busy":
             # Same cancel-then-resend primitive as the generic kimi/grok
@@ -646,6 +632,7 @@ def _devin_acp_try_steer(session_id, raw_id, cwd, text, *, mode="steer",
             retry_key = f"{idempotency_key}:steer-retry" if idempotency_key else None
             result = _core._acp_prompt(
                 "devin", raw_id, text, mode="steer", idempotency_key=retry_key,
+                cwd=cwd,
             )
         return result if result.get("ok") else None
     except Exception as exc:
@@ -773,6 +760,23 @@ def _devin_acp_spawn_new_session(prompt, cwd, model=None, permission_mode=None,
     """
     if not prompt:
         return {"ok": False, "error": "empty prompt"}
+    if _core._control_plane_routes_engines():
+        routed = _core._control_plane_engine_call(
+            "devin", "acp_spawn", {
+                "prompt": prompt, "cwd": cwd, "model": model,
+                "permission_mode": permission_mode,
+                "reasoning_effort": reasoning_effort,
+            },
+            timeout_ms=120000,
+        )
+        if routed is not None:
+            if routed.get("ambiguous") and not routed.get("session_id"):
+                # The worker may have created the session: never let the
+                # caller fall back to `devin -p` and start a second one.
+                raise RuntimeError(
+                    "devin acp spawn: worker did not answer in time"
+                )
+            return routed
     if not _devin_acp_steer_capable():
         return {"ok": False, "code": "acp_unavailable",
                 "error": _core._acp_conn_error("devin")}
@@ -2484,9 +2488,13 @@ def _kimi_goal_prompt_text(text):
 
 def _acp_prompt(
     harness, sid, text, mode="send", from_queue=False, idempotency_key=None,
+    cwd=None,
 ):
     """Async session/prompt: ACK returns immediately; the turn streams via
-    session/update notifications and finishes in _acp_finalize_turn."""
+    session/update notifications and finishes in _acp_finalize_turn.
+
+    ``cwd`` seeds the session's working directory when the conn owner has
+    no state for it yet (a dormant session it must session/load)."""
     if harness in _core._ACP_WORKER_HARNESSES:
         routed = _core._control_plane_engine_call(
             harness, "prompt", {
@@ -2494,11 +2502,15 @@ def _acp_prompt(
                 "text": text,
                 "mode": mode,
                 "from_queue": bool(from_queue),
+                "cwd": cwd or "",
             },
             idempotency_key=idempotency_key,
         )
         if routed is not None:
             return routed
+    if cwd:
+        with _core._ACP_LOCK:
+            _core._acp_session(harness, sid, create=True, cwd=cwd)
     if harness == "grok" and _core._grok_external_writer_active(sid):
         return {"ok": False, "error": "Grok session is active in a terminal — close it before sending.", "code": "grok_external_active"}
     if not text:
@@ -3040,9 +3052,16 @@ def _acp_session_snapshot(harness, sid):
                         )
                     ],
                 }
+        conn = _core._ACP_CONNS.get(harness)
+        transport = (conn or {}).get("transport")
+        loaded = bool(
+            conn is not None and transport is not None and transport.alive()
+            and state.get("loaded_conn") == id(conn)
+        )
         return {
             "sid": sid,
             "harness": harness,
+            "loaded": loaded,
             "cwd": state.get("cwd") or "",
             "status": state.get("status") or "idle",
             "model": state.get("model"),
@@ -3052,6 +3071,47 @@ def _acp_session_snapshot(harness, sid):
             "config_options": state.get("config_options") or [],
             "updated_at": state.get("updated_at") or 0,
         }
+
+
+def _acp_conn_pid(harness):
+    """Pid of the harness's shared ACP server, wherever its conn lives."""
+    if harness in _core._ACP_WORKER_HARNESSES:
+        routed = _core._control_plane_engine_call(
+            harness, "conn_pid", {}, mutate=False,
+        )
+        if routed is not None:
+            return routed.get("pid")
+    with _core._ACP_LOCK:
+        conn = _core._ACP_CONNS.get(harness) or {}
+        proc = conn.get("proc")
+    return getattr(proc, "pid", None) if proc is not None else None
+
+
+def _acp_close_idle_conn(harness):
+    """Close the harness's shared ACP conn unless a session is mid-turn.
+
+    The conn is shared by every session of the harness, so closing it while
+    one is mid-turn would kill that turn. Returns {"ok", "busy", "closed"}.
+    """
+    if harness in _core._ACP_WORKER_HARNESSES:
+        routed = _core._control_plane_engine_call(
+            harness, "close_idle_conn", {},
+        )
+        if routed is not None:
+            return routed
+    with _core._ACP_LOCK:
+        busy = [
+            sid for sid, st in (_core._ACP_SESSION_STATE.get(harness) or {}).items()
+            if isinstance(st, dict) and st.get("status") == "active"
+        ]
+        conn = _core._ACP_CONNS.get(harness)
+        transport = (conn or {}).get("transport") if conn else None
+    if busy:
+        return {"ok": True, "busy": len(busy), "closed": False}
+    if transport is None:
+        return {"ok": True, "busy": 0, "closed": False}
+    transport.close()
+    return {"ok": True, "busy": 0, "closed": True}
 
 
 def _acp_is_session(harness, sid):

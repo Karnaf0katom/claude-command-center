@@ -20,6 +20,13 @@ def _server():
     return importlib.import_module("server")
 
 
+@pytest.fixture(autouse=True)
+def _run_as_conn_owner(monkeypatch):
+    """These tests exercise the conn owner's logic (the worker, in a running
+    CCC). Never route to a live worker on the test host."""
+    monkeypatch.setenv("CCC_CONTROL_PLANE_ENGINES", "0")
+
+
 # ---------------------------------------------------------------------------
 # Harness registration
 # ---------------------------------------------------------------------------
@@ -35,11 +42,9 @@ def test_devin_harness_is_registered():
     # authenticate handshake once a request comes back auth-required.
     assert cfg["auth_method"] == "devin-browser"
     assert cfg["auth_lazy"] is True
-    # Devin is deliberately NOT worker-routed (see the comment above
-    # _ACP_WORKER_HARNESSES in acp.py): its ACP connection is
-    # attach-on-demand, owned by whichever process first steers/loads --
-    # the same posture as "glm".
-    assert "devin" not in server._ACP_WORKER_HARNESSES
+    # Devin's ACP conn lives in the worker, like kimi/grok: owned by the
+    # dashboard, every dashboard restart killed its running turns (CCC-48).
+    assert "devin" in server._ACP_WORKER_HARNESSES
     assert server._acp_harness_enabled("devin") is True
 
 
@@ -133,6 +138,7 @@ def test_devin_acp_try_steer_happy_path():
     assert result == ok_result
     prompt.assert_called_once_with(
         "devin", "raw-1", "steer this", mode="steer", idempotency_key="inject:1",
+        cwd=None,
     )
 
 
@@ -150,6 +156,7 @@ def test_devin_acp_try_steer_send_mode_passes_send_through():
     assert result == ok_result
     prompt.assert_called_once_with(
         "devin", "raw-1", "follow up", mode="send", idempotency_key=None,
+        cwd=None,
     )
 
 
@@ -187,7 +194,7 @@ def test_devin_acp_try_steer_cancels_and_retries_on_busy():
     retried_ok = {"ok": True, "via": "acp-prompt", "harness": "devin"}
     prompt_calls = []
 
-    def fake_prompt(harness, sid, text, mode=None, idempotency_key=None):
+    def fake_prompt(harness, sid, text, mode=None, idempotency_key=None, cwd=None):
         prompt_calls.append((harness, sid, text, mode, idempotency_key))
         return busy if len(prompt_calls) == 1 else retried_ok
 

@@ -10148,6 +10148,16 @@ def _acp_live_activity_fields(harness, session_id):
         with _ACP_LOCK:
             _acp_load_state(harness)
             state = dict(_ACP_SESSION_STATE.get(harness, {}).get(session_id) or {})
+        if harness == "devin":
+            # Devin has no wire file to read a turn from: its live status
+            # and parked approvals live with the conn owner (the worker).
+            snap = _acp_session_snapshot("devin", session_id)
+            if snap is not None:
+                state = {
+                    "status": snap.get("status"),
+                    "pending_permissions": snap.get("pending_permissions"),
+                    "updated_at": snap.get("updated_at"),
+                }
     except Exception:
         state = {}
     out["needs_approval"] = bool(state.get("pending_permissions"))
@@ -10220,12 +10230,13 @@ def _devin_live_acp_status(raw_id):
     Mirrors session-status's kind=acp branch; in-memory registry plus one
     kill(pid, 0) on the lock pid, no subprocess.
     """
-    if _devin_cli_session_live(raw_id) and not _devin_acp_session_loaded(raw_id):
-        return None
     with _ACP_LOCK:
         _acp_load_state("devin")
-        state = _ACP_SESSION_STATE.get("devin", {}).get(raw_id) or {}
-    return "running" if state.get("status") == "active" else "idle"
+    # The worker owns the conn; its snapshot carries the live turn status.
+    snap = _acp_session_snapshot("devin", raw_id) or {}
+    if _devin_cli_session_live(raw_id) and not snap.get("loaded"):
+        return None
+    return "running" if snap.get("status") == "active" else "idle"
 
 
 def _live_activity_entry_for_session(session_id):

@@ -5065,10 +5065,7 @@ def _devin_cli_lock_pid_owner(sid, raw_id, pid):
     clicked a button, this is not a list/poll path. Owned when that parent is
     the ACP transport, the spawn entry, or this process directly.
     """
-    with _core._ACP_LOCK:
-        conn = _core._ACP_CONNS.get("devin") or {}
-        acp_proc = conn.get("proc")
-    acp_pid = getattr(acp_proc, "pid", None) if acp_proc is not None else None
+    acp_pid = _core._acp_conn_pid("devin")
     spawn = _core._find_live_spawn_entry_for_session(sid)
     spawn_pid = spawn.get("pid") if isinstance(spawn, dict) else None
     if pid == acp_pid:
@@ -5133,26 +5130,18 @@ def _force_restart_devin_session(sid):
             action = "retired_spawn"
         else:
             # The `devin acp` connection is shared by every Devin session;
-            # closing it would kill another session's running turn.
-            with _core._ACP_LOCK:
-                busy = [
-                    other for other, st in
-                    (_core._ACP_SESSION_STATE.get("devin") or {}).items()
-                    if isinstance(st, dict) and st.get("status") == "active"
-                ]
-            if busy:
+            # closing it would kill another session's running turn. The conn
+            # lives in the worker, so it decides.
+            closed = _core._acp_close_idle_conn("devin")
+            if closed.get("busy"):
                 return {
                     "ok": False,
                     "error": (
-                        f"{len(busy)} other Devin session(s) are mid-turn on "
+                        f"{closed['busy']} other Devin session(s) are mid-turn on "
                         "the shared connection; retry when they finish"
                     ),
                 }
-            with _core._ACP_LOCK:
-                conn = _core._ACP_CONNS.get("devin")
-                transport = (conn or {}).get("transport") if conn else None
-            if transport is not None:
-                transport.close()
+            if closed.get("closed"):
                 action = "retired_acp_conn"
             try:
                 if _core._devin_cli_pid_alive(pid):
