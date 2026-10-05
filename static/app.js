@@ -43078,9 +43078,7 @@
         ? view._lastPinScrollTop : view.scrollTop;
       const nowTop = view.scrollTop;
       view._lastPinScrollTop = nowTop;
-      if (isConversationAtBottom(view)) {
-        view._pinnedToBottom = true;
-      } else if (nowTop < prevTop - 2) {
+      if (nowTop < prevTop - 2) {
         // A deliberate upward scroll unpins even inside the 80px bottom
         // tolerance. On a phone with the keyboard open the visible area
         // can be only ~250px tall, so the tolerance used to swallow small
@@ -43090,6 +43088,8 @@
         // never reaches this branch: those positions are within the
         // tolerance and take the re-pin branch above.
         view._pinnedToBottom = false;
+      } else if (isConversationAtBottom(view)) {
+        view._pinnedToBottom = true;
       }
       updateConversationEndAffordance(view);
       // Cache the topmost-visible message on every scroll so a later window
