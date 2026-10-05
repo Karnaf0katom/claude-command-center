@@ -8,6 +8,19 @@
         <description>Sparkle update feed for CCC.app.</description>
         <language>en</language>
         <item>
+            <title>v5.37.0</title>
+            <pubDate>Mon, 05 Oct 2026 01:18:30 +0000</pubDate>
+            <sparkle:version>5.37.0</sparkle:version>
+            <sparkle:shortVersionString>5.37.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/amirfish1/claude-command-center/releases/tag/v5.37.0</sparkle:releaseNotesLink>
+            <enclosure
+                url="https://github.com/amirfish1/claude-command-center/releases/download/v5.37.0/ccc-v5.37.0.dmg"
+                length="3534507"
+                type="application/octet-stream"
+                sparkle:edSignature="oufkp4tRvh4jfcn5IwMtNgzxG2DvoSBNl9bQBVgmfsyoXGGp6te67BQ5vTuN73qcXq+Ei5ZBBkmGzuQ5SP76CA==" />
+        </item>
+<item>
             <title>v5.36.0</title>
             <pubDate>Fri, 02 Oct 2026 13:06:48 +0000</pubDate>
             <sparkle:version>5.36.0</sparkle:version>
