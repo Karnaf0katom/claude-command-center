@@ -1,0 +1,1 @@
+- Agent config notice can be dismissed from a remote/tunnel session, and the "local-only" error now explains itself.

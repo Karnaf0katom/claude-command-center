@@ -31128,8 +31128,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             return
         if path.startswith("/api/config-consent/"):
             # Writing to the user's agent config is local-only: a peer let in
-            # through phone access / a tunnel cannot approve it.
-            if phone_access.is_remote_request(self.client_address[0], self.headers):
+            # through phone access / a tunnel cannot approve it. The notice
+            # ack writes no agent config, so a remote viewer may dismiss it.
+            if (path != "/api/config-consent/notice-ack"
+                    and phone_access.is_remote_request(self.client_address[0], self.headers)):
                 self.send_json({"ok": False, "error": "config consent is local-only"}, 403)
                 return
             length = int(self.headers.get("Content-Length", "0") or 0)
