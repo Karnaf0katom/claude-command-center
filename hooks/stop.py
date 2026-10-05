@@ -109,6 +109,31 @@ def session_title(session_id, transcript_path):
     return custom or ai
 
 
+def first_prompt_snippet(transcript_path, limit=60):
+    """Banner subtitle of last resort: the opening of the session's first
+    prompt, so a not-yet-titled session never shows as a bare hex id. Reads
+    only the transcript head (hook must stay fast); "" when none."""
+    try:
+        with open(transcript_path, "rb") as f:
+            head = f.read(200_000).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    for line in head.splitlines():
+        if '"type":"user"' not in line and '"enqueue"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        text = obj.get("content") if obj.get("type") == "queue-operation" else (obj.get("message") or {}).get("content")
+        if isinstance(text, list):
+            text = " ".join(b.get("text", "") for b in text if isinstance(b, dict))
+        if isinstance(text, str) and text.strip():
+            text = " ".join(text.split())
+            return text if len(text) <= limit else text[:limit].rstrip() + "…"
+    return ""
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -155,7 +180,9 @@ def main():
             notify(
                 title="Claude Command Center",
                 message="Ready for your input",
-                subtitle=session_title(session_id, data.get("transcript_path") or "") or session_id[:8],
+                subtitle=(session_title(session_id, data.get("transcript_path") or "")
+                          or first_prompt_snippet(data.get("transcript_path") or "")
+                          or session_id[:8]),
                 session_id=session_id,
             )
 
