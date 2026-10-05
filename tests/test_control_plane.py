@@ -291,6 +291,16 @@ class TestWorkerServiceDefinition(unittest.TestCase):
         self.assertIn("KillMode=process", system_unit)
         self.assertIn("Never roll an older worker with unresolved work.", source)
 
+    def test_dashboard_units_never_kill_the_engines_they_spawned(self):
+        """A dashboard restart (every CCC auto-pull) must not kill the
+        one-shot engine turns it spawned: both units use KillMode=process."""
+        source = pathlib.Path("run.sh").read_text(encoding="utf-8")
+        unit = source[source.index('cat > "$SYSTEMD_UNIT_PATH" <<EOF'):]
+        unit = unit[:unit.index("\nEOF\n")]
+        self.assertIn("KillMode=process", unit)
+        system_unit = pathlib.Path("systemd/ccc.service").read_text(encoding="utf-8")
+        self.assertIn("KillMode=process", system_unit)
+
     def test_restart_handler_has_no_function_local_uuid_shadow(self):
         source = pathlib.Path("server.py").read_text(encoding="utf-8")
         tree = ast.parse(source)

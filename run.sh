@@ -387,6 +387,11 @@ ExecStart=$HERE/run.sh
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=2048
+# Signal only the dashboard on stop/restart, like the system unit. Engine
+# CLIs it spawned (Devin, Gemini, ... one-shot turns) write to on-disk logs
+# and finish their turn; the default (control-group) killed them mid-turn
+# on every dashboard restart.
+KillMode=process
 ${env_lines}
 [Install]
 WantedBy=default.target
