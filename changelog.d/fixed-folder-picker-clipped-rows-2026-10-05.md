@@ -1,0 +1,1 @@
+- Folder picker list rows (.fp-item) clipped when many entries: flex column + overflow:hidden shrinks them; needs flex:0 0 auto.
