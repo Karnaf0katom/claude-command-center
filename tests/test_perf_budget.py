@@ -3410,8 +3410,17 @@ def test_hermes_conv_open_does_not_scan_whole_sessions_table(monkeypatch, tmp_pa
     assert lineage and lineage[0]["lineage_session_ids"] == [parent, child]
 
 
+def _isolate_hermes_search_channel(monkeypatch):
+    """Session search also ranks hits from Hermes' own messages_fts, read from
+    the host's real ~/.hermes/state.db. Tests that count results must not see
+    the host's sessions."""
+    from ccc_server import session_fts
+    monkeypatch.setattr(session_fts, "_hermes_channel_hits", lambda query, limit: [])
+
+
 def test_session_fts_second_search_does_no_reparse(tmp_path, monkeypatch):
     """A second search must reuse cached (mtime, size) index without re-parsing transcripts."""
+    _isolate_hermes_search_channel(monkeypatch)
     from ccc_server import session_fts
 
     db_path = tmp_path / "session_fts.sqlite"
@@ -3485,6 +3494,7 @@ def test_session_fts_section_search_cost_is_independent_of_session_count(tmp_pat
     re-parse nothing and run a constant number of section queries (one, via
     the FTS index) however many long sessions exist; section_matches() for
     a page of results is one batched query, never one per sid."""
+    _isolate_hermes_search_channel(monkeypatch)
     from ccc_server import session_fts
 
     monkeypatch.setenv("CCC_SESSION_FTS_DB", str(tmp_path / "session_fts.sqlite"))
@@ -4171,6 +4181,7 @@ def test_sidebar_recall_search_never_spawns_a_subprocess(tmp_path, monkeypatch):
     (ccc_server/recent_search.py -> ccc_server/session_fts.py), never a
     subprocess call. Guard against a regression that reintroduces a shell-out
     on this path — with or without that binary on PATH, zero forks either way."""
+    _isolate_hermes_search_channel(monkeypatch)
     from ccc_server import session_fts
 
     db_path = tmp_path / "session_fts.sqlite"
