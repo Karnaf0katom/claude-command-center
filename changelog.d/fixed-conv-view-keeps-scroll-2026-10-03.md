@@ -1,1 +1,0 @@
-- Keep the transcript scroll position when switching Default/Verbose/Compact views.

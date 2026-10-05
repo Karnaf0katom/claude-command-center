@@ -1,1 +1,0 @@
-- The "Ready for your input" banner now shows the session name instead of the short session id.

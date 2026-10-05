@@ -1,1 +1,0 @@
-- Auto-title activity-log lines now include the titled session's transcript mtime and age.

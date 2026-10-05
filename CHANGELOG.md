@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.37.0] - 2026-10-04
+
+### Added
+- Sidebar shows an "auto-title" section above the footer: 24h token total and a live list of recent auto-title runs.
+- Auto-title section shows the mtime of the conversation each run titled.
+- Codex cloud ("dot" / aeon) threads now appear in the session list and archive: threads whose records live in OpenAI's cloud never write local rollout files, so they were invisible before. They carry a `cloud` badge, nest under their dot's root thread, and open in the normal transcript view — read-only, with the composer disabled and a note to reply in the Codex app. Discovery rides a TTL- and disk-cached catalog fetch on a background refresh; opening a thread fetches and caches its turns with large attachments replaced by placeholders. Degrades softly to the desktop's local sidebar cache when the login is missing/expired or the (undocumented) backend is unreachable.
+- Conversation view is a one-tap Compact | Normal | Verbose segmented control (rail topbar and pane menu). Compact collapses the transcript in every engine (Claude, Codex, Devin, ACP): the tool calls and thinking between two text messages fold into a small "▸ N tool calls · M thoughts" chip at the end of the preceding sentence (tap to unfold), narration reads as plain spaced paragraphs, each turn's final summary keeps its card, and per-message timestamps, line numbers and token chips are hidden.
+- **Ask (Mazkir) now finds sessions on your other paired CCC machines.** History questions also ask each paired peer's own recall in parallel (2.5 s cap). Answers name the machine a session ran on, and sources show a `[machine]` tag. An unreachable peer shows up in the trace and never blocks the answer.
+- `ccc recall`, `ccc shipped`, `ccc brief` and `ccc history` now also search your paired CCC machines and merge the results, tagging each row with the machine it came from. A session that moved between machines shows once, with `also on` the other copies. An unreachable machine is named in the output instead of silently missing, and `ccc shipped` says "NOT FOUND on reachable nodes" rather than "NOT SHIPPED" while one is down. `--scope local` keeps the old single-machine behaviour; the `/api/memory/*` endpoints gain an opt-in `scope=all`.
+- Added a floating green CALL button on mobile to open the voice assistant, with an IN CALL shortcut when its panel is hidden.
+- Voice mode: talk to the board hands-on through the Codex app-server realtime lane (experimental). A mic button in the top bar opens a floating panel with live transcript, state, timer, plan-usage readout, and pending-action cards. The browser peers with the local voice host over WebRTC on your ChatGPT subscription so audio never passes through the server; an optional BYOK OpenAI key enables a billed-per-use websocket fallback when subscription voice can't connect (the key goes to the child env only, never argv, disk, logs, or API responses). The voice answers from a read-only tool surface (attention feed, session summary, queue rollup) and every mutation becomes a card the user confirms by click; the backing Codex thread is ephemeral and sandboxed read-only. One session at a time, auto-stop on silence/max length/tab close, per-session usage records. Settings > Voice mode picks the voice, fallback profile, and limits; docs/realtime-voice.md.
+- Spawn dedupe contract: `POST /api/sessions/spawn` accepts `task_key` (repo-scoped exact match) or `dedupe: true` (raw-prompt hash). A matching live or finished lane returns `200 {existing: true, finished?, session_id, ...}` instead of spawning a twin; concurrent duplicates collapse onto the in-flight spawn (`deduped: "in_flight"`). `/api/sessions/spawned` rows now carry `task_key`, `task_summary` (raw prompt, not the boilerplate-wrapped `command_summary`), `prompt_hash`, and `display_name` (the enriched AI title once the session has an archive row), plus server-side filters `?task_key=`, `?parent=`, `?q=`, and `?include_finished=1` — finished lanes persist to `spawned-history.json` (24h/200-row bounded) instead of vanishing, so "was this already done" is answerable. `ccc spawn` gains `--task-key` / `--dedupe`.
+- Vault: a new Settings > Vault tab for any kind of secret (API keys, tokens, logins, other), not just the LLM providers BYOK covers. Each entry has a name, kind, service, optional username, env var, website and notes; values live in the macOS Keychain (service `ccc-vault`) or, off macOS, the same encrypted-file fallback BYOK uses, with a 0600 metadata index that never holds a value. Values are write-only in the UI and API (rows show "saved" and when, plus a last-4 hint for long API keys/tokens). Existing BYOK keys are listed with an "Import to Vault" action that copies the value and leaves BYOK untouched. Agents use `ccc vault list`, `ccc vault get <name> [--reveal]`, and `ccc vault exec --env VAR=<name> -- <cmd>`, which injects the secret into the command's environment and redacts it from the command's output. BYOK Keychain writes now pass the key on stdin instead of argv.
+
+### Changed
+- Auto-title activity-log lines now include the titled session's transcript mtime and age.
+- Every auto-title spawn (including manual and "Summarize all") now writes an activity-log line with the session mtime.
+- The "Ready for your input" banner now shows the session name instead of the short session id.
+- Approved agent hooks and skills now update silently with CCC instead of re-opening the "Agent config access" dialog after every update.
+- Mobile conversation view: Compact/Normal toggle in the top bar; Codex Desktop handover moved into the ⋮ menu.
+- Voice mode starts with a green phone button labeled CALL and welcomes you when audio connects. Use END CALL to hang up.
+- The mobile voice button starts calls with one tap, sits higher, and can be dragged to a remembered position. Calls open with “Hi, what's up?” Voice can inspect ticket input requests and propose queue triage sessions using a configured Deep profile or an explicitly selected model.
+
+### Removed
+- Removed the new-session Claude "pre-warm": no more background claude processes spawned while the composer is open; new sessions cold-start.
+
+### Fixed
+- Auto-titler: skips WatchTower queue-worker sessions (identical "Drain the <Q> queue" prompt) and runs with minimal context (<1k tokens per title instead of ~32k).
+- The "Ready for your input" banner shows the current session name (rename or auto-title) instead of a stale launch slug like "prewarm-<repo>".
+- Auto-titler leaves Codex sessions untouched for more than 3 days alone (CCC_AUTO_TITLE_CODEX_MAX_AGE_DAYS), ending bulk Haiku titling of old history.
+- Opening an active Codex cloud thread no longer stalls for 8-13s while its transcript refetches; the cached copy shows immediately and new turns appear when the background refresh lands.
+- Compact transcript view keeps the speak/copy buttons and timestamp on the newest assistant reply.
+- Keep the transcript scroll position when switching Default/Verbose/Compact views.
+- Opening a long Devin CLI conversation is fast again after a restart: parsed events persist to disk, and the ACP turn-result merge no longer re-reads the whole transcript on every open and poll.
+- Fixed: transcript no longer jumps when an empty streaming bubble appears and disappears.
+- Mac app: microphone dictation and voice no longer fail with "Microphone access blocked" (the signed build now declares the audio-input entitlement).
+- Auto-title helper sessions no longer pop a "Ready for your input" macOS banner.
+- Searching for an exact path or filename (e.g. a pasted-image path) now matches only sessions containing that exact string, instead of every session that shares any of its words.
+- Fixed Windows compatibility across process liveness checking, WatchTower CLI discovery, detached daemon startup, hook script sync, FIFO fallbacks, project root boundary detection, test isolation, and Desktop app deep links.
+
 ## [5.36.0] - 2026-10-02
 
 ### Added
@@ -3648,7 +3688,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.36.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.37.0...HEAD
+[5.37.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.37.0
 [5.36.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.36.0
 [5.35.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.35.0
 [5.34.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.34.0

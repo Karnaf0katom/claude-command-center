@@ -1,1 +1,0 @@
-- Sidebar shows an "auto-title" section above the footer: 24h token total and a live list of recent auto-title runs.

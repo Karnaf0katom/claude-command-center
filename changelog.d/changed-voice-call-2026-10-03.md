@@ -1,1 +1,0 @@
-- Voice mode starts with a green phone button labeled CALL and welcomes you when audio connects. Use END CALL to hang up.

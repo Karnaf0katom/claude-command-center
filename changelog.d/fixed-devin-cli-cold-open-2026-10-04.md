@@ -1,1 +1,0 @@
-- Opening a long Devin CLI conversation is fast again after a restart: parsed events persist to disk, and the ACP turn-result merge no longer re-reads the whole transcript on every open and poll.

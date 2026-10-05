@@ -1,1 +1,0 @@
-- Auto-title helper sessions no longer pop a "Ready for your input" macOS banner.

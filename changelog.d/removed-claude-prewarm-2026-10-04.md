@@ -1,1 +1,0 @@
-- Removed the new-session Claude "pre-warm": no more background claude processes spawned while the composer is open; new sessions cold-start.

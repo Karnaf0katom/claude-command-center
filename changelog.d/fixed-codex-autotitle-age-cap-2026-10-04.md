@@ -1,1 +1,0 @@
-- Auto-titler leaves Codex sessions untouched for more than 3 days alone (CCC_AUTO_TITLE_CODEX_MAX_AGE_DAYS), ending bulk Haiku titling of old history.

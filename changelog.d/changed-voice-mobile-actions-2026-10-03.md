@@ -1,1 +1,0 @@
-The mobile voice button starts calls with one tap, sits higher, and can be dragged to a remembered position. Calls open with “Hi, what's up?” Voice can inspect ticket input requests and propose queue triage sessions using a configured Deep profile or an explicitly selected model.

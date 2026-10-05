@@ -1,1 +1,0 @@
-- Auto-titler: skips WatchTower queue-worker sessions (identical "Drain the <Q> queue" prompt) and runs with minimal context (<1k tokens per title instead of ~32k).
