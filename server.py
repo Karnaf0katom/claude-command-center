@@ -16907,6 +16907,13 @@ def _restart_stale_worker():
         pass
     if not stale:
         return {"restarted": False, "reason": "current", "server_version": loaded}
+    # Restarting the worker kills every session it launched, including ones
+    # idle between turns that the busy check below cannot see. Leave a stale
+    # worker running unless the owner opted into automatic rolls; the
+    # Maintenance "Restart worker" action is the approved path.
+    if os.environ.get("CCC_WORKER_AUTO_RESTART", "0") != "1":
+        return {"restarted": False, "reason": "stale_needs_approval",
+                "server_version": loaded}
     # Never roll a worker that owns unresolved work: the code on disk changes
     # far more often than the worker's behaviour does, and a restart cuts off
     # active turns. Defer; the next maintenance tick or run.sh launch retries.

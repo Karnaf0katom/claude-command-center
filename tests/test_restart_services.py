@@ -12,6 +12,7 @@ kicks a real service.
 """
 
 import importlib
+import os
 import pathlib
 import subprocess
 import unittest
@@ -126,6 +127,13 @@ class RestartWorkerProcessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = importlib.import_module("server")
+
+    def setUp(self):
+        # These tests cover the opted-in automatic roll; the default (no
+        # automatic worker restart) is covered by the approval tests below.
+        env = mock.patch.dict(os.environ, {"CCC_WORKER_AUTO_RESTART": "1"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def test_skips_kickstart_when_a_different_pid_owns_the_worker_label(self):
         """A duplicate/dev worker (pid 4242) must not trust a kickstart that
@@ -320,6 +328,29 @@ class RestartWorkerProcessTests(unittest.TestCase):
             out = server._restart_stale_worker()
         self.assertTrue(out["restarted"])
         restart.assert_called_once()
+
+    def test_stale_idle_worker_needs_approval_by_default(self):
+        """Restarting the worker kills every session it launched, idle ones
+        included, so a stale worker is left running unless the owner opted
+        into automatic rolls."""
+        server = self.server
+        with mock.patch.dict(os.environ, {"CCC_WORKER_AUTO_RESTART": "0"}), \
+             mock.patch.object(
+                 server, "_control_plane_request",
+                 return_value={"ok": True, "active": 0, "queued": 0, "uncertain": 0,
+                               "worker": {"server_version": "1.0.0"}},
+             ), mock.patch.object(server, "_repo_version_on_disk", return_value="2.0.0"), \
+             mock.patch.object(server, "_restart_worker_process") as restart:
+            out = server._restart_stale_worker()
+        self.assertFalse(out["restarted"])
+        self.assertEqual(out["reason"], "stale_needs_approval")
+        restart.assert_not_called()
+
+    def test_run_sh_leaves_stale_worker_running_without_opt_in(self):
+        src = (pathlib.Path(__file__).resolve().parent.parent / "run.sh").read_text()
+        gate = src.index('CCC_WORKER_AUTO_RESTART:-0}" != "1"')
+        self.assertLess(gate, src.index("restart deferred until it is idle"))
+        self.assertLess(gate, src.index('launchctl kickstart -k "$(worker_service_target)"', gate))
 
     def test_run_sh_defers_stale_restart_when_worker_busy(self):
         src = (pathlib.Path(__file__).resolve().parent.parent / "run.sh").read_text()

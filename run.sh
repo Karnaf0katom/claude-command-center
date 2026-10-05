@@ -927,6 +927,14 @@ EOF
         worker_stale_hash=1
       fi
       if { [ "$worker_stale_version" = "1" ] || [ "$worker_stale_hash" = "1" ]; } \
+        && [ "${CCC_WORKER_AUTO_RESTART:-0}" != "1" ]; then
+        # The worker owns every CCC-launched session, and its service stop
+        # kills them all -- idle between turns or mid-turn alike ("idle" here
+        # only counts worker jobs, not resident sessions). Restarting it is
+        # the owner's call: Settings -> Maintenance -> Restart worker, or set
+        # CCC_WORKER_AUTO_RESTART=1 to restore the automatic roll.
+        echo "→ Worker code is stale — left running; restart it from Settings → Maintenance when no session needs it"
+      elif { [ "$worker_stale_version" = "1" ] || [ "$worker_stale_hash" = "1" ]; } \
         && [ "${existing_worker_idle:-0}" != "1" ]; then
         # Never roll a worker that owns active/queued/uncertain work: source
         # files change far more often than worker behaviour, and a restart
