@@ -16907,11 +16907,11 @@ def _restart_stale_worker():
         pass
     if not stale:
         return {"restarted": False, "reason": "current", "server_version": loaded}
-    # Restarting the worker kills every session it launched, including ones
-    # idle between turns that the busy check below cannot see. Leave a stale
-    # worker running unless the owner opted into automatic rolls; the
-    # Maintenance "Restart worker" action is the approved path.
-    if os.environ.get("CCC_WORKER_AUTO_RESTART", "0") != "1":
+    # The worker units use KillMode=process, so the sessions the worker
+    # launched survive its restart and the new worker reattaches them. An
+    # owner can still opt out of automatic rolls with CCC_WORKER_AUTO_RESTART=0
+    # and restart from Settings -> Maintenance instead.
+    if os.environ.get("CCC_WORKER_AUTO_RESTART", "1") == "0":
         return {"restarted": False, "reason": "stale_needs_approval",
                 "server_version": loaded}
     # Never roll a worker that owns unresolved work: the code on disk changes
@@ -16929,6 +16929,78 @@ def _restart_stale_worker():
         )
         return {"restarted": False, "reason": "stale_deferred_busy", **busy}
     return _restart_worker_process(worker, was=loaded, now=repo_version)
+
+
+_WORKER_SYSTEMD_UNIT = "ccc-worker.service"
+
+
+def _worker_systemd_scope(pid):
+    """Return (scope, pid_in_unit) when systemd supervises the worker.
+
+    scope is "user" or "system" when the worker's cgroup is the
+    ccc-worker.service unit, or "user" when the user unit is installed but
+    `pid` runs outside it (a stray worker). (None, False) when systemd does
+    not manage the worker at all (macOS, Docker, a bare ./run.sh).
+    """
+    if pid:
+        try:
+            cgroups = Path(f"/proc/{int(pid)}/cgroup").read_text()
+        except (OSError, ValueError):
+            cgroups = ""
+        for line in cgroups.splitlines():
+            path = line.rsplit(":", 1)[-1].strip().rstrip("/")
+            if path.endswith("/" + _WORKER_SYSTEMD_UNIT):
+                return ("user" if "/user@" in path else "system"), True
+    if not shutil.which("systemctl"):
+        return None, False
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "LoadState", "--value",
+             _WORKER_SYSTEMD_UNIT],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, False
+    if proc.returncode == 0 and (proc.stdout or "").strip() == "loaded":
+        return "user", False
+    return None, False
+
+
+def _restart_systemd_worker(scope, pid, pid_in_unit, *, was=None, now=None):
+    """Restart a systemd-supervised worker through systemd only.
+
+    Never spawn a replacement ourselves: a worker started outside the unit
+    holds worker.sock while the unit's own copy crash-loops "already
+    running" (thousands of failed starts on a Linux VM, Oct 2026). The units
+    use KillMode=process, so the sessions the worker launched survive.
+    """
+    outcome = {"restarted": True, "was": was, "now": now, "via": "systemd"}
+    try:
+        if pid and not pid_in_unit:
+            # A stray worker outside the unit: stop it so the unit's copy can
+            # bind the socket.
+            os.kill(int(pid), signal.SIGTERM)
+            time.sleep(0.5)
+        if scope == "system":
+            # No rights to `systemctl restart` a system unit; its
+            # Restart=always replaces the worker once this pid exits.
+            if pid and pid_in_unit:
+                os.kill(int(pid), signal.SIGTERM)
+            return outcome
+        proc = subprocess.run(
+            ["systemctl", "--user", "restart", _WORKER_SYSTEMD_UNIT],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        outcome["restarted"] = False
+        outcome["reason"] = f"systemd restart failed ({e})"
+        return outcome
+    if proc.returncode != 0:
+        outcome["restarted"] = False
+        outcome["reason"] = (
+            f"systemctl restart failed: {(proc.stderr or '').strip()}"
+        )
+    return outcome
 
 
 def _restart_worker_process(worker=None, *, was=None, now=None):
@@ -16966,6 +17038,11 @@ def _restart_worker_process(worker=None, *, was=None, now=None):
         worker = health.get("worker") if isinstance(health, dict) and isinstance(health.get("worker"), dict) else {}
     target = f"gui/{os.getuid()}/{_WORKER_LAUNCHD_LABEL}"
     pid = worker.get("pid")
+    systemd_scope, pid_in_unit = _worker_systemd_scope(pid)
+    if systemd_scope:
+        return _restart_systemd_worker(
+            systemd_scope, pid, pid_in_unit, was=was, now=now,
+        )
     kicked = False
     if _launchd_restart_targets_pid(_WORKER_LAUNCHD_LABEL, pid):
         try:

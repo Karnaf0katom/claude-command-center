@@ -1,1 +1,0 @@
-- The execution worker is no longer restarted automatically when its code goes stale: restarting it kills every session it launched, including ones idle between turns. A stale worker keeps running until you restart it from Settings → Maintenance; set `CCC_WORKER_AUTO_RESTART=1` to restore the automatic roll.

@@ -333,6 +333,28 @@ systemd_available() {
   command -v systemctl >/dev/null 2>&1
 }
 
+# True when the systemd user unit owns the worker. Then every worker start or
+# restart goes through systemd: a worker started any other way holds
+# worker.sock while the unit's own copy crash-loops "already running"
+# (thousands of failed starts on a Linux VM, Oct 2026).
+worker_systemd_managed() {
+  systemd_available \
+    && [ "$(systemctl --user show -p LoadState --value "$WORKER_SYSTEMD_UNIT_NAME" 2>/dev/null)" = "loaded" ]
+}
+
+# Restart the systemd-managed worker. A stray worker outside the unit (pid
+# given, not the unit's MainPID) is stopped first so the unit's copy can bind
+# the socket. KillMode=process keeps the sessions the worker launched alive.
+restart_worker_via_systemd() {
+  local stray_pid="${1:-0}" main_pid
+  main_pid="$(systemctl --user show -p MainPID --value "$WORKER_SYSTEMD_UNIT_NAME" 2>/dev/null || echo 0)"
+  if [ "${stray_pid:-0}" -gt 1 ] 2>/dev/null && [ "$stray_pid" != "${main_pid:-0}" ]; then
+    kill "$stray_pid" >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+  systemctl --user restart "$WORKER_SYSTEMD_UNIT_NAME" >/dev/null 2>&1
+}
+
 write_systemd_unit() {
   local target_port="$1"
   mkdir -p "$(dirname "$SYSTEMD_UNIT_PATH")" "$SERVICE_LOG_DIR"
@@ -880,6 +902,20 @@ raise SystemExit(0 if "engine-execution-v1" in caps else 1)
     if [ "${worker_compatible:-0}" != "1" ] \
       && "$PYTHON" "$HERE/ccc_worker.py" --health >/dev/null 2>&1; then
       echo "⚠ Older persistent worker still has unresolved work; using compatibility execution." >&2
+    elif [ "${worker_compatible:-0}" != "1" ] && worker_systemd_managed; then
+      # Never start a second worker beside the unit's own: (re)start the unit.
+      if [ "${existing_worker_pid:-0}" -gt 1 ] 2>/dev/null; then
+        restart_worker_via_systemd "$existing_worker_pid" || true
+      else
+        systemctl --user start "$WORKER_SYSTEMD_UNIT_NAME" >/dev/null 2>&1 || true
+      fi
+      for _ in $(seq 1 50); do
+        if "$PYTHON" "$HERE/ccc_worker.py" --health >/dev/null 2>&1; then
+          echo "  worker   : persistent ($WORKER_SYSTEMD_UNIT_NAME)"
+          break
+        fi
+        sleep 0.2
+      done
     elif [ "${worker_compatible:-0}" != "1" ]; then
       nohup "$PYTHON" "$HERE/ccc_worker.py" \
         >>"$SERVICE_LOG_DIR/worker.out.log" \
@@ -931,13 +967,11 @@ EOF
         worker_stale_hash=1
       fi
       if { [ "$worker_stale_version" = "1" ] || [ "$worker_stale_hash" = "1" ]; } \
-        && [ "${CCC_WORKER_AUTO_RESTART:-0}" != "1" ]; then
-        # The worker owns every CCC-launched session, and its service stop
-        # kills them all -- idle between turns or mid-turn alike ("idle" here
-        # only counts worker jobs, not resident sessions). Restarting it is
-        # the owner's call: Settings -> Maintenance -> Restart worker, or set
-        # CCC_WORKER_AUTO_RESTART=1 to restore the automatic roll.
-        echo "→ Worker code is stale — left running; restart it from Settings → Maintenance when no session needs it"
+        && [ "${CCC_WORKER_AUTO_RESTART:-1}" = "0" ]; then
+        # Owner opted out of automatic rolls (CCC_WORKER_AUTO_RESTART=0).
+        # By default an idle stale worker is restarted below: the worker
+        # units use KillMode=process, so the sessions it launched survive.
+        echo "→ Worker code is stale — left running (CCC_WORKER_AUTO_RESTART=0); restart it from Settings → Maintenance"
       elif { [ "$worker_stale_version" = "1" ] || [ "$worker_stale_hash" = "1" ]; } \
         && [ "${existing_worker_idle:-0}" != "1" ]; then
         # Never roll a worker that owns active/queued/uncertain work: source
@@ -951,7 +985,16 @@ EOF
           echo "→ Worker runs an older copy of server.py — restarting worker"
         fi
         echo "  Queued work will show as 'needs reconciliation' in Settings → Maintenance."
-        if ! launchctl kickstart -k "$(worker_service_target)" >/dev/null 2>&1; then
+        worker_kicked=0
+        if worker_systemd_managed; then
+          # Even if the restart call fails, never fall through to a
+          # detached spawn: the unit's Restart=always owns recovery.
+          restart_worker_via_systemd "${existing_worker_pid:-0}" || true
+          worker_kicked=1
+        elif launchctl kickstart -k "$(worker_service_target)" >/dev/null 2>&1; then
+          worker_kicked=1
+        fi
+        if [ "$worker_kicked" != "1" ]; then
           # No launchd worker service on this install path (brew service or
           # DMG app spawn): kill the stale worker AND immediately replace it,
           # or the dashboard runs workerless (legacy execution) until the
