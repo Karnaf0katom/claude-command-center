@@ -13,7 +13,7 @@ _spec.loader.exec_module(stop)
 class FirstPromptSnippetTests(unittest.TestCase):
     def _snippet(self, *lines):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
-            f.write("\n".join(json.dumps(l) for l in lines))
+            f.write("\n".join(json.dumps(l, separators=(",", ":")) for l in lines))
         try:
             return stop.first_prompt_snippet(f.name)
         finally:
