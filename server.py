@@ -26125,6 +26125,11 @@ _adopt_ccc_module("ask")
 # Session waste — on-demand `throughput analyze` from agent-throughput (/api/session/waste).
 _adopt_ccc_module("session_waste")
 
+# Free-router provider registry + guided key setup (/api/free-router/providers,
+# /api/free-router/keys). The wizard's backend; router lifecycle is L01's
+# ccc_server/free_router.py, reached here over its loopback API.
+_adopt_ccc_module("free_providers")
+
 # Test-patched globals kept here; ccc_server/usage_stats.py reads them via _core.
 _CCC_WEEKLY_CAL_FILE = COMMAND_CENTER_STATE_DIR / "usage" / "calibration.json"
 _WEEK_START_OVERRIDE_FILE = COMMAND_CENTER_STATE_DIR / "usage" / "week-start-override.json"
@@ -26451,6 +26456,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if path == "/setup" or path == "/setup.html" or path.startswith("/api/setup/"):
             from ccc_server import setup_jobs as _setup_jobs_mod
             _setup_jobs_mod.handle_get(self, parsed)
+        if path == "/api/free-router/providers":
+            # Free-key wizard catalog (L03): registry rows + live key state
+            # when the managed router answers. Contract: bare list.
+            self.send_json(free_provider_catalog())
             return
 
         if path == "" or path == "/":
@@ -30465,6 +30474,37 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if path.startswith("/api/setup/"):
             from ccc_server import setup_jobs as _setup_jobs_mod
             _setup_jobs_mod.handle_post(self)
+        if path == "/api/free-router/keys":
+            # Free-key wizard submit (L03): {platform, key?, consent?} ->
+            # {ok, validated, error}. The key is forwarded to the managed
+            # router only; it is never logged, echoed, or stored by CCC.
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                length = 0
+            if length > 64 * 1024:
+                self.send_json({"ok": False, "error": "request too large"}, 413)
+                return
+            try:
+                body = self.rfile.read(length) if length > 0 else b""
+                payload = json.loads(body) if body else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = None
+            if not isinstance(payload, dict):
+                self.send_json({"ok": False, "validated": False,
+                                "error": "invalid JSON body"}, 400)
+                return
+            result = submit_free_key(
+                payload.get("platform"),
+                key=payload.get("key"),
+                consent=bool(payload.get("consent")),
+            )
+            status = 200 if result.get("ok") else {
+                "router_unavailable": 503,
+                "router_error": 502,
+                "router_rejected": 502,
+            }.get(result.get("code"), 400)
+            self.send_json(result, status)
             return
 
         if path == "/api/assistant/ask":
