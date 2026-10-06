@@ -76,12 +76,9 @@ function cccSavChip(c) {
           tip: 'This session runs on a free model. It costs you nothing.',
         };
   }
-  if (!hasCost) return null;
-  return {
-    cls: 'is-api',
-    text: cccSavFmtUsd(cost) + ' value',
-    tip: 'Your agent did about ' + cccSavFmtUsd(cost) + ' of work at API prices.',
-  };
+  // Paid runs get no row chip: a $ chip on every row crowds the sidebar.
+  // Their value shows in the header ticker and the savings panel instead.
+  return null;
 }
 
 // Ticker pill model: the headline number is the API-priced value of today's

@@ -2,7 +2,7 @@
 
 Extracts the SAVINGS_UI_START..END block from static/savings.js and executes
 it in node, asserting the money/token formatters, the per-session chip model
-("$0 · saved $X" for free runs, "$X value" otherwise), and the milestone
+("$0 · saved $X" for free runs, none otherwise), and the milestone
 ladder. Also statically checks that index.html loads the module and that
 app.js calls the row-chip hook.
 """
@@ -65,10 +65,9 @@ def test_chip_free_run_without_value():
     assert chip["text"] == "$0"
 
 
-def test_chip_paid_run_shows_api_value():
-    chip = _run("cccSavChip({runtime:'api', cost_usd:0.47})")
-    assert chip["cls"] == "is-api"
-    assert chip["text"] == "$0.47 value"
+def test_chip_hidden_on_paid_run():
+    # Paid runs get no row chip; their value lives in the ticker and panel.
+    assert _run("cccSavChip({runtime:'api', cost_usd:0.47})") is None
 
 
 def test_chip_hidden_when_no_cost():
