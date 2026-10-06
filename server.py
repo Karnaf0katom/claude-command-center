@@ -26452,6 +26452,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             }, 404)
             return
 
+        if path.startswith("/api/free-router"):
+            # Free-model router (freellmapi) lifecycle. Falls through when
+            # the path belongs to a sibling subsystem (providers, models…).
+            from ccc_server import free_router
+            if free_router.handle_api_get(self, path):
+                return
+
         # First-run setup (onboarding): plan, job polling, and the /setup page.
         if path == "/setup" or path == "/setup.html" or path.startswith("/api/setup/"):
             from ccc_server import setup_jobs as _setup_jobs_mod
@@ -29119,6 +29126,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Vary", "Accept-Encoding")
             self.end_headers()
             self.wfile.write(body)
+        elif path in ("/free-router", "/free-router.html"):
+            # Standalone Free engine status page — same narrow-route pattern
+            # as /spawn-ledger: isolated from the main dashboard bundle.
+            try:
+                body = (STATIC_DIR / "free-router.html").read_bytes()
+            except OSError as e:
+                self.send_json({"error": "free-router.html missing", "detail": str(e)}, 500)
+                return
+            body, enc = self._maybe_gzip(body, "text/html; charset=utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            if enc:
+                self.send_header("Content-Encoding", enc)
+                self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            self.wfile.write(body)
         elif path in ("/spawn-ledger", "/spawn-ledger.html"):
             # Standalone read-only scorecard page, deliberately isolated from
             # the main dashboard bundle.
@@ -30460,6 +30485,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             result = codex_client_call(action, data)
             self.send_json(result, 200 if result.get("ok") else 409)
             return
+        if path.startswith("/api/free-router"):
+            # Free-model router lifecycle (install/start/stop). Same-origin
+            # was already enforced at the top of do_POST.
+            from ccc_server import free_router
+            if free_router.handle_api_post(self, path):
+                return
         if path.startswith("/proxy/"):
             self._proxy_local_view("POST")
             return
