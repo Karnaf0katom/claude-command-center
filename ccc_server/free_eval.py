@@ -797,7 +797,9 @@ def _score_model(per_task):
     """Composite 0-100: 80% pass rate + 20% speed."""
     passed = sum(1 for t in per_task if t["passed"])
     pass_rate = passed / max(1, len(per_task))
-    medians = [t["median_request_ms"] for t in per_task if t.get("median_request_ms")]
+    # 0 ms is a real (sub-millisecond) median, not "no data".
+    medians = [t["median_request_ms"] for t in per_task
+               if t.get("median_request_ms") is not None]
     med = statistics.median(medians) if medians else None
     if med is None:
         speed = 0.0
