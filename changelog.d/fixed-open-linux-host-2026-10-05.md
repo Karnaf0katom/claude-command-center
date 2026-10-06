@@ -1,0 +1,1 @@
+- Opening a file or folder link on a Linux server host no longer fails with `No such file or directory: 'open'`; it uses `xdg-open` when present and otherwise shows a clear message.

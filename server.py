@@ -33873,7 +33873,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     rp = Path(result["path"])
                     # `open -R` reveals in Finder rather than launching.
                     launch = payload.get("launch") and not reveal_only_block_launch
-                    cmd = ["open", str(rp)] if launch else ["open", "-R", str(rp)]
+                    if sys.platform == "darwin":
+                        cmd = ["open", str(rp)] if launch else ["open", "-R", str(rp)]
+                    else:
+                        # Linux hosts (e.g. a headless VM) have no `open`;
+                        # xdg-open can't reveal, so open the containing dir.
+                        opener = shutil.which("xdg-open")
+                        if not opener:
+                            self.send_json({
+                                "ok": False,
+                                "error": "this server host has no desktop opener (xdg-open); open the path from a machine with a display",
+                                "path": str(rp),
+                            }, 501)
+                            return
+                        target = rp if (launch or rp.is_dir()) else rp.parent
+                        cmd = [opener, str(target)]
                     subprocess.Popen(cmd)
                     self.send_json({"ok": True, "path": str(rp)})
                 except Exception as e:
