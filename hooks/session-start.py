@@ -129,9 +129,13 @@ def main():
 
     caller = ""
     parent = ""
-    # A runtime-only marker (a $0 spawn stamped before this hook ran) still
-    # needs caller/parent detection; only skip when attribution already landed.
-    if not (existing.get("caller") or existing.get("parent_session_id")):
+    # Attribution runs once, on the first start (no marker yet). A $0 spawn
+    # stamped its runtime-only marker before this hook ran, so it still needs
+    # caller/parent detection. Any other existing marker skips the ps scan:
+    # hooks must exit fast and resumes of old sessions are common.
+    attributed = existing.get("caller") or existing.get("parent_session_id")
+    runtime_only = existing.get("runtime") and not attributed
+    if not existing or runtime_only:
         table = _ps_table()
         pid = os.getppid()
         claude_pid = None
