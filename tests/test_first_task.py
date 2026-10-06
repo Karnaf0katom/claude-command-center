@@ -88,6 +88,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("CCC_PLAYGROUND_DIR", str(pg))
     monkeypatch.setenv("CCC_FIRST_TASK_STATE", str(state))
     monkeypatch.setenv("CCC_CLAUDE_BIN", str(fake))
+    # Isolate from a real free router on this machine (L01 may be installed).
+    monkeypatch.setattr(first_task, "_free_router_env", lambda: {})
+    first_task._free_ready_cache.update({"t": 0.0, "ready": False, "base_url": None})
     first_task._JOBS.clear()
     yield {"playground": pg, "state": state, "fake": fake}
     first_task._JOBS.clear()
