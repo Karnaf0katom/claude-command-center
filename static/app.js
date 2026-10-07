@@ -54867,6 +54867,13 @@
           data._auto_handover_pending = prev._auto_handover_pending;
         }
         _usageDataByPane[pid] = data;
+        if (data && data.free_served) {
+          _freeServedBySid[sid] = data.free_served;
+          document.querySelectorAll('.event-model-meta[data-tin]').forEach((el) => {
+            const t = _freeServedText(_freeServedBySid[sid][el.dataset.tin]);
+            if (t) { el.textContent = t; el.title = t; }
+          });
+        }
         renderSessionUsageIntoStrip(pid);
         _renderRailTokens(pid);
       } catch (_) {
@@ -54890,6 +54897,16 @@
     });
   }
 
+  // Free-router sessions: what the router log says answered a turn (keyed by
+  // the turn's input token count; see ccc_server/free_runtime.served_map).
+  const _freeServedBySid = {};
+  function _freeServedText(info) {
+    if (!info || !info.provider) return '';
+    const bits = ['Used free (\u00240)', info.provider, info.model];
+    if (info.latency_ms) bits.push((info.latency_ms / 1000).toFixed(1) + 's');
+    if (info.failed) bits.push(info.failed + ' failed attempt' + (info.failed > 1 ? 's' : '') + ' before');
+    return bits.join(' \u00b7 ');
+  }
   function _formatTokens(n) {
     if (!n) return '0';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
@@ -61022,7 +61039,11 @@
       const bits = [];
       const prefix = role === 'assistant' ? 'Used' : 'Sent to';
       bits.push(prefix + ' ' + formatModelEffort(ev.model, rowReasoningEffort(ev), { style: 'verbose' }));
-      return '<div class="event-model-meta" title="' + escapeAttr(bits.join(' · ')) + '">' + escapeHtml(bits.join(' · ')) + '</div>';
+      const freeMap = role === 'assistant' && ev.tokens_in ? _freeServedBySid[renderedConversationId] : null;
+      const freeText = freeMap ? _freeServedText(freeMap[String(ev.tokens_in)]) : '';
+      const text = freeText || bits.join(' · ');
+      return '<div class="event-model-meta"' + (ev.tokens_in ? ' data-tin="' + escapeAttr(String(ev.tokens_in)) + '"' : '')
+        + ' title="' + escapeAttr(text) + '">' + escapeHtml(text) + '</div>';
     }
     function ambientContextHtml(context) {
       if (!context || !context.text) return '';

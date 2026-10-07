@@ -28095,6 +28095,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     if usage["runtime"] == "free":
                         usage["free_provider"], usage["free_model"] = _free_runtime.served_by(
                             usage.get("latest_input_tokens"))
+                        usage["free_served"] = _free_runtime.served_map()
                 except Exception:
                     usage["runtime"] = ""
                 # extract_session_usage only sees the picker override, so a

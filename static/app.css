@@ -30623,6 +30623,11 @@ body.conv-compact.conv-compact .conversations-view details.tool-command-disclosu
    no later text, and their absolute-positioned stamps stacked into a smear. */
 body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) .msg-ts { display: inline !important; }
 body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) .assistant-message-actions { display: inline-flex !important; }
+/* The newest reply keeps its per-turn token summary and model line; the
+   older turns stay clean. Merged chips ride on tool-call lines, so they stay
+   hidden there. */
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) > .event-token-chips,
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) > .event-model-meta { display: block !important; }
 /* Two-line clamp on messages (all but the newest assistant reply). */
 body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),
 body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) .user-msg {

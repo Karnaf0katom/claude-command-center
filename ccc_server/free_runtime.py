@@ -373,6 +373,43 @@ def served_by(input_tokens):
     return (str(row[0]), str(row[1])) if row else ("", "")
 
 
+def served_map(limit=400):
+    """{input_tokens: info} for the router's recent requests, newest wins.
+
+    info: provider, model, latency_ms, ttfb_ms, failed (error attempts at the
+    same size in the 10 minutes before the success: the failover chain).
+    Keyed by input size because the router logs no session id (see served_by).
+    """
+    db = _state_file().parent / "freellmapi" / "server" / "data" / "freeapi.db"
+    if not db.is_file():
+        return {}
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=0.5)
+        try:
+            rows = con.execute(
+                "SELECT input_tokens, platform, model_id, status, latency_ms, ttfb_ms, "
+                "CAST(strftime('%s', created_at) AS INTEGER) FROM requests "
+                "WHERE created_at > datetime('now','-2 day') AND input_tokens > 0 "
+                "ORDER BY id DESC LIMIT ?", (int(limit) * 4,)).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    out = {}
+    for tok, plat, model, status, lat, ttfb, ts in rows:
+        if status == "success" and str(tok) not in out and len(out) < limit:
+            out[str(tok)] = {"provider": plat, "model": model, "latency_ms": lat,
+                             "ttfb_ms": ttfb, "failed": 0, "_ts": ts}
+    for tok, plat, model, status, lat, ttfb, ts in rows:
+        info = out.get(str(tok))
+        if info and status != "success" and 0 <= info["_ts"] - ts <= 600:
+            info["failed"] += 1
+    for info in out.values():
+        info.pop("_ts", None)
+    return out
+
+
 def session_runtime(session_id):
     """The recorded runtime for a known session id ("free" or "").
 
