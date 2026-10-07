@@ -51,6 +51,23 @@ if [ -n "$tr_to_hits" ]; then
   exit 1
 fi
 
+# Test fixtures set user.name "Test User" in tmp repos; a leaked GIT_DIR once
+# wrote that into this clone's .git/config, and ~180 commits shipped under it.
+# Refuse to push any commit authored or committed as the fixture identity.
+zero=0000000000000000000000000000000000000000
+while read -r _lref lsha _rref rsha; do
+  [ "$lsha" = "$zero" ] && continue
+  if [ "$rsha" = "$zero" ]; then range="$lsha --not --remotes"; else range="$rsha..$lsha"; fi
+  # shellcheck disable=SC2086
+  bad="$(git log --format='%h %ae %ce %s' $range 2>/dev/null | grep -E ' test@example\.com ' || true)"
+  if [ -n "$bad" ]; then
+    echo "pre-push: commits use the test fixture identity (test@example.com):"
+    echo "$bad"
+    echo "Check 'git config --show-origin user.email', fix it, then amend these commits."
+    exit 1
+  fi
+done
+
 if [ ! -f tests/test_perf_budget.py ]; then
   exit 0  # nothing to gate on this checkout
 fi
