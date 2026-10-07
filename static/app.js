@@ -55786,12 +55786,16 @@
     // an /ctx probe) — meaningful in the tooltip/sidebar title, not worth a
     // word in the compact pill itself (CCC-969).
     const sourceLabelPill = sourceLabel === 'calc' ? '' : sourceLabel + ' ';
+    // A session on CCC's free router says so in the bar it is billed from.
+    const freePill = String(u.runtime || '').toLowerCase() === 'free'
+      ? ' <span class="meta-runtime-free" title="This session runs on CCC’s free router - it costs $0.">$0 free</span>'
+      : '';
     uSlot.innerHTML = qualityPill + '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
       + _contextRingSvg(calcPct)
       + sourceLabelPill + _formatTokens(displayTokens) + ' / ' + _formatTokens(limit)
       + ' <span class="wp-usage-pct">(' + calcPct + '%)</span>'
       + slashContextText
-      + '</span>' + peakNote + costPill + antigravityTotalsPill + modelPill + handoverPill;
+      + '</span>' + peakNote + costPill + freePill + antigravityTotalsPill + modelPill + handoverPill;
     syncInputContextVisibility(slot);
     scheduleInputContextFit();
     const handoverBtn = uSlot.querySelector('[data-auto-handover-toggle]');

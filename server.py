@@ -28090,6 +28090,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # pane is currently "active".
                 usage["auto_handover_enabled"] = sid in _load_auto_handover_flags()
                 usage["auto_handover_mode"] = _auto_handover_mode(sid)
+                try:
+                    usage["runtime"] = _free_runtime.session_runtime(sid) or ""
+                except Exception:
+                    usage["runtime"] = ""
                 # extract_session_usage only sees the picker override, so a
                 # session spawned with `--effort` and never re-picked reports
                 # blank and the composer's model pill drops the effort segment
