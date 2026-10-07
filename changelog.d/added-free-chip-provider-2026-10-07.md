@@ -1,0 +1,1 @@
+- A free-router session's bottom-bar chip now names the provider that last answered it (for example "$0 free · kilo"), with the model in the tooltip.

@@ -55788,7 +55788,9 @@
     const sourceLabelPill = sourceLabel === 'calc' ? '' : sourceLabel + ' ';
     // A session on CCC's free router says so in the bar it is billed from.
     const freePill = String(u.runtime || '').toLowerCase() === 'free'
-      ? ' <span class="meta-runtime-free" title="This session runs on CCC’s free router - it costs $0.">$0 free</span>'
+      ? ' <span class="meta-runtime-free" title="' + escapeHtml('This session runs on CCC’s free router - it costs $0.'
+          + (u.free_provider ? '\nLast answered by ' + u.free_provider + ' / ' + u.free_model : '')) + '">$0 free'
+          + (u.free_provider ? ' · ' + escapeHtml(u.free_provider) : '') + '</span>'
       : '';
     uSlot.innerHTML = qualityPill + '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
       + _contextRingSvg(calcPct)

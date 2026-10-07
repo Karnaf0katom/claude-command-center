@@ -341,6 +341,38 @@ def normalize_runtime(value):
     return runtime
 
 
+def served_by(input_tokens):
+    """(provider, model) that last answered a request of this exact size.
+
+    The router logs no session id, but a Claude Code turn's input token count
+    is the same number in the transcript and in the router's request log, so
+    the latest turn's count finds the router row. Latest successful row in the
+    last day wins; ("", "") when nothing matches or the log is unreadable.
+    """
+    try:
+        n = int(input_tokens or 0)
+    except (TypeError, ValueError):
+        return "", ""
+    if n <= 0:
+        return "", ""
+    db = _state_file().parent / "freellmapi" / "server" / "data" / "freeapi.db"
+    if not db.is_file():
+        return "", ""
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=0.5)
+        try:
+            row = con.execute(
+                "SELECT platform, model_id FROM requests WHERE input_tokens=? "
+                "AND status='success' AND created_at > datetime('now','-1 day') "
+                "ORDER BY id DESC LIMIT 1", (n,)).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return "", ""
+    return (str(row[0]), str(row[1])) if row else ("", "")
+
+
 def session_runtime(session_id):
     """The recorded runtime for a known session id ("free" or "").
 

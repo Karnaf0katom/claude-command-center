@@ -28092,6 +28092,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 usage["auto_handover_mode"] = _auto_handover_mode(sid)
                 try:
                     usage["runtime"] = _free_runtime.session_runtime(sid) or ""
+                    if usage["runtime"] == "free":
+                        usage["free_provider"], usage["free_model"] = _free_runtime.served_by(
+                            usage.get("latest_input_tokens"))
                 except Exception:
                     usage["runtime"] = ""
                 # extract_session_usage only sees the picker override, so a
