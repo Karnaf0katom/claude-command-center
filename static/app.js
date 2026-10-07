@@ -6396,7 +6396,7 @@
     if (!relayActive) return;
     const qs = _relayedQuestionState.questions || [];
     if (!qs.length) return;
-    const SEP = '^A';
+    const SEP = '';
     const keys = new Set(qs.map(function (q) {
       return ((q.header || '').trim() + SEP + (q.question || '').trim());
     }));
@@ -14104,7 +14104,7 @@
     const actions = [];
     const seen = new Set();
     const add = (a) => {
-      const key = a.act + '^@' + a.value;
+      const key = a.act + '\u0000' + a.value;
       if (seen.has(key) || actions.length >= 6) return;
       seen.add(key);
       actions.push(a);
@@ -15775,7 +15775,7 @@
   function linkifyWatchtowerTicketRefs(html) {
     const anchors = [];
     const protectedHtml = String(html || '').replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, match => {
-      const token = '^@WTANCHOR' + anchors.length + '^@';
+      const token = '\u0000WTANCHOR' + anchors.length + '\u0000';
       anchors.push(match);
       return token;
     });
@@ -15783,7 +15783,7 @@
       '<a role="button" tabindex="0" class="watchtower-ticket-link"'
         + ' data-watchtower-ticket="' + escapeAttr(match) + '"'
         + ' data-watchtower-queue="' + escapeAttr(queue) + '">' + match + '</a>');
-    return linked.replace(/^@WTANCHOR(\d+)^@/g, (match, index) => anchors[Number(index)] || match);
+    return linked.replace(/\u0000WTANCHOR(\d+)\u0000/g, (match, index) => anchors[Number(index)] || match);
   }
 
   function linkifyPath(p) {
@@ -20483,11 +20483,6 @@
 
   let newSessionComposerRevision = 0;
 
-  function getAutoOpenNewChatsPref() {
-    try { return localStorage.getItem('ccc-auto-open-new-chats') !== 'off'; }
-    catch (_) { return true; }
-  }
-
   function newSessionLaunchStillCurrent(context) {
     return activePaneId() === context.paneId
       && newSessionComposerRevision === context.revision
@@ -20563,10 +20558,10 @@
       // An externally-initiated spawn (`ccc spawn`, an agent, a queue lane)
       // must NOT steal the pane: the user did not ask for this session, they
       // just need to see it appear. Only spawns this tab started auto-select.
-      if (card.no_auto_select || !getAutoOpenNewChatsPref()) return;
+      if (card.no_auto_select) return;
       if (typeof selectConversation === 'function') selectConversation(id);
     };
-    if (card.fast_path && getAutoOpenNewChatsPref() && !card.no_auto_select) {
+    if (card.fast_path && !card.no_auto_select) {
       // Rebuilding a sidebar with thousands of sessions can occupy the main
       // thread for a full second. Claude's main pane is the useful immediate
       // feedback, so select it now and let the complete sidebar rebuild run
@@ -44297,10 +44292,10 @@
     const imgs = [];
     md = md.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
       imgs.push({ alt, url });
-      return '^@IMG' + (imgs.length - 1) + '^@';
+      return '\u0000IMG' + (imgs.length - 1) + '\u0000';
     });
     let html = renderMarkdown(md);
-    html = html.replace(/^@IMG(\d+)^@/g, (m, idx) => {
+    html = html.replace(/\u0000IMG(\d+)\u0000/g, (m, idx) => {
       const { alt, url } = imgs[+idx];
       return '<img src="' + escapeHtml(url) + '" alt="' + escapeHtml(alt) + '" style="max-width:100%;border-radius:6px;margin:8px 0;" loading="lazy">';
     });
@@ -57897,7 +57892,7 @@
 
   function queuedSteerErrorKey(sid, text) {
     const norm = _normSend(String(text || ''));
-    return sid && norm ? sid + '^@' + norm : '';
+    return sid && norm ? sid + '\u0000' + norm : '';
   }
 
   function setQueuedSteerError(sid, texts, message) {
@@ -67172,7 +67167,7 @@
   let _localhostCtxKey = '';
 
   function _localhostCtxKeyOf(ctx) {
-    return ctx ? [ctx.repoPath || '', ctx.cwd || '', ctx.sessionId || ''].join('^A') : '';
+    return ctx ? [ctx.repoPath || '', ctx.cwd || '', ctx.sessionId || ''].join('') : '';
   }
 
   // Forget the previous context's cached probe result. Called on a session
@@ -82024,9 +82019,6 @@
         timeline_t0_epoch_ms: spawnAskedAt,
         idempotency_key: durableActionId('spawn'),
       }, Number.isFinite(autoCompactK) && autoCompactK > 0 ? { auto_compact_k: autoCompactK } : {}));
-      if (!getAutoOpenNewChatsPref() && newSessionLaunchStillCurrent(launchContext)) {
-        enterNewSessionMode(spawnInput ? spawnInput.value : '');
-      }
       if (engine === 'claude') abortBackgroundApiReadsForSpawn();
       // A prewarm reservation boots with paid env - a $0 spawn must not claim it.
       if (engine === 'claude' && !useWorktree && spawnBody.runtime !== 'free') {
@@ -82718,12 +82710,6 @@
       const on = getSeparateTabsPref();
       $separateTabsToggle.classList.toggle('is-on', on);
       $separateTabsToggle.setAttribute('aria-checked', String(on));
-    }
-    const $autoOpenNewChatsToggle = document.getElementById('settingsAutoOpenNewChatsToggle');
-    if ($autoOpenNewChatsToggle) {
-      const on = getAutoOpenNewChatsPref();
-      $autoOpenNewChatsToggle.classList.toggle('is-on', on);
-      $autoOpenNewChatsToggle.setAttribute('aria-checked', String(on));
     }
     const $queueRhsListToggle = document.getElementById('settingsQueueRhsListToggle');
     if ($queueRhsListToggle) {
@@ -84473,13 +84459,6 @@
         applyViewGh(next);
         refreshAppearanceChecks();
         showSettingsSavedPulse(viewGhToggle.closest('.settings-row'));
-        return;
-      }
-      const autoOpenNewChatsToggle = e.target.closest('[data-auto-open-new-chats-toggle]');
-      if (autoOpenNewChatsToggle) {
-        try { localStorage.setItem('ccc-auto-open-new-chats', getAutoOpenNewChatsPref() ? 'off' : 'on'); } catch (_) {}
-        refreshAppearanceChecks();
-        showSettingsSavedPulse(autoOpenNewChatsToggle.closest('.settings-row'));
         return;
       }
       const separateTabsToggle = e.target.closest('[data-separate-tabs-toggle]');

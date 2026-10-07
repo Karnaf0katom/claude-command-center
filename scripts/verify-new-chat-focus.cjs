@@ -3,13 +3,17 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const puppeteer = require('../require-puppeteer.js');
 const { findChromePath } = require('../puppeteer-browser-config.js');
 const root = path.join(__dirname, '..');
-const output = process.env.CCC_VERIFY_OUT || '/tmp/ccc-new-chat-focus';
 
 (async () => {
+  const temporaryDirectory = process.env.CCC_VERIFY_OUT ? null
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'ccc-new-chat-focus-'));
+  const output = process.env.CCC_VERIFY_OUT || path.join(temporaryDirectory, 'check');
+  let browser, page;
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, 'http://localhost').pathname;
     const relative = pathname === '/' ? 'static/index.html' : pathname.slice(1);
@@ -26,11 +30,6 @@ const output = process.env.CCC_VERIFY_OUT || '/tmp/ccc-new-chat-focus';
       response.writeHead(200, { 'Content-Type': type }); response.end(bytes);
     } catch (_) { response.writeHead(404); response.end(); }
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const base = 'http://127.0.0.1:' + server.address().port;
-  const browser = await puppeteer.launch({ executablePath: findChromePath(),
-    args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-  const page = await browser.newPage();
   const errors = [], writes = [], held = [], checks = [], logs = [];
   const rows = [];
   const row = (id, text) => ({ id, session_id: id, display_name: text, first_message: text,
@@ -38,8 +37,16 @@ const output = process.env.CCC_VERIFY_OUT || '/tmp/ccc-new-chat-focus';
     session_cwd: '/projects/example', session_cwd_exists: true, modified: Date.now() / 1000,
     state: 'idle', is_live: false, archived: false, spawned_via: 'ui', spawned_lane: 'coding' });
   rows.push(row('existing-chat', 'Existing chat'));
-  let phase = 'settings';
+  let phase = 'browser setup';
   try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const base = 'http://127.0.0.1:' + server.address().port;
+    browser = await puppeteer.launch({ executablePath: findChromePath(),
+      args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+    page = await browser.newPage();
     page.setDefaultTimeout(30000);
     await page.setViewport({ width: 1440, height: 1000 });
     await page.evaluateOnNewDocument(() => {
@@ -100,12 +107,6 @@ const output = process.env.CCC_VERIFY_OUT || '/tmp/ccc-new-chat-focus';
       if (url.pathname.endsWith('/stream')) return request.respond({ status: 200, contentType: 'text/event-stream', body: ': fixture\n\n' });
       return json({ ok: true });
     });
-    const openSettings = async () => {
-      await page.$eval('#settingsBtn', button => button.click());
-      await page.waitForFunction(() => !document.getElementById('settingsModal').hidden);
-      await page.$eval('#settingsRailTab-sessions', button => button.click());
-    };
-    const closeSettings = () => page.$eval('#settingsModalClose', button => button.click());
     const newChat = async () => {
       await page.$eval('#sidebarNewBtn', button => button.click());
       await page.waitForFunction(() => window.currentConversation === '__new__');
@@ -124,60 +125,67 @@ const output = process.env.CCC_VERIFY_OUT || '/tmp/ccc-new-chat-focus';
     const state = () => page.evaluate(() => ({ selected: window.currentConversation,
       draft: document.getElementById('convInput').value, disabled: document.getElementById('convSendBtn').disabled }));
     await page.goto(base, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await openSettings();
-    assert.equal(await page.$eval('#settingsAutoOpenNewChatsToggle', button => button.getAttribute('aria-checked')), 'true');
-    await page.$eval('#settingsAutoOpenNewChatsToggle', button => button.click());
-    assert.equal(await page.evaluate(() => localStorage.getItem('ccc-auto-open-new-chats')), 'off');
-    await page.screenshot({ path: output + '-settings.png' });
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-    await openSettings();
-    assert.equal(await page.$eval('#settingsAutoOpenNewChatsToggle', button => button.getAttribute('aria-checked')), 'false');
-    await closeSettings(); checks.push('setting defaults on, toggles off, and persists through reload');
 
-    phase = 'overlapping background launches';
-    await newChat(); await send('First background task', 1);
+    phase = 'overlapping launches';
+    await newChat(); await send('First task', 1);
+    await page.waitForFunction(() => String(window.currentConversation).startsWith('spawning-'));
+    await newChat();
     assert.equal((await state()).disabled, false);
-    await send('Second background task', 2);
+    await send('Second task', 2);
+    await page.waitForFunction(() => String(window.currentConversation).startsWith('spawning-'));
+    await newChat();
     await draft('Third draft stays here');
     await held[1].finish(); await held[0].finish();
     await page.waitForFunction(() => document.querySelector('.conv-item[data-session-id="launched-chat-0"]'));
     assert.equal((await state()).selected, '__new__');
     assert.equal((await state()).draft, 'Third draft stays here');
-    checks.push('two launches send before either reply; reverse replies keep the third draft');
+    checks.push('new chats open immediately; reverse replies preserve a third new-chat draft');
     await page.setViewport({ width: 393, height: 851 });
     await page.screenshot({ path: output + '-phone.png' });
     await page.setViewport({ width: 1440, height: 1000 });
 
     phase = 'late rejection';
-    await send('Task that fails later', 3); await draft('Newer draft survives rejection');
+    await send('Task that fails later', 3);
+    await newChat(); await draft('Newer draft survives rejection');
     await held[2].finish(false);
     await page.waitForFunction(() => document.body.innerText.includes('Spawn failed'));
     assert.equal((await state()).selected, '__new__');
     assert.equal((await state()).draft, 'Newer draft survives rejection');
     checks.push('late rejection keeps the failed launch and preserves the newer draft');
 
-    phase = 'default foreground launch then navigation';
-    await openSettings(); await page.$eval('#settingsAutoOpenNewChatsToggle', button => button.click()); await closeSettings();
+    phase = 'launch then navigate to another chat';
     await newChat(); await send('Foreground task starts slowly', 4);
     await page.waitForFunction(() => String(window.currentConversation).startsWith('spawning-'));
-    await newChat(); await draft('New draft after leaving');
+    await page.evaluate(() => window.cccOpenSession('existing-chat'));
+    await page.waitForFunction(() => window.currentConversation === 'existing-chat');
+    await draft('Reply in the existing chat');
     await held[3].finish();
     await page.waitForFunction(() => document.querySelector('.conv-item[data-session-id="launched-chat-3"]'));
-    assert.equal((await state()).selected, '__new__');
-    assert.equal((await state()).draft, 'New draft after leaving');
-    checks.push('automatic opening still works; a late reply cannot take back the new composer');
+    assert.equal((await state()).selected, 'existing-chat');
+    assert.equal((await state()).draft, 'Reply in the existing chat');
+    checks.push('a late reply cannot replace another open chat or its draft');
+    await page.screenshot({ path: output + '-desktop.png' });
     assert.deepEqual(errors, []);
     checks.push('no browser errors and all launch requests intercepted');
     fs.writeFileSync(output + '.json', JSON.stringify({ checks, errors, writes,
       launches: held.map(item => ({ prompt: item.body.prompt, engine: item.body.engine })) }, null, 2) + '\n');
-    console.log(JSON.stringify({ checks, errors, output }));
+    console.log(JSON.stringify({ checks, errors, output: temporaryDirectory ? null : output }));
   } catch (error) {
-    await page.screenshot({ path: output + '-failed.png' }).catch(() => {});
-    const state = await page.evaluate(() => ({ selected: window.currentConversation,
-      draft: document.getElementById('convInput')?.value, body: document.body.innerText.slice(-5000) })).catch(() => null);
+    if (page) await page.screenshot({ path: output + '-failed.png' }).catch(() => {});
+    const state = page ? await page.evaluate(() => ({ selected: window.currentConversation,
+      draft: document.getElementById('convInput')?.value, body: document.body.innerText.slice(-5000) })).catch(() => null) : null;
     fs.writeFileSync(output + '.json', JSON.stringify({ phase, error: error.message, errors, writes, logs, state }, null, 2) + '\n');
     throw error;
   } finally {
-    await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    try {
+      if (browser) await browser.close();
+    } finally {
+      server.closeAllConnections();
+      try {
+        if (server.listening) await new Promise(resolve => server.close(resolve));
+      } finally {
+        if (temporaryDirectory) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      }
+    }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,1 +1,1 @@
-- Added **Open new chats automatically** under Settings → Sessions & subscription (on by default, saved per browser). Turn it off to keep the new-chat composer available while earlier chats start in the background. Delayed launch responses update their sidebar rows without reopening them over another chat, draft, or split pane.
+- Fixed delayed chat launch responses reopening a session over another chat, draft, or split pane. New chats still open immediately; late failures keep their Retry/Edit request without replacing a newer draft.
