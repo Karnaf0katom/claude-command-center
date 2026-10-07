@@ -1,0 +1,1 @@
+- Speak falls back to a local Kokoro voice (installed under ~/.ccc/local-tts, started on demand) when the free cloud voices are unavailable.

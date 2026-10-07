@@ -418,7 +418,7 @@ TTS_VOICES = (
     "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 )
 # Tried in order. Gemini first (30 voices); Cloudflare MeloTTS when Google
-# rate-limits the free tier. Aura is left out: the router sends it the wrong
+# rate-limits the free tier; then the local Kokoro voice (see local_tts). Aura is left out: the router sends it the wrong
 # field name and Cloudflare rejects it.
 TTS_MODELS = ("gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "@cf/myshell-ai/melotts")
 TTS_MAX_CHARS = 2000
@@ -431,6 +431,60 @@ def _audio_type(data):
     if data[:3] == b"ID3" or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
         return "audio/mpeg"
     return "application/octet-stream"
+
+
+_LOCAL_TTS_DIR = Path.home() / ".ccc" / "local-tts"
+_LOCAL_TTS_PORT = int(os.environ.get("CCC_LOCAL_TTS_PORT", "3019"))
+_LOCAL_TTS_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "local_tts_server.py"
+
+
+def _local_tts_up():
+    try:
+        with socket.create_connection(("127.0.0.1", _LOCAL_TTS_PORT), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def local_tts_installed():
+    py = _LOCAL_TTS_DIR / "venv" / "bin" / "python"
+    return py.exists() and (_LOCAL_TTS_DIR / "kokoro.int8.onnx").exists() and (_LOCAL_TTS_DIR / "voices.bin").exists()
+
+
+def _local_tts_start():
+    """Start the loopback Kokoro server detached; True once it answers."""
+    import subprocess
+    import time
+    if _local_tts_up():
+        return True
+    if not local_tts_installed():
+        return False
+    subprocess.Popen(
+        [str(_LOCAL_TTS_DIR / "venv" / "bin" / "python"), str(_LOCAL_TTS_SCRIPT)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    for _ in range(40):
+        time.sleep(0.25)
+        if _local_tts_up():
+            return True
+    return False
+
+
+def local_tts(text):
+    """(audio, label) from the local Kokoro voice, or (b"", "") when unavailable."""
+    import urllib.request
+    if not _local_tts_start():
+        return b"", ""
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/speak" % _LOCAL_TTS_PORT,
+        data=json.dumps({"text": text, "voice": "af_heart"}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+        return (data, "Kokoro (local)") if data else (b"", "")
+    except Exception:
+        return b"", ""
 
 
 def tts(text, voice=""):
@@ -448,9 +502,10 @@ def tts(text, voice=""):
         return 400, b"", "", ""
     voice = voice if voice in TTS_VOICES else random.choice(TTS_VOICES)
     key = unified_key()
-    if not key or not router_listening():
-        return 503, b"", "", voice
     status = 502
+    if not key or not router_listening():
+        local, label = local_tts(text)
+        return (200, local, _audio_type(local), label) if local else (503, b"", "", voice)
     for model in TTS_MODELS:
         melo = model.startswith("@cf/")
         body = {"model": model, "input": text}
@@ -469,6 +524,9 @@ def tts(text, voice=""):
             status = 429 if (e.code == 429 or status == 429) else 502
         except Exception:
             status = 502
+    local, label = local_tts(text)
+    if local:
+        return 200, local, _audio_type(local), label
     return status, b"", "", voice
 
 
