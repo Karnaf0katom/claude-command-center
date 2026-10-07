@@ -9079,11 +9079,11 @@
     ev.stopPropagation();
     if (btn === _ttsDirectBtn && _ttsUtterance) {
       if (_ttsActive && !_ttsPaused) {
-        try { window.speechSynthesis.pause(); } catch (_) {}
+        try { _ttsEnginePause(); } catch (_) {}
         _ttsPaused = true;
         _setTtsDirectBtnState(btn, 'paused');
       } else if (_ttsPaused) {
-        try { window.speechSynthesis.resume(); } catch (_) {}
+        try { _ttsEngineResume(); } catch (_) {}
         _ttsPaused = false;
         _setTtsDirectBtnState(btn, 'speaking');
       }
@@ -9283,11 +9283,11 @@
     // whatever is playing and starts fresh, same as before.
     if (btn === _ttsDirectBtn && _ttsUtterance) {
       if (_ttsActive && !_ttsPaused) {
-        try { window.speechSynthesis.pause(); } catch (_) {}
+        try { _ttsEnginePause(); } catch (_) {}
         _ttsPaused = true;
         _setTtsDirectBtnState(btn, 'paused');
       } else if (_ttsPaused) {
-        try { window.speechSynthesis.resume(); } catch (_) {}
+        try { _ttsEngineResume(); } catch (_) {}
         _ttsPaused = false;
         _setTtsDirectBtnState(btn, 'speaking');
       }
@@ -12916,6 +12916,80 @@
       btn.setAttribute('aria-label', btn.title);
     }
   }
+  // Free neural voice (router TTS). Reads of up to _TTS_NEURAL_MAX_CHARS go
+  // through /api/free-runtime/tts with a random Gemini voice per read; longer
+  // reads, a 429/outage (cool-down), or no router fall back to the browser
+  // voice. No word highlight on this path: the audio carries no boundaries.
+  const _TTS_NEURAL_MAX_CHARS = 1200;
+  let _ttsNeural = null;          // { audio, token } while a neural chunk plays
+  let _ttsNeuralToken = 0;
+  let _ttsNeuralCooldownUntil = 0;
+  function _ttsEnginePause() {
+    if (_ttsNeural && _ttsNeural.audio) { try { _ttsNeural.audio.pause(); } catch (_) {} }
+    if (window.speechSynthesis) window.speechSynthesis.pause();
+  }
+  function _ttsEngineResume() {
+    if (_ttsNeural && _ttsNeural.audio) { try { _ttsNeural.audio.play(); } catch (_) {} }
+    if (window.speechSynthesis) window.speechSynthesis.resume();
+  }
+  function _ttsEngineCancel() {
+    _ttsNeuralToken += 1;
+    if (_ttsNeural && _ttsNeural.audio) { try { _ttsNeural.audio.pause(); } catch (_) {} }
+    _ttsNeural = null;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+  function _ttsNeuralUsable(state) {
+    return Date.now() >= _ttsNeuralCooldownUntil
+      && state.neuralOk !== false
+      && state.chunks.reduce((n, c) => n + c.text.length, 0) <= _TTS_NEURAL_MAX_CHARS;
+  }
+  function _ttsSpeakChunkNeural(state, chunk) {
+    const token = ++_ttsNeuralToken;
+    const pseudo = { neural: true };   // keeps the "is a read active" checks true
+    _ttsUtterance = pseudo;
+    const stale = () => token !== _ttsNeuralToken || _ttsChunkState !== state;
+    const fallBack = (cooldownMs) => {
+      if (cooldownMs) _ttsNeuralCooldownUntil = Date.now() + cooldownMs;
+      state.neuralOk = false;
+      if (stale()) return;
+      _ttsUtterance = null;
+      _ttsSpeakNextChunk();
+    };
+    fetch('/api/free-runtime/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: chunk.text, voice: state.voice || '' }),
+    }).then(async (res) => {
+      if (stale()) return;
+      if (!res.ok) { fallBack(res.status === 429 ? 60000 : 300000); return; }
+      state.voice = res.headers.get('X-CCC-Voice') || state.voice || '';
+      const url = URL.createObjectURL(await res.blob());
+      if (stale()) { URL.revokeObjectURL(url); return; }
+      const audio = new Audio(url);
+      audio.playbackRate = _ttsRate;
+      _ttsNeural = { audio, token };
+      const label = 'Pause reading (free voice: ' + state.voice + ')';
+      audio.onplay = () => {
+        if (stale()) return;
+        setTtsButtonsState(true, false, state.paneId);
+        setTtsButtonsBusy(false);
+        ttsButtons().forEach(btn => {
+          if (ttsButtonPaneId(btn) === _ttsActivePaneId) { btn.classList.remove('paused'); btn.title = label; }
+        });
+      };
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        if (stale()) return;
+        _ttsNeural = null;
+        _ttsUtterance = null;
+        state.index += 1;
+        _ttsSpeakNextChunk();
+      };
+      audio.onerror = () => { URL.revokeObjectURL(url); fallBack(300000); };
+      audio.play().catch(() => fallBack(0));
+    }).catch(() => { if (!stale()) fallBack(300000); });
+  }
+
   // One-time iOS-Safari engine prime (CCC-31). Must run inside a user gesture.
   let _ttsPrimed = false;
   function _primeTtsEngine() {
@@ -12949,7 +13023,7 @@
     clearTtsCaption();
     _ttsChunkState = null;
     if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
+      _ttsEngineCancel();
     }
     _ttsUtterance = null;
     _ttsTextMapping = [];
@@ -13190,6 +13264,7 @@
     }
 
     const chunk = state.chunks[state.index];
+    if (_ttsNeuralUsable(state)) { _ttsSpeakChunkNeural(state, chunk); return; }
     const utterance = new SpeechSynthesisUtterance(chunk.text);
     utterance.rate = _ttsRate;
     _ttsUtterance = utterance;
@@ -13208,7 +13283,7 @@
         state.pauseOnStart = false;
         setTimeout(() => {
           if (_ttsUtterance !== utterance) return;
-          try { window.speechSynthesis.pause(); } catch (_) {}
+          try { _ttsEnginePause(); } catch (_) {}
         }, 0);
       }
     };
@@ -13262,7 +13337,7 @@
     // Starting a fresh read supersedes any prior utterance.
     if (_ttsActive || _ttsPaused || _ttsUtterance) {
       _ttsChunkState = null;
-      try { window.speechSynthesis.cancel(); } catch (_) {}
+      try { _ttsEngineCancel(); } catch (_) {}
     }
     _setTtsDirectBtnState(sourceBtn || null, sourceBtn ? 'speaking' : null);
     clearTtsHighlight();
@@ -13288,7 +13363,7 @@
     // SAME utterance. Reset happens automatically when a new turn lands
     // (see resetTtsOnNewTurn). No rate cycling any more — always 1.25x.
     if (_ttsActive && !_ttsPaused) {
-      try { window.speechSynthesis.pause(); } catch (_) {}
+      try { _ttsEnginePause(); } catch (_) {}
       _ttsPaused = true;
       ttsButtons().forEach(btn => {
         if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
@@ -13306,7 +13381,7 @@
       // instead of resuming the old utterance (CCC-37). Otherwise resume.
       const _freshSel = selectedConversationTtsData(paneId || activePaneId());
       if (!_freshSel || !_freshSel.text.trim()) {
-        try { window.speechSynthesis.resume(); } catch (_) {}
+        try { _ttsEngineResume(); } catch (_) {}
         _ttsPaused = false;
         ttsButtons().forEach(btn => {
           if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
@@ -13322,7 +13397,7 @@
       // Fresh selection present — drop the paused utterance and fall through
       // to the start path below, which reads selectedConversationTtsData first.
       _ttsChunkState = null;
-      try { window.speechSynthesis.cancel(); } catch (_) {}
+      try { _ttsEngineCancel(); } catch (_) {}
       clearTtsHighlight();
       _ttsActive = false;
       _ttsPaused = false;
@@ -13518,7 +13593,7 @@
     if (!rest.trim()) return;
     const wasPaused = _ttsPaused;
     _ttsChunkState = null;
-    try { window.speechSynthesis.cancel(); } catch (_) {}
+    try { _ttsEngineCancel(); } catch (_) {}
     // Keep _ttsBoundUtteranceText pointing at the full text so subsequent
     // changes continue to use global offsets for captions/highlights.
     _ttsStartChunkedSpeech(

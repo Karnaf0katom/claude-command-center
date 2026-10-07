@@ -30761,6 +30761,29 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             result = codex_client_call(action, data)
             self.send_json(result, 200 if result.get("ok") else 409)
             return
+        if path == "/api/free-runtime/tts":
+            # Speak button: text -> free neural voice via the router. The
+            # router key never leaves the server; the browser gets audio only.
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                payload = json.loads(self.rfile.read(length)) if 0 < length <= 64 * 1024 else None
+            except (ValueError, OSError):
+                payload = None
+            if not isinstance(payload, dict):
+                self.send_json({"ok": False, "error": "bad request"}, 400)
+                return
+            status, audio, voice = _free_runtime.tts(payload.get("text"), str(payload.get("voice") or ""))
+            if status != 200:
+                self.send_json({"ok": False, "error": "tts unavailable", "voice": voice}, status)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(audio)))
+            self.send_header("X-CCC-Voice", voice)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(audio)
+            return
         if path.startswith("/api/free-router"):
             # Free-model router lifecycle (install/start/stop). Same-origin
             # was already enforced at the top of do_POST.

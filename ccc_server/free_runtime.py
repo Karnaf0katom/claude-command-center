@@ -410,6 +410,47 @@ def served_map(limit=400):
     return out
 
 
+TTS_VOICES = (
+    "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+    "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+    "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+    "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+    "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+)
+TTS_MODEL = "gemini-3.1-flash-tts-preview"
+TTS_MAX_CHARS = 2000
+
+
+def tts(text, voice=""):
+    """Speak ``text`` through the free router: (status, audio_bytes, voice).
+
+    A blank or unknown voice picks a random Gemini voice, so repeated reads
+    sample the catalog. status is the HTTP status to relay; audio_bytes is
+    empty on failure. The router key stays on this side of the loopback.
+    """
+    import random
+    import urllib.request
+    text = str(text or "").strip()[:TTS_MAX_CHARS]
+    if not text:
+        return 400, b"", ""
+    voice = voice if voice in TTS_VOICES else random.choice(TTS_VOICES)
+    key = unified_key()
+    if not key or not router_listening():
+        return 503, b"", voice
+    req = urllib.request.Request(
+        router_base_url() + "/v1/audio/speech",
+        data=json.dumps({"model": TTS_MODEL, "voice": voice, "input": text}).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return 200, resp.read(), voice
+    except urllib.error.HTTPError as e:
+        return (429 if e.code == 429 else 502), b"", voice
+    except Exception:
+        return 502, b"", voice
+
+
 def session_runtime(session_id):
     """The recorded runtime for a known session id ("free" or "").
 
