@@ -30618,9 +30618,11 @@ body.conv-compact.conv-compact .conversations-view .line-num,
 body.conv-compact.conv-compact .conversations-view .assistant-message-actions,
 body.conv-compact.conv-compact .conversations-view details.tool-command-disclosure { display: none !important; }
 /* The newest assistant reply is shown fully open, so keep its speak/copy
-   actions and timestamp; the rest of the per-message chrome stays hidden. */
-body.conv-compact.conv-compact .conversations-view .event.assistant:not(:has(~ .event.assistant .assistant-text)) .msg-ts { display: inline !important; }
-body.conv-compact.conv-compact .conversations-view .event.assistant:not(:has(~ .event.assistant .assistant-text)) .assistant-message-actions { display: inline-flex !important; }
+   actions and timestamp; the rest of the per-message chrome stays hidden.
+   :has(> .assistant-text) matters: the tool-only events after it also have
+   no later text, and their absolute-positioned stamps stacked into a smear. */
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) .msg-ts { display: inline !important; }
+body.conv-compact.conv-compact .conversations-view .event.assistant:has(> .assistant-text):not(:has(~ .event.assistant .assistant-text)) .assistant-message-actions { display: inline-flex !important; }
 /* Two-line clamp on messages (all but the newest assistant reply). */
 body.conv-compact.conv-compact .conversations-view .event.assistant:has(~ .event.assistant .assistant-text) .assistant-text:not(.cc-open):not(.cc-final):not(:has(.cc-run-chip)),
 body.conv-compact.conv-compact .conversations-view .event.user_text:not(.cc-open) .user-msg {
