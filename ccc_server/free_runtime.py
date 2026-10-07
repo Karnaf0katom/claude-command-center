@@ -507,6 +507,56 @@ def local_tts(text, voice=""):
         return b"", ""
 
 
+# Deepgram Aura-2: optional metered voice, first in the chain when a key exists.
+# The key lives outside the repo (DEEPGRAM_API_KEY or ~/.ccc/deepgram.key);
+# delete the file or set CCC_DEEPGRAM=0 to turn it off.
+DEEPGRAM_VOICES = (
+    "andromeda", "apollo", "arcas", "aries", "asteria", "athena", "atlas", "aurora",
+    "callista", "cora", "cordelia", "delia", "draco", "electra", "harmonia", "helena",
+    "hera", "hermes", "hyperion", "iris", "janus", "juno", "jupiter", "luna", "mars",
+    "minerva", "neptune", "odysseus", "ophelia", "orion", "orpheus", "pandora",
+    "phoebe", "pluto", "saturn", "thalia", "theia", "vesta", "zeus",
+)
+_DEEPGRAM_LABEL = "Deepgram: "
+
+
+def _deepgram_key():
+    if os.environ.get("CCC_DEEPGRAM", "") == "0":
+        return ""
+    key = os.environ.get("DEEPGRAM_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return (Path.home() / ".ccc" / "deepgram.key").read_text().strip()
+    except OSError:
+        return ""
+
+
+def deepgram_tts(text, voice=""):
+    """(audio, label) from Deepgram Aura-2, or (b"", "") when off or failing."""
+    import random
+    import urllib.request
+    key = _deepgram_key()
+    if not key:
+        return b"", ""
+    voice = str(voice or "")
+    if voice.startswith(_DEEPGRAM_LABEL):
+        voice = voice[len(_DEEPGRAM_LABEL):]
+    if voice not in DEEPGRAM_VOICES:
+        voice = random.choice(DEEPGRAM_VOICES)
+    req = urllib.request.Request(
+        "https://api.deepgram.com/v1/speak?model=aura-2-%s-en&encoding=linear16&container=wav" % voice,
+        data=json.dumps({"text": text}).encode(),
+        headers={"Authorization": "Token " + key, "Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        return (data, _DEEPGRAM_LABEL + voice) if data[:4] == b"RIFF" else (b"", "")
+    except Exception:
+        return b"", ""
+
+
 # Google's free TTS quota is small and daily. After a 429 the Gemini models are
 # skipped for a while so each Speak does not pay two failed round trips first.
 _GEMINI_COOLDOWN_S = 900
@@ -526,6 +576,9 @@ def tts(text, voice=""):
     text = str(text or "").strip()[:TTS_MAX_CHARS]
     if not text:
         return 400, b"", "", ""
+    dg, dg_label = deepgram_tts(text, voice)
+    if dg:
+        return 200, dg, _audio_type(dg), dg_label
     kokoro_voice = voice if str(voice).startswith(_KOKORO_LABEL) else ""
     voice = voice if voice in TTS_VOICES else random.choice(TTS_VOICES)
     key = unified_key()

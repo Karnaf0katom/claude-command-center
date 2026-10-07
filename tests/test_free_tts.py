@@ -16,6 +16,13 @@ class FreeTtsTests(unittest.TestCase):
     def test_voice_catalog_has_no_duplicates(self):
         self.assertEqual(len(free_runtime.TTS_VOICES), len(set(free_runtime.TTS_VOICES)))
 
+    def test_deepgram_off_without_key_or_when_disabled(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"CCC_DEEPGRAM": "0", "DEEPGRAM_API_KEY": "dg-test-XXXX"}):
+            self.assertEqual(free_runtime.deepgram_tts("hello"), (b"", ""))
+        self.assertEqual(len(free_runtime.DEEPGRAM_VOICES), len(set(free_runtime.DEEPGRAM_VOICES)))
+
 
 if __name__ == "__main__":
     unittest.main()
