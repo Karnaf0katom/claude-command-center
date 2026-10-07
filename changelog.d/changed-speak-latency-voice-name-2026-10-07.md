@@ -1,0 +1,1 @@
+- Free voice reads start after about 3 seconds (short first chunk, then medium chunks), and the Speak button shows the name of the voice that is speaking.

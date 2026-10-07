@@ -12916,7 +12916,7 @@
       btn.setAttribute('aria-label', btn.title);
     }
   }
-  // Free neural voice (router TTS). Reads of up to _TTS_NEURAL_MAX_CHARS go
+  // Free neural voice (router TTS). Reads go
   // through /api/free-runtime/tts with a random Gemini voice per read (the
   // server falls back to Cloudflare MeloTTS on a Google rate limit); a full
   // outage (cool-down) or no router falls back to the browser voice. The next
@@ -12938,6 +12938,12 @@
     if (_ttsNeural && _ttsNeural.audio) { try { _ttsNeural.audio.pause(); } catch (_) {} }
     _ttsNeural = null;
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+  // Name of the free voice speaking, shown on the active Speak button(s).
+  function _ttsShowVoice(name) {
+    ttsButtons().concat(_ttsDirectBtn ? [_ttsDirectBtn] : []).forEach(btn => {
+      if (name) btn.dataset.ttsVoice = name; else delete btn.dataset.ttsVoice;
+    });
   }
   function _ttsNeuralUsable(state) {
     return Date.now() >= _ttsNeuralCooldownUntil
@@ -12989,6 +12995,7 @@
         ttsButtons().forEach(btn => {
           if (ttsButtonPaneId(btn) === _ttsActivePaneId) { btn.classList.remove('paused'); btn.title = label; }
         });
+        _ttsShowVoice(got.voice);
         ensure(state.index + 1);
       };
       audio.onended = () => {
@@ -13035,6 +13042,7 @@
   async function stopTextToSpeech() {
     clearTtsHighlight();
     clearTtsCaption();
+    _ttsShowVoice('');
     _ttsChunkState = null;
     if (window.speechSynthesis) {
       _ttsEngineCancel();
@@ -13258,8 +13266,18 @@
   }
 
   function _ttsStartChunkedSpeech(text, paneId, baseOffset, pauseOnStart) {
-    const chunks = _chunkTtsText(text, TTS_CHUNK_MAX_CHARS, baseOffset);
+    let chunks = _chunkTtsText(text, TTS_CHUNK_MAX_CHARS, baseOffset);
     if (!chunks.length) return false;
+    if (Date.now() >= _ttsNeuralCooldownUntil) {
+      // Free voice: generation time scales with length (about 10 s for a
+      // 1,600-char chunk), so start with a short sentence-sized chunk and let
+      // the rest follow while it plays.
+      const head = _chunkTtsText(text, 160, baseOffset)[0];
+      const used = head ? (head.start - (Number(baseOffset) || 0)) + head.text.length : 0;
+      if (head && used < text.length) {
+        chunks = [head].concat(_chunkTtsText(text.slice(used), 900, (Number(baseOffset) || 0) + used));
+      }
+    }
     _ttsChunkState = {
       chunks,
       index: 0,

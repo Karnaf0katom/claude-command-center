@@ -30743,3 +30743,14 @@ body[data-conv-view="verbose"] .conv-view-seg > [data-conv-view="verbose"] {
 }
 .mobile-view-seg { display: none; }
 .conv-pane-more-menu .conv-view-seg { margin: 2px 6px 4px; }
+
+/* Free-voice name beside the Speak button while it plays. */
+.tts-btn[data-tts-voice]::after,
+.assistant-message-actions [data-tts-voice]::after {
+  content: attr(data-tts-voice);
+  margin-left: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.8;
+}
