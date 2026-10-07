@@ -49,6 +49,23 @@ def test_disabled_engines_must_be_a_list(monkeypatch, tmp_path):
     assert rejected["ok"] is False
 
 
+def test_concurrent_first_load_writes_are_atomic(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    barrier = threading.Barrier(8)
+    original_replace = Path.replace
+    def synchronized_replace(self, target):
+        if target == server.SPAWN_DEFAULTS_FILE:
+            barrier.wait(timeout=5)
+        return original_replace(self, target)
+    monkeypatch.setattr(Path, "replace", synchronized_replace)
+    def write(i):
+        server._write_spawn_defaults_file({"writer": i})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(8)))
+    assert json.loads(server.SPAWN_DEFAULTS_FILE.read_text())["writer"] in range(8)
+    assert list(tmp_path.iterdir()) == [server.SPAWN_DEFAULTS_FILE]
+
+
 def test_concurrent_first_run_writes_have_unique_temp_files(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     ready = threading.Barrier(2)
