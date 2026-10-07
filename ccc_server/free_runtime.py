@@ -418,7 +418,8 @@ TTS_VOICES = (
     "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 )
 # Tried in order. Gemini first (30 voices); Cloudflare MeloTTS when Google
-# rate-limits the free tier; then the local Kokoro voice (see local_tts). Aura is left out: the router sends it the wrong
+# rate-limits the free tier. Kokoro (local, random voice) is tried before
+# MeloTTS when installed; see tts(). Aura is left out: the router sends it the wrong
 # field name and Cloudflare rejects it.
 TTS_MODELS = ("gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "@cf/myshell-ai/melotts")
 TTS_MAX_CHARS = 2000
@@ -432,6 +433,15 @@ def _audio_type(data):
         return "audio/mpeg"
     return "application/octet-stream"
 
+
+# English Kokoro voices (American "a", British "b"; f/m = female/male).
+KOKORO_VOICES = (
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole",
+    "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir",
+    "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma",
+    "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+)
+_KOKORO_LABEL = "Kokoro: "
 
 _LOCAL_TTS_DIR = Path.home() / ".ccc" / "local-tts"
 _LOCAL_TTS_PORT = int(os.environ.get("CCC_LOCAL_TTS_PORT", "3019"))
@@ -470,19 +480,29 @@ def _local_tts_start():
     return False
 
 
-def local_tts(text):
-    """(audio, label) from the local Kokoro voice, or (b"", "") when unavailable."""
+def local_tts(text, voice=""):
+    """(audio, label) from the local Kokoro voice, or (b"", "") when unavailable.
+
+    A blank or unknown voice picks a random one; the label ("Kokoro: af_nova")
+    round-trips through the browser so one read keeps one voice.
+    """
+    import random
     import urllib.request
+    voice = str(voice or "")
+    if voice.startswith(_KOKORO_LABEL):
+        voice = voice[len(_KOKORO_LABEL):]
+    if voice not in KOKORO_VOICES:
+        voice = random.choice(KOKORO_VOICES)
     if not _local_tts_start():
         return b"", ""
     req = urllib.request.Request(
         "http://127.0.0.1:%d/speak" % _LOCAL_TTS_PORT,
-        data=json.dumps({"text": text, "voice": "af_heart"}).encode(),
+        data=json.dumps({"text": text, "voice": voice}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = resp.read()
-        return (data, "Kokoro (local)") if data else (b"", "")
+        return (data, _KOKORO_LABEL + voice) if data else (b"", "")
     except Exception:
         return b"", ""
 
@@ -506,11 +526,12 @@ def tts(text, voice=""):
     text = str(text or "").strip()[:TTS_MAX_CHARS]
     if not text:
         return 400, b"", "", ""
+    kokoro_voice = voice if str(voice).startswith(_KOKORO_LABEL) else ""
     voice = voice if voice in TTS_VOICES else random.choice(TTS_VOICES)
     key = unified_key()
     status = 502
     if not key or not router_listening():
-        local, label = local_tts(text)
+        local, label = local_tts(text, kokoro_voice)
         return (200, local, _audio_type(local), label) if local else (503, b"", "", voice)
     import time
     global _gemini_blocked_until
@@ -518,6 +539,12 @@ def tts(text, voice=""):
         melo = model.startswith("@cf/")
         if model.startswith("gemini") and time.time() < _gemini_blocked_until:
             continue
+        if melo and local_tts_installed():
+            # Kokoro (random voice, local, unmetered) goes ahead of MeloTTS
+            # (one voice); MeloTTS stays as the fallback if Kokoro fails.
+            local, label = local_tts(text, kokoro_voice)
+            if local:
+                return 200, local, _audio_type(local), label
         body = {"model": model, "input": text}
         if not melo:
             body["voice"] = voice
@@ -536,9 +563,6 @@ def tts(text, voice=""):
             status = 429 if (e.code == 429 or status == 429) else 502
         except Exception:
             status = 502
-    local, label = local_tts(text)
-    if local:
-        return 200, local, _audio_type(local), label
     return status, b"", "", voice
 
 

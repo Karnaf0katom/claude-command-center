@@ -52,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self._json(400, {"ok": False})
                 return
-            samples, rate = _kokoro.create(text, voice=voice, speed=1.0, lang="en-us")
+            samples, rate = _kokoro.create(text, voice=voice, speed=1.0, lang="en-gb" if voice.startswith("b") else "en-us")
             buf = io.BytesIO()
             sf.write(buf, samples, rate, format="WAV", subtype="PCM_16")
         except Exception as exc:  # keep serving; the caller falls back
