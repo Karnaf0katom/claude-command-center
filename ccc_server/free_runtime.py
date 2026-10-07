@@ -487,6 +487,12 @@ def local_tts(text):
         return b"", ""
 
 
+# Google's free TTS quota is small and daily. After a 429 the Gemini models are
+# skipped for a while so each Speak does not pay two failed round trips first.
+_GEMINI_COOLDOWN_S = 900
+_gemini_blocked_until = 0.0
+
+
 def tts(text, voice=""):
     """Speak ``text`` through the free router: (status, audio, content_type, label).
 
@@ -506,8 +512,12 @@ def tts(text, voice=""):
     if not key or not router_listening():
         local, label = local_tts(text)
         return (200, local, _audio_type(local), label) if local else (503, b"", "", voice)
+    import time
+    global _gemini_blocked_until
     for model in TTS_MODELS:
         melo = model.startswith("@cf/")
+        if model.startswith("gemini") and time.time() < _gemini_blocked_until:
+            continue
         body = {"model": model, "input": text}
         if not melo:
             body["voice"] = voice
@@ -521,6 +531,8 @@ def tts(text, voice=""):
             if data:
                 return 200, data, _audio_type(data), "MeloTTS" if melo else voice
         except urllib.error.HTTPError as e:
+            if e.code == 429 and model.startswith("gemini"):
+                _gemini_blocked_until = time.time() + _GEMINI_COOLDOWN_S
             status = 429 if (e.code == 429 or status == 429) else 502
         except Exception:
             status = 502
