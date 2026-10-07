@@ -13270,12 +13270,12 @@
     if (!chunks.length) return false;
     if (Date.now() >= _ttsNeuralCooldownUntil) {
       // Free voice: generation time scales with length (about 10 s for a
-      // 1,600-char chunk), so start with a short sentence-sized chunk and let
-      // the rest follow while it plays.
+      // 1,600-char chunk), so start with a short sentence-sized chunk, then ~400-char
+      // chunks (about 6 s each to make, longer than they take to play).
       const head = _chunkTtsText(text, 160, baseOffset)[0];
       const used = head ? (head.start - (Number(baseOffset) || 0)) + head.text.length : 0;
       if (head && used < text.length) {
-        chunks = [head].concat(_chunkTtsText(text.slice(used), 900, (Number(baseOffset) || 0) + used));
+        chunks = [head].concat(_chunkTtsText(text.slice(used), 400, (Number(baseOffset) || 0) + used));
       }
     }
     _ttsChunkState = {
