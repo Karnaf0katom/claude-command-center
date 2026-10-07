@@ -532,27 +532,43 @@ def _deepgram_key():
         return ""
 
 
-def deepgram_tts(text, voice=""):
-    """(audio, label) from Deepgram Aura-2, or (b"", "") when off or failing."""
+def deepgram_open(text, voice="", fmt="encoding=linear16&container=wav"):
+    """(open HTTP response, label) from Deepgram Aura-2, or (None, "") when off or failing.
+
+    The response is returned as soon as headers arrive (about 0.3 s); the caller
+    reads the audio body, so it can be relayed while Deepgram is still making it.
+    """
     import random
     import urllib.request
     key = _deepgram_key()
-    if not key:
-        return b"", ""
+    text = str(text or "").strip()[:TTS_MAX_CHARS]
+    if not key or not text:
+        return None, ""
     voice = str(voice or "")
     if voice.startswith(_DEEPGRAM_LABEL):
         voice = voice[len(_DEEPGRAM_LABEL):]
     if voice not in DEEPGRAM_VOICES:
         voice = random.choice(DEEPGRAM_VOICES)
     req = urllib.request.Request(
-        "https://api.deepgram.com/v1/speak?model=aura-2-%s-en&encoding=linear16&container=wav" % voice,
+        "https://api.deepgram.com/v1/speak?model=aura-2-%s-en&%s" % (voice, fmt),
         data=json.dumps({"text": text}).encode(),
         headers={"Authorization": "Token " + key, "Content-Type": "application/json"},
         method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        return urllib.request.urlopen(req, timeout=30), _DEEPGRAM_LABEL + voice
+    except Exception:
+        return None, ""
+
+
+def deepgram_tts(text, voice=""):
+    """(audio, label) from Deepgram Aura-2 as a whole WAV, or (b"", "")."""
+    resp, label = deepgram_open(text, voice)
+    if resp is None:
+        return b"", ""
+    try:
+        with resp:
             data = resp.read()
-        return (data, _DEEPGRAM_LABEL + voice) if data[:4] == b"RIFF" else (b"", "")
+        return (data, label) if data[:4] == b"RIFF" else (b"", "")
     except Exception:
         return b"", ""
 

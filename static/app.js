@@ -13019,15 +13019,50 @@
     return Date.now() >= _ttsNeuralCooldownUntil
       && state.neuralOk !== false;
   }
+  // Plays a streamed mp3 body through MediaSource, so the <audio> element (pause,
+  // rate, ended) works unchanged while Deepgram is still making the clip.
+  function _ttsStreamUrl(res) {
+    const ms = new MediaSource();
+    const url = URL.createObjectURL(ms);
+    const queue = [];
+    let finished = false, sb = null;
+    const pump = () => {
+      if (!sb || sb.updating) return;
+      if (queue.length) { try { sb.appendBuffer(queue.shift()); } catch (_) {} return; }
+      if (finished && ms.readyState === 'open') { try { ms.endOfStream(); } catch (_) {} }
+    };
+    ms.addEventListener('sourceopen', () => {
+      sb = ms.addSourceBuffer('audio/mpeg');
+      sb.addEventListener('updateend', pump);
+      pump();
+    }, { once: true });
+    const reader = res.body.getReader();
+    (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          queue.push(value);
+          pump();
+        }
+      } catch (_) {}
+      finished = true;
+      pump();
+    })();
+    return url;
+  }
+  const _ttsCanStream = () => typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/mpeg');
   // Resolves { url, voice } or rejects with the HTTP status (0 = network).
   function _ttsFetchNeural(text, voice) {
     return fetch('/api/free-runtime/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice: voice || '' }),
+      body: JSON.stringify({ text, voice: voice || '', stream: _ttsCanStream() }),
     }).then(async (res) => {
       if (!res.ok) throw res.status;
-      return { url: URL.createObjectURL(await res.blob()), voice: res.headers.get('X-CCC-Voice') || '' };
+      const v = res.headers.get('X-CCC-Voice') || '';
+      if (res.headers.get('X-CCC-Stream') === '1') return { url: _ttsStreamUrl(res), voice: v };
+      return { url: URL.createObjectURL(await res.blob()), voice: v };
     }, () => { throw 0; });
   }
   function _ttsSpeakChunkNeural(state, chunk) {

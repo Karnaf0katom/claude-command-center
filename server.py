@@ -30786,6 +30786,36 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "bad request"}, 400)
                 return
             _t0 = time.time()
+            if payload.get("stream"):
+                # Relay Deepgram's mp3 as it is made: playback starts at the
+                # first bytes (~0.3 s) instead of after the whole clip.
+                _resp, _label = _free_runtime.deepgram_open(
+                    payload.get("text"), str(payload.get("voice") or ""), "encoding=mp3")
+                if _resp is not None:
+                    _sent = 0
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "audio/mpeg")
+                        self.send_header("X-CCC-Voice", _label)
+                        self.send_header("X-CCC-Stream", "1")
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.close_connection = True
+                        with _resp:
+                            while True:
+                                _buf = _resp.read(4096)
+                                if not _buf:
+                                    break
+                                self.wfile.write(_buf)
+                                self.wfile.flush()
+                                _sent += len(_buf)
+                    except Exception:
+                        pass
+                    _log_activity("tts", "SPEAK", "chars=%d status=200 spoke=%s ms=%d bytes=%d stream=1" % (
+                        len(str(payload.get("text") or "")), _label,
+                        int((time.time() - _t0) * 1000), _sent))
+                    return
             status, audio, ctype, voice = _free_runtime.tts(payload.get("text"), str(payload.get("voice") or ""))
             _log_activity("tts", "SPEAK", "chars=%d status=%d spoke=%s ms=%d bytes=%d" % (
                 len(str(payload.get("text") or "")), status, voice or "-",

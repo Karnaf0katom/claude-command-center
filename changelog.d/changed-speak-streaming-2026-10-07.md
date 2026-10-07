@@ -1,0 +1,1 @@
+- Speak streams Deepgram audio as it is made, so the voice starts in under a second.
