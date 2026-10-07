@@ -37905,6 +37905,7 @@
       const spawnedLane = _spawnMarkerLane(c);
       if (spawnedLane) return spawnedLane;
       if (c && (c.spawned_via === 'ccc-ask' || c.spawned_kind === 'assistant')) return 'other';
+      if (c && c.codex_cloud === true) return 'other';
       if (_isHermesWorkerRow(c) || _isWatchTowerWorkerRow(c) || _isExternalSpawnRow(c)) return 'workers';
       if (_isHermesMessageRow(c)) return 'messages';
       return 'coding';
