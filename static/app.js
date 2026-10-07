@@ -42592,7 +42592,10 @@
   // provisional one), a jump target must never double-count that message —
   // and a not-yet-reconciled provisional row can still be replaced or
   // dropped, so it isn't a stable target to jump to in the first place.
-  const CONV_USER_MESSAGE_SELECTOR = '.event.user_text:not(.task-notification-event):not([data-live-key])';
+  // Peer (cross-session) messages are also excluded: the user didn't type
+  // them, and they often arrive in bursts a few rows apart, which made
+  // "Previous" hop a few rows instead of to the user's own prior message.
+  const CONV_USER_MESSAGE_SELECTOR = '.event.user_text:not(.task-notification-event):not(.peer-message):not([data-live-key])';
   function _convReadingTop(view) {
     return view.getBoundingClientRect().top;
   }
