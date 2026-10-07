@@ -12964,7 +12964,7 @@
     _ttsNeuralCooldownWhy = 'HTTP ' + status;
     _ttsLog('COOLDOWN', Math.round(ms / 1000) + 's after ' + _ttsNeuralCooldownWhy);
   }
-  const _TTS_HEAD_CHARS = 160;
+  const _TTS_HEAD_CHARS = 80;
   const _ttsHeadCache = new Map();   // chunk text -> { p, ready, got }
   let _ttsPrefetchTimer = null;
   function _ttsHeadChunk(text, baseOffset) {
@@ -13359,7 +13359,7 @@
       // Free voice: generation time scales with length (about 10 s for a
       // 1,600-char chunk), so start with a short sentence-sized chunk, then ~400-char
       // chunks (about 6 s each to make, longer than they take to play).
-      const head = _chunkTtsText(text, 160, baseOffset)[0];
+      const head = _chunkTtsText(text, _TTS_HEAD_CHARS, baseOffset)[0];
       const used = head ? (head.start - (Number(baseOffset) || 0)) + head.text.length : 0;
       if (head && used < text.length) {
         chunks = [head].concat(_chunkTtsText(text.slice(used), 400, (Number(baseOffset) || 0) + used));
