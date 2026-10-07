@@ -104,12 +104,12 @@ WARMUP_S = _env_int("CCC_PERF_WARMUP_S", 300)
 #     ticket instead of silence, so the overload itself stays visible.
 SATURATED_LOAD_PER_CPU = _env_float("CCC_PERF_SATURATED_LOAD_PER_CPU", 2.0)
 _SINGLE_SAMPLE_BREACH_FACTOR = 3
-# Gross saturation: load this far past the saturation line (per core) means
+# Gross saturation: load this far past the saturation line (per core; 4x since CCC-1263, load 40-67 on 10 cores still filed 3x samples) means
 # every endpoint stalled at once (CCC-39: load1 ~173 on 8 cores, a 40s
 # conv_open next to 60s /api/queue/context and 30s /api/repo/worktrees). No
 # single sample is attributable to CCC then, so the 3x carve-out above does
 # not apply — the row rolls into the "machine saturated" alert instead.
-GROSS_SATURATION_LOAD_PER_CPU = _env_float("CCC_PERF_GROSS_SATURATION_LOAD_PER_CPU", 8.0)
+GROSS_SATURATION_LOAD_PER_CPU = _env_float("CCC_PERF_GROSS_SATURATION_LOAD_PER_CPU", 4.0)
 # Minimum gap between "still saturated" comments on an already-open
 # saturation ticket — one refresh per few hours, not one per check cycle.
 SAT_COMMENT_MIN_INTERVAL_S = _env_int("CCC_PERF_SAT_COMMENT_INTERVAL_S", 6 * 3600)

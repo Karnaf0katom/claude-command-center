@@ -507,7 +507,9 @@ class TestSaturationDowngrade(PerfEventsTestBase):
         # Condition (2): a single >=3x sample files even under saturation.
         now = time.time()
         events = [
-            self._saturated_row("archive_load", 16000, now, pe.ARCHIVE_COLD_MS)
+            self._saturated_row(
+                "archive_load", 16000, now, pe.ARCHIVE_COLD_MS, load1=20.0
+            )
         ]
         pattern = pe.evaluate_breach_pattern(events)
         self.assertIsNotNone(pattern)
@@ -524,6 +526,15 @@ class TestSaturationDowngrade(PerfEventsTestBase):
         sat = pe.evaluate_saturation([row])
         self.assertIsNotNone(sat)
         self.assertEqual(sat["count"], 1)
+
+    def test_heavy_load_single_3x_does_not_qualify(self):
+        # CCC-1263: load1 ~67 on 10 cores (6.7/core) is host overload; a
+        # 9s warm archive_load then must not file a per-kind ticket.
+        now = time.time()
+        row = self._saturated_row(
+            "archive_load", 9211, now, pe.ARCHIVE_WARM_MS, load1=67.0
+        )
+        self.assertIsNone(pe.evaluate_breach_pattern([row]))
 
     def test_one_clean_plus_saturated_does_not_qualify(self):
         now = time.time()
