@@ -13342,22 +13342,18 @@
   function _ttsStartChunkedSpeech(text, paneId, baseOffset, pauseOnStart) {
     let chunks = _chunkTtsText(text, TTS_CHUNK_MAX_CHARS, baseOffset);
     if (!chunks.length) return false;
-    // Free voice only when its first chunk is already prepared; otherwise the
-    // browser voice starts now rather than waiting on the network.
-    const _ttsHeadReady = (() => {
-      const h = _ttsHeadChunk(text, baseOffset);
-      const e = h && _ttsHeadCache.get(h.text);
-      return !!(e && e.ready);
-    })();
+    // Free voice whenever it isn't cooling down. A prepared first chunk starts
+    // instantly; otherwise it is fetched now (a 160-char head takes ~1-2 s).
+    // The Mac voice is only the fallback when that fetch or playback fails.
+    const _ttsHeadReady = Date.now() >= _ttsNeuralCooldownUntil;
     {
       const h = _ttsHeadChunk(text, baseOffset);
       const e = h && _ttsHeadCache.get(h.text);
       let why = '';
       if (Date.now() < _ttsNeuralCooldownUntil) why = 'free voice cooling down, ' + Math.round((_ttsNeuralCooldownUntil - Date.now()) / 1000) + 's left (' + _ttsNeuralCooldownWhy + ')';
-      else if (!e) why = 'first chunk was not prepared (' + (_ttsHeadCache.size ? _ttsHeadCache.size + ' prepared, none match this text' : 'nothing prepared') + ')';
-      else if (!e.ready) why = 'first chunk still generating';
       _ttsStartWhy = why;
-      _ttsLog('START', why ? 'MAC VOICE: ' + why : 'free voice, chunk ready');
+      _ttsLog('START', why ? 'MAC VOICE: ' + why
+        : 'free voice, ' + (e && e.ready ? 'chunk ready' : e ? 'chunk still generating' : 'fetching first chunk now'));
     }
     if (Date.now() >= _ttsNeuralCooldownUntil && _ttsHeadReady) {
       // Free voice: generation time scales with length (about 10 s for a
