@@ -56120,6 +56120,9 @@
     if (!value) return engine === 'antigravity';
     if (_knownModelForEngine(engine, value)) return !_modelUnavailableReason(engine, value);
     if (!_engineSupportsCustomModel(engine)) return false;
+    // Droid/Devin list "claude-sonnet-5", which normalizes to the same id as
+    // Claude's own; a Claude-family id is never "another engine's" for Claude.
+    if (engine === 'claude' && /^(fable|opus|sonnet|haiku)-/.test(_normalizeModelId(value))) return true;
     return !_knownModelForOtherEngine(engine, value);
   }
 
