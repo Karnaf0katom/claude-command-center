@@ -136,14 +136,6 @@ def base_url() -> str:
     return f"http://127.0.0.1:{router_port()}"
 
 
-def router_base_url(state=None) -> str:
-    """Return the base URL for the router, optionally using state for testing."""
-    if state is not None:
-        port = state.get("port") or DEFAULT_PORT
-        return f"http://127.0.0.1:{port}"
-    return base_url()
-
-
 # ---------------------------------------------------------------------------
 # State file — 0600, holds admin credentials and the unified key. Never log
 # the secret fields; _mask() is the only way they may appear in job lines.
@@ -161,14 +153,6 @@ def _load_state() -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def _state_value(state, *names):
-    for name in names:
-        value = str(state.get(name) or "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _save_state(state: dict) -> None:
@@ -335,67 +319,6 @@ def _readyz(timeout: float = _PROBE_TIMEOUT_S):
 
 def running() -> bool:
     return _ping()
-
-
-def readiness() -> tuple[bool, str]:
-    """(ready, reason) for the free router — checks if router can serve requests.
-
-    Returns (True, "") when ready, (False, reason) when not.
-    """
-    st = _load_state()
-    if not st:
-        return False, "the free router is not installed yet"
-    key = st.get("unified_key") or ""
-    if not key:
-        return False, "the free router has no inference key yet"
-    if not _ping():
-        return False, "the free router is not running"
-    live = _livez()
-    if not live:
-        return False, "the free router failed liveness check"
-    ready = _readyz()
-    if not ready or ready.get("status") != "ok":
-        reason = ready.get("reason") if isinstance(ready, dict) else "unknown"
-        return False, f"the free router is not ready: {reason}"
-    return True, ""
-
-
-def unified_key(state=None) -> str:
-    """The router's unified inference key, or "" (never logged, never echoed)."""
-    st = state if state is not None else _load_state()
-    return _state_value(st, "unified_key", "api_key", "inference_key")
-
-
-def router_listening(state=None) -> bool:
-    """Cheap TCP probe: is something accepting connections on the router port?
-
-    Deliberately not an HTTP request — a plain connect is enough to tell a
-    stopped router from a running one and works before the HTTP stack is
-    even answering.
-    """
-    import socket
-    port = router_port(state)
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def router_state(state=None):
-    """The free-router state file as a dict, {} when absent/malformed.
-
-    Written by the router owner with mode 0600: port, version, pinned
-    rev, admin account, and the unified inference key. Read-only here —
-    this module never provisions, only consumes.
-    """
-    if state is not None:
-        return state
-    try:
-        data = json.loads(state_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _admin_login(state: dict):
