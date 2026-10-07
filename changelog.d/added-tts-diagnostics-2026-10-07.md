@@ -1,0 +1,1 @@
+- Speak now explains itself: the button names the voice that is speaking (including "Mac voice" with the reason in its tooltip), and every decision is logged to the console, `window.__cccTtsLog`, and activity.log.

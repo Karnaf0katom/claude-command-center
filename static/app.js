@@ -12943,6 +12943,27 @@
   // the background so Speak starts with no wait. Keyed by the exact chunk text
   // the reader will ask for. A Speak that finds no ready chunk uses the
   // browser voice at once instead of waiting on the network.
+  // Every Speak decision goes to the console, window.__cccTtsLog (last 40) and
+  // the server's activity.log ("tts" lines), so "why the Mac voice?" is answerable.
+  function _ttsLog(verb, detail) {
+    const line = new Date().toISOString().slice(11, 23) + ' ' + verb + ' ' + detail;
+    (window.__cccTtsLog = window.__cccTtsLog || []).push(line);
+    if (window.__cccTtsLog.length > 40) window.__cccTtsLog.shift();
+    try { console.info('[tts] ' + line); } catch (_) {}
+    try {
+      fetch('/api/free-runtime/tts-log', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verb, detail }), keepalive: true,
+      }).catch(() => {});
+    } catch (_) {}
+  }
+  let _ttsNeuralCooldownWhy = '';
+  let _ttsStartWhy = '';
+  function _ttsCool(ms, status) {
+    _ttsNeuralCooldownUntil = Date.now() + ms;
+    _ttsNeuralCooldownWhy = 'HTTP ' + status;
+    _ttsLog('COOLDOWN', Math.round(ms / 1000) + 's after ' + _ttsNeuralCooldownWhy);
+  }
   const _TTS_HEAD_CHARS = 160;
   const _ttsHeadCache = new Map();   // chunk text -> { p, ready, got }
   let _ttsPrefetchTimer = null;
@@ -12950,15 +12971,22 @@
     return _chunkTtsText(text, _TTS_HEAD_CHARS, baseOffset)[0] || null;
   }
   function _ttsPrefetchHead(rawText) {
-    if (Date.now() < _ttsNeuralCooldownUntil || document.hidden) return;
+    if (Date.now() < _ttsNeuralCooldownUntil) { _ttsLog('SKIP', 'prefetch: cooldown, ' + Math.round((_ttsNeuralCooldownUntil - Date.now()) / 1000) + 's left (' + _ttsNeuralCooldownWhy + ')'); return; }
+    if (document.hidden) { _ttsLog('SKIP', 'prefetch: tab hidden'); return; }
     const clean = _sanitizeTtsText(rawText, true);
     const head = clean.trim() ? _ttsHeadChunk(clean, 0) : null;
     if (!head || _ttsHeadCache.has(head.text)) return;
     const entry = { ready: false, got: null };
-    entry.p = _ttsFetchNeural(head.text, '').then((got) => { entry.ready = true; entry.got = got; return got; });
+    const t0 = Date.now();
+    _ttsLog('PREFETCH', head.text.length + ' chars: ' + JSON.stringify(head.text.slice(0, 40)));
+    entry.p = _ttsFetchNeural(head.text, '').then((got) => {
+      entry.ready = true; entry.got = got;
+      _ttsLog('READY', got.voice + ' in ' + (Date.now() - t0) + 'ms');
+      return got;
+    });
     entry.p.catch((status) => {
       _ttsHeadCache.delete(head.text);
-      _ttsNeuralCooldownUntil = Date.now() + (status === 429 ? 60000 : 300000);
+      _ttsCool(status === 429 ? 60000 : 300000, status);
     });
     _ttsHeadCache.set(head.text, entry);
     while (_ttsHeadCache.size > 3) {
@@ -12977,6 +13005,7 @@
         const paneId = activePaneId();
         const data = paneId ? lastMessageTtsData(paneId) : null;
         if (data && data.text && data.text.trim()) _ttsPrefetchHead(data.text);
+        else _ttsLog('SKIP', 'prefetch: no last message text in pane ' + paneId);
       } catch (_) {}
     }, 2500);
   }
@@ -13006,7 +13035,7 @@
     _ttsUtterance = { neural: true };   // keeps the "is a read active" checks true
     const stale = () => token !== _ttsNeuralToken || _ttsChunkState !== state;
     const fallBack = (cooldownMs) => {
-      if (cooldownMs) _ttsNeuralCooldownUntil = Date.now() + cooldownMs;
+      if (cooldownMs) _ttsCool(cooldownMs, 'playback-fail');
       state.neuralOk = false;
       if (stale()) return;
       _ttsUtterance = null;
@@ -13320,6 +13349,16 @@
       const e = h && _ttsHeadCache.get(h.text);
       return !!(e && e.ready);
     })();
+    {
+      const h = _ttsHeadChunk(text, baseOffset);
+      const e = h && _ttsHeadCache.get(h.text);
+      let why = '';
+      if (Date.now() < _ttsNeuralCooldownUntil) why = 'free voice cooling down, ' + Math.round((_ttsNeuralCooldownUntil - Date.now()) / 1000) + 's left (' + _ttsNeuralCooldownWhy + ')';
+      else if (!e) why = 'first chunk was not prepared (' + (_ttsHeadCache.size ? _ttsHeadCache.size + ' prepared, none match this text' : 'nothing prepared') + ')';
+      else if (!e.ready) why = 'first chunk still generating';
+      _ttsStartWhy = why;
+      _ttsLog('START', why ? 'MAC VOICE: ' + why : 'free voice, chunk ready');
+    }
     if (Date.now() >= _ttsNeuralCooldownUntil && _ttsHeadReady) {
       // Free voice: generation time scales with length (about 10 s for a
       // 1,600-char chunk), so start with a short sentence-sized chunk, then ~400-char
@@ -13357,6 +13396,8 @@
     utterance.onstart = () => {
       if (_ttsUtterance !== utterance || _ttsChunkState !== state) return;
       setTtsButtonsState(true, false, state.paneId);
+      _ttsShowVoice('Mac voice');
+      if (_ttsStartWhy) ttsButtons().concat(_ttsDirectBtn ? [_ttsDirectBtn] : []).forEach(btn => { btn.title = 'Mac voice: ' + _ttsStartWhy; });
       setTtsButtonsBusy(false);
       ttsButtons().forEach(btn => {
         if (ttsButtonPaneId(btn) === _ttsActivePaneId) {

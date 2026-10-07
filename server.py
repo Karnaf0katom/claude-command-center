@@ -30761,6 +30761,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             result = codex_client_call(action, data)
             self.send_json(result, 200 if result.get("ok") else 409)
             return
+        if path == "/api/free-runtime/tts-log":
+            # Browser-side Speak decisions (which voice, and why the Mac voice)
+            # land in activity.log next to the server's own SPEAK lines.
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                payload = json.loads(self.rfile.read(length)) if 0 < length <= 4096 else {}
+            except (ValueError, OSError):
+                payload = {}
+            if isinstance(payload, dict):
+                _log_activity("tts", str(payload.get("verb") or "NOTE")[:9].upper(),
+                              str(payload.get("detail") or "")[:300])
+            self.send_json({"ok": True})
+            return
         if path == "/api/free-runtime/tts":
             # Speak button: text -> free neural voice via the router. The
             # router key never leaves the server; the browser gets audio only.
@@ -30772,7 +30785,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self.send_json({"ok": False, "error": "bad request"}, 400)
                 return
+            _t0 = time.time()
             status, audio, ctype, voice = _free_runtime.tts(payload.get("text"), str(payload.get("voice") or ""))
+            _log_activity("tts", "SPEAK", "chars=%d status=%d spoke=%s ms=%d bytes=%d" % (
+                len(str(payload.get("text") or "")), status, voice or "-",
+                int((time.time() - _t0) * 1000), len(audio)))
             if status != 200:
                 self.send_json({"ok": False, "error": "tts unavailable", "voice": voice}, status)
                 return
