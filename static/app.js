@@ -12917,10 +12917,11 @@
     }
   }
   // Free neural voice (router TTS). Reads of up to _TTS_NEURAL_MAX_CHARS go
-  // through /api/free-runtime/tts with a random Gemini voice per read; longer
-  // reads, a 429/outage (cool-down), or no router fall back to the browser
-  // voice. No word highlight on this path: the audio carries no boundaries.
-  const _TTS_NEURAL_MAX_CHARS = 1200;
+  // through /api/free-runtime/tts with a random Gemini voice per read (the
+  // server falls back to Cloudflare MeloTTS on a Google rate limit); a full
+  // outage (cool-down) or no router falls back to the browser voice. The next
+  // chunk is fetched while the current one plays. No word highlight here: the
+  // audio carries no boundaries.
   let _ttsNeural = null;          // { audio, token } while a neural chunk plays
   let _ttsNeuralToken = 0;
   let _ttsNeuralCooldownUntil = 0;
@@ -12940,13 +12941,22 @@
   }
   function _ttsNeuralUsable(state) {
     return Date.now() >= _ttsNeuralCooldownUntil
-      && state.neuralOk !== false
-      && state.chunks.reduce((n, c) => n + c.text.length, 0) <= _TTS_NEURAL_MAX_CHARS;
+      && state.neuralOk !== false;
+  }
+  // Resolves { url, voice } or rejects with the HTTP status (0 = network).
+  function _ttsFetchNeural(text, voice) {
+    return fetch('/api/free-runtime/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice: voice || '' }),
+    }).then(async (res) => {
+      if (!res.ok) throw res.status;
+      return { url: URL.createObjectURL(await res.blob()), voice: res.headers.get('X-CCC-Voice') || '' };
+    }, () => { throw 0; });
   }
   function _ttsSpeakChunkNeural(state, chunk) {
     const token = ++_ttsNeuralToken;
-    const pseudo = { neural: true };   // keeps the "is a read active" checks true
-    _ttsUtterance = pseudo;
+    _ttsUtterance = { neural: true };   // keeps the "is a read active" checks true
     const stale = () => token !== _ttsNeuralToken || _ttsChunkState !== state;
     const fallBack = (cooldownMs) => {
       if (cooldownMs) _ttsNeuralCooldownUntil = Date.now() + cooldownMs;
@@ -12955,20 +12965,23 @@
       _ttsUtterance = null;
       _ttsSpeakNextChunk();
     };
-    fetch('/api/free-runtime/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: chunk.text, voice: state.voice || '' }),
-    }).then(async (res) => {
-      if (stale()) return;
-      if (!res.ok) { fallBack(res.status === 429 ? 60000 : 300000); return; }
-      state.voice = res.headers.get('X-CCC-Voice') || state.voice || '';
-      const url = URL.createObjectURL(await res.blob());
-      if (stale()) { URL.revokeObjectURL(url); return; }
-      const audio = new Audio(url);
+    state.prefetch = state.prefetch || {};
+    const ensure = (i) => {
+      const c = state.chunks[i];
+      if (!c || state.prefetch[i]) return;
+      const p = _ttsFetchNeural(c.text, state.geminiVoice);
+      p.catch(() => {});
+      state.prefetch[i] = p;
+    };
+    ensure(state.index);
+    state.prefetch[state.index].then((got) => {
+      delete state.prefetch[state.index];
+      if (stale()) { URL.revokeObjectURL(got.url); return; }
+      if (!state.geminiVoice && got.voice && got.voice !== 'MeloTTS') state.geminiVoice = got.voice;
+      const audio = new Audio(got.url);
       audio.playbackRate = _ttsRate;
       _ttsNeural = { audio, token };
-      const label = 'Pause reading (free voice: ' + state.voice + ')';
+      const label = 'Pause reading (free voice: ' + got.voice + ')';
       audio.onplay = () => {
         if (stale()) return;
         setTtsButtonsState(true, false, state.paneId);
@@ -12976,18 +12989,19 @@
         ttsButtons().forEach(btn => {
           if (ttsButtonPaneId(btn) === _ttsActivePaneId) { btn.classList.remove('paused'); btn.title = label; }
         });
+        ensure(state.index + 1);
       };
       audio.onended = () => {
-        URL.revokeObjectURL(url);
+        URL.revokeObjectURL(got.url);
         if (stale()) return;
         _ttsNeural = null;
         _ttsUtterance = null;
         state.index += 1;
         _ttsSpeakNextChunk();
       };
-      audio.onerror = () => { URL.revokeObjectURL(url); fallBack(300000); };
+      audio.onerror = () => { URL.revokeObjectURL(got.url); fallBack(300000); };
       audio.play().catch(() => fallBack(0));
-    }).catch(() => { if (!stale()) fallBack(300000); });
+    }, (status) => { if (!stale()) fallBack(status === 429 ? 60000 : 300000); });
   }
 
   // One-time iOS-Safari engine prime (CCC-31). Must run inside a user gesture.

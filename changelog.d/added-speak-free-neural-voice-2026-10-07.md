@@ -1,1 +1,1 @@
-- The Speak button reads replies of up to about 1,200 characters in a free Gemini voice through the free router, picking a random voice each read (shown in the button tooltip), and falls back to the browser voice on errors, rate limits, or longer replies.
+- The Speak button reads replies of any length in a free Gemini voice (random per read, shown in the button tooltip), switches to Cloudflare MeloTTS when Google rate-limits, and uses the browser voice only if the free router is unavailable.

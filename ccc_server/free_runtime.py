@@ -417,38 +417,59 @@ TTS_VOICES = (
     "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
     "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 )
-TTS_MODEL = "gemini-3.1-flash-tts-preview"
+# Tried in order. Gemini first (30 voices); Cloudflare MeloTTS when Google
+# rate-limits the free tier. Aura is left out: the router sends it the wrong
+# field name and Cloudflare rejects it.
+TTS_MODELS = ("gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "@cf/myshell-ai/melotts")
 TTS_MAX_CHARS = 2000
 
 
+def _audio_type(data):
+    """Content type from the bytes: the router labels MeloTTS WAV as mpeg."""
+    if data[:4] == b"RIFF":
+        return "audio/wav"
+    if data[:3] == b"ID3" or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    return "application/octet-stream"
+
+
 def tts(text, voice=""):
-    """Speak ``text`` through the free router: (status, audio_bytes, voice).
+    """Speak ``text`` through the free router: (status, audio, content_type, label).
 
     A blank or unknown voice picks a random Gemini voice, so repeated reads
-    sample the catalog. status is the HTTP status to relay; audio_bytes is
-    empty on failure. The router key stays on this side of the loopback.
+    sample the catalog. label names what spoke ("Puck", "MeloTTS"). status is
+    the HTTP status to relay; audio is empty on failure. The router key stays
+    on this side of the loopback.
     """
     import random
     import urllib.request
     text = str(text or "").strip()[:TTS_MAX_CHARS]
     if not text:
-        return 400, b"", ""
+        return 400, b"", "", ""
     voice = voice if voice in TTS_VOICES else random.choice(TTS_VOICES)
     key = unified_key()
     if not key or not router_listening():
-        return 503, b"", voice
-    req = urllib.request.Request(
-        router_base_url() + "/v1/audio/speech",
-        data=json.dumps({"model": TTS_MODEL, "voice": voice, "input": text}).encode(),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return 200, resp.read(), voice
-    except urllib.error.HTTPError as e:
-        return (429 if e.code == 429 else 502), b"", voice
-    except Exception:
-        return 502, b"", voice
+        return 503, b"", "", voice
+    status = 502
+    for model in TTS_MODELS:
+        melo = model.startswith("@cf/")
+        body = {"model": model, "input": text}
+        if not melo:
+            body["voice"] = voice
+        req = urllib.request.Request(
+            router_base_url() + "/v1/audio/speech", data=json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+            if data:
+                return 200, data, _audio_type(data), "MeloTTS" if melo else voice
+        except urllib.error.HTTPError as e:
+            status = 429 if (e.code == 429 or status == 429) else 502
+        except Exception:
+            status = 502
+    return status, b"", "", voice
 
 
 def session_runtime(session_id):

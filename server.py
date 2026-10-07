@@ -30772,12 +30772,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self.send_json({"ok": False, "error": "bad request"}, 400)
                 return
-            status, audio, voice = _free_runtime.tts(payload.get("text"), str(payload.get("voice") or ""))
+            status, audio, ctype, voice = _free_runtime.tts(payload.get("text"), str(payload.get("voice") or ""))
             if status != 200:
                 self.send_json({"ok": False, "error": "tts unavailable", "voice": voice}, status)
                 return
             self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(audio)))
             self.send_header("X-CCC-Voice", voice)
             self.send_header("Cache-Control", "no-store")
