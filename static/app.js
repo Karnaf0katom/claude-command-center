@@ -12939,6 +12939,47 @@
     _ttsNeural = null;
     if (window.speechSynthesis) window.speechSynthesis.cancel();
   }
+  // Prepare-ahead: once a reply has settled, its first chunk is generated in
+  // the background so Speak starts with no wait. Keyed by the exact chunk text
+  // the reader will ask for. A Speak that finds no ready chunk uses the
+  // browser voice at once instead of waiting on the network.
+  const _TTS_HEAD_CHARS = 160;
+  const _ttsHeadCache = new Map();   // chunk text -> { p, ready, got }
+  let _ttsPrefetchTimer = null;
+  function _ttsHeadChunk(text, baseOffset) {
+    return _chunkTtsText(text, _TTS_HEAD_CHARS, baseOffset)[0] || null;
+  }
+  function _ttsPrefetchHead(rawText) {
+    if (Date.now() < _ttsNeuralCooldownUntil || document.hidden) return;
+    const clean = _sanitizeTtsText(rawText, true);
+    const head = clean.trim() ? _ttsHeadChunk(clean, 0) : null;
+    if (!head || _ttsHeadCache.has(head.text)) return;
+    const entry = { ready: false, got: null };
+    entry.p = _ttsFetchNeural(head.text, '').then((got) => { entry.ready = true; entry.got = got; return got; });
+    entry.p.catch((status) => {
+      _ttsHeadCache.delete(head.text);
+      _ttsNeuralCooldownUntil = Date.now() + (status === 429 ? 60000 : 300000);
+    });
+    _ttsHeadCache.set(head.text, entry);
+    while (_ttsHeadCache.size > 3) {
+      const oldest = _ttsHeadCache.keys().next().value;
+      const old = _ttsHeadCache.get(oldest);
+      if (old && old.got) URL.revokeObjectURL(old.got.url);
+      _ttsHeadCache.delete(oldest);
+    }
+  }
+  // Called after a transcript render; waits for the text to stop changing.
+  function scheduleTtsPrefetch() {
+    clearTimeout(_ttsPrefetchTimer);
+    _ttsPrefetchTimer = setTimeout(() => {
+      try {
+        if (_ttsActive || _ttsPaused) return;
+        const paneId = activePaneId();
+        const data = paneId ? lastMessageTtsData(paneId) : null;
+        if (data && data.text && data.text.trim()) _ttsPrefetchHead(data.text);
+      } catch (_) {}
+    }, 2500);
+  }
   // Name of the free voice speaking, shown on the active Speak button(s).
   function _ttsShowVoice(name) {
     ttsButtons().concat(_ttsDirectBtn ? [_ttsDirectBtn] : []).forEach(btn => {
@@ -12979,6 +13020,10 @@
       p.catch(() => {});
       state.prefetch[i] = p;
     };
+    if (state.index === 0 && !state.prefetch[0]) {
+      const hit = _ttsHeadCache.get(chunk.text);
+      if (hit) { state.prefetch[0] = hit.p; _ttsHeadCache.delete(chunk.text); }
+    }
     ensure(state.index);
     state.prefetch[state.index].then((got) => {
       delete state.prefetch[state.index];
@@ -13268,7 +13313,14 @@
   function _ttsStartChunkedSpeech(text, paneId, baseOffset, pauseOnStart) {
     let chunks = _chunkTtsText(text, TTS_CHUNK_MAX_CHARS, baseOffset);
     if (!chunks.length) return false;
-    if (Date.now() >= _ttsNeuralCooldownUntil) {
+    // Free voice only when its first chunk is already prepared; otherwise the
+    // browser voice starts now rather than waiting on the network.
+    const _ttsHeadReady = (() => {
+      const h = _ttsHeadChunk(text, baseOffset);
+      const e = h && _ttsHeadCache.get(h.text);
+      return !!(e && e.ready);
+    })();
+    if (Date.now() >= _ttsNeuralCooldownUntil && _ttsHeadReady) {
       // Free voice: generation time scales with length (about 10 s for a
       // 1,600-char chunk), so start with a short sentence-sized chunk, then ~400-char
       // chunks (about 6 s each to make, longer than they take to play).
@@ -13280,6 +13332,7 @@
     }
     _ttsChunkState = {
       chunks,
+      neuralOk: _ttsHeadReady,
       index: 0,
       paneId: paneId || _ttsActivePaneId || activePaneId(),
       pauseOnStart: !!pauseOnStart,
@@ -61113,6 +61166,7 @@
         // is playing) must not cancel the in-progress utterance — that's the
         // whole point of decoupling playback from focus.
         resetTtsOnNewTurn(currentConversation);
+        scheduleTtsPrefetch();
         break;
       }
     }
