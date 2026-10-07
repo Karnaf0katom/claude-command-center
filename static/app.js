@@ -20713,6 +20713,30 @@
     input.focus();
   }
 
+  let newSessionComposerRevision = 0;
+
+  function newSessionLaunchStillCurrent(context) {
+    return activePaneId() === context.paneId
+      && newSessionComposerRevision === context.revision
+      && currentConversation === '__new__';
+  }
+
+  function pendingSpawnIsSelected(card) {
+    if (!card) return false;
+    const paneId = card.spawn_pane_id || activePaneId();
+    const pane = paneByPaneId(paneId);
+    return activePaneId() === paneId && !!pane
+      && (pane.conversationId === card.id
+        || !!(card.expected_session_id && pane.conversationId === card.expected_session_id));
+  }
+
+  function refreshSelectedPendingSpawn(card) {
+    if (pendingSpawnIsSelected(card) && typeof selectConversation === 'function') {
+      const paneId = card.spawn_pane_id || activePaneId();
+      selectConversation(paneByPaneId(paneId).conversationId, paneId);
+    }
+  }
+
   function insertPendingSpawnCard(pid, subject, sourceOrEngine, logPath, meta) {
     if (!pid) return;
     const id = 'spawning-' + pid;
@@ -20731,6 +20755,7 @@
       source,
       is_live: true, archived: false, verified: false,
       spawn_pid: pid, pending_spawn: true,
+      spawn_pane_id: activePaneId(),
       has_edit: false, has_commit: false, has_push: false,
       sidecar_status: 'active', sidecar_has_writes: false,
       question_waiting: false, question_text: '', question_header: '', question_preamble: '', question_options: [], question_option_details: [],
@@ -20768,7 +20793,7 @@
       if (card.no_auto_select) return;
       if (typeof selectConversation === 'function') selectConversation(id);
     };
-    if (card.fast_path) {
+    if (card.fast_path && !card.no_auto_select) {
       // Rebuilding a sidebar with thousands of sessions can occupy the main
       // thread for a full second. Claude's main pane is the useful immediate
       // feedback, so select it now and let the complete sidebar rebuild run
@@ -24937,9 +24962,7 @@
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
         const placeholder = adoptPendingSpawnPid(tempPid, data.spawn_id || data.pid, data.log, data.session_id);
-        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
-          selectConversation(placeholder.id);
-        }
+        if (spawnUsesLogPlaceholder(engine)) refreshSelectedPendingSpawn(placeholder);
         if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
         if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         setTimeout(refreshConversationList, 600);
@@ -72150,8 +72173,8 @@
           // If the user picked a fire-and-watch engine, refocus the right pane on the
           // placeholder so log rendering kicks in for the new pid
           // (the auto-select fired when tempPid was still in play).
-          if (spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
-            selectConversation('spawning-' + tempPid);
+          if (spawnUsesLogPlaceholder(engine)) {
+            refreshSelectedPendingSpawn(pendingSpawns.get(realSpawnId) || pendingSpawns.get(tempPid));
           }
           if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
           if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
@@ -81755,6 +81778,7 @@
   }
 
   function enterNewSessionMode() {
+    ++newSessionComposerRevision;
     const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
     // CCC-29: entering new-session mode does not always go through
@@ -82154,6 +82178,10 @@
   window.addEventListener('focus', () => { if (_emnInstalled) refreshEngineMissingNotice({ fresh: true }); });
 
   async function spawnFromInlineInput(body) {
+    const spawnPaneId = activePaneId();
+    const launchContext = { paneId: spawnPaneId, revision: newSessionComposerRevision };
+    const spawnInput = composerInputForPane(spawnPaneId) || $convInput;
+    const spawnSendButton = $convSendBtn;
     const spawnAskedAt = Date.now();
     const subject = spawnFirstSentence(body);
     const prompt = body;
@@ -82194,6 +82222,7 @@
     };
     const cardSource = spawnSourceForEngine(engine);
     const tempPid = 'tmp-' + Date.now();
+    const clearSubmittedComposer = newSessionLaunchStillCurrent(launchContext);
     insertPendingSpawnCard(tempPid, subject, cardSource, null, {
       first_message: body,
       repo_path: displayPath,
@@ -82203,18 +82232,20 @@
       session_cwd: launchCwd,
       session_cwd_exists: true,
       fast_path: engine === 'claude',
+      spawn_pane_id: spawnPaneId,
+      no_auto_select: !clearSubmittedComposer,
     });
-    if ($convInput) $convInput.value = '';
-    clearInputDraftForConversation('__new__');
-    const restoreDraftAfterFailure = () => {
-      _removePendingSpawnCard(tempPid);
-      enterNewSessionMode();
-      setTimeout(() => {
-        if (!$convInput) return;
-        $convInput.value = body;
-        $convInput.dispatchEvent(new Event('input', { bubbles: true }));
-        $convInput.focus();
-      }, 60);
+    if (clearSubmittedComposer) {
+      if (spawnInput) spawnInput.value = '';
+      clearInputDraftForConversation('__new__');
+    }
+    const restoreDraftAfterFailure = (reason) => {
+      // Keep the exact failed request available for Retry/Edit without
+      // replacing a newer draft or navigating back from another chat.
+      _failPendingSpawnCard(tempPid, reason);
+      if (newSessionComposerRevision === launchContext.revision) {
+        setInputDraftForKey(inputDraftKeyForConversation('__new__'), body);
+      }
     };
     try {
       const endpoint = spawnEndpointForEngine(engine);
@@ -82250,6 +82281,8 @@
         _claudePrewarmKey = '';
         _claudePrewarmPromise = null;
       }
+      const pendingCard = pendingSpawns.get(tempPid);
+      if (pendingCard) Object.assign(pendingCard, { spawn_endpoint: endpoint, spawn_body: spawnBody });
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         priority: 'high',
@@ -82260,9 +82293,9 @@
         // An auto-picked folder becomes the last-used one only now that a
         // session actually launched in it.
         if (autoPickedCwd) { try { localStorage.setItem(SPAWN_CWD_KEY, autoPickedCwd); } catch (_) {} }
-        resetRepoGuess(false);
+        if (newSessionLaunchStillCurrent(launchContext) || pendingSpawnIsSelected(pendingSpawns.get(tempPid))) resetRepoGuess(false);
         if (typeof recordSpawnChoice === 'function') {
-          recordSpawnChoice(engine, pickedModel, $convInputEffortSelect ? $convInputEffortSelect.value : '');
+          recordSpawnChoice(engine, pickedModel, spawnBody.reasoning_effort || '');
         }
         if (data.prewarm_fallback) showClaudePrewarmFallbackRecovery();
         if (data.session_id) {
@@ -82271,15 +82304,15 @@
         }
         const placeholder = adoptPendingSpawnPid(tempPid, data.spawn_id || data.pid, data.log, data.session_id);
         assignSpawnedSessionToDefaultObject(data, repoPath || launchCwd);
-        if (placeholder && engine === 'claude' && data.session_id) {
+        if (pendingSpawnIsSelected(placeholder) && engine === 'claude' && data.session_id) {
           claudeSpawnAwaitingFirstPaint.add(data.session_id);
           setTimeout(() => releaseClaudeSpawnPaintGate(data.session_id), 30000);
           // The placeholder's canonical conversation stream has no durable
           // transcript yet and competes for the same HTTP/1.1 connection pool
           // as the useful spawn-log replay. Give the first-response stream the
           // slot; canonical polling resumes when the real row is rebound.
-          stopConvStream(activePaneId());
-          startSpawnStream(data.session_id, activePaneId(), {
+          stopConvStream(spawnPaneId);
+          startSpawnStream(data.session_id, spawnPaneId, {
             pendingConversationId: placeholder.id,
             replay: true,
             knownLog: !!data.log,
@@ -82288,9 +82321,7 @@
         // Fire-and-watch engines can stream their spawn log once the real pid
         // is known. Re-select the same placeholder id so fetchConversationEvents
         // starts the log poller without making the user click the sidebar row.
-        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
-          selectConversation(placeholder.id);
-        }
+        if (spawnUsesLogPlaceholder(engine)) refreshSelectedPendingSpawn(placeholder);
         if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
         if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         if (engine !== 'claude') setTimeout(refreshConversationList, 600);
@@ -82304,7 +82335,7 @@
         // retry does not fail the same way.
         const missingCwd = /^invalid cwd: (path does not exist|not a directory)/.test(data.error || '');
         if (missingCwd) forgetMissingSpawnCwd(launchCwd);
-        restoreDraftAfterFailure();
+        restoreDraftAfterFailure('Spawn failed: ' + (data.error || 'HTTP ' + res.status));
         flashRed();
         if (missingCwd) offerCreateMissingSpawnCwd(launchCwd, body);
         else if (data.error_code === 'engine_not_installed') {
@@ -82319,13 +82350,16 @@
       }
     } catch (err) {
       releaseClaudeSpawnPaintGate('', tempPid);
-      restoreDraftAfterFailure();
+      restoreDraftAfterFailure('Spawn failed: ' + (err && err.message || 'network'));
       flashRed();
       showOpToast('Spawn failed: ' + (err && err.message || 'network'), 'error');
       console.error('[New session] submit error', err);
     }
-    if ($convSendBtn) $convSendBtn.disabled = false;
-    if ($convInput) $convInput.focus();
+    if (newSessionLaunchStillCurrent(launchContext)
+        || pendingSpawnIsSelected(pendingSpawns.get(tempPid))) {
+      if (spawnSendButton) spawnSendButton.disabled = false;
+      if (!document.hidden && spawnInput) spawnInput.focus();
+    }
   }
 
   // ── Appearance picker (theme + font) ───────────────────────────
