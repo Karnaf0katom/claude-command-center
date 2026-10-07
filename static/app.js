@@ -81365,6 +81365,8 @@
           selectSpawnPick(eng, mod);
         });
       });
+      // The "$0 Free" pill lives first in this row (static/free-runtime.js).
+      if (window.CCCFreeRuntime && typeof CCCFreeRuntime.sync === 'function') CCCFreeRuntime.sync(currentEngine);
     };
 
     const picks = getTopSpawnPicks();
