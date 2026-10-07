@@ -944,7 +944,8 @@ def _ranked(store_models):
     evaluated.sort(
         key=lambda m: (
             -(m.get("score") or 0),
-            m.get("median_request_ms") or 1 << 30,
+            # 0 ms is a real median; only a missing one sorts last.
+            1 << 30 if m.get("median_request_ms") is None else m["median_request_ms"],
             m.get("id") or "",
         )
     )
