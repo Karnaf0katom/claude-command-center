@@ -126,6 +126,7 @@ from ccc_server import report_routes as _report_routes
 from ccc_server import model_discovery as _model_discovery
 from ccc_server import run_in_terminal as _run_in_terminal
 from ccc_server import wt_review as _wt_review
+from ccc_server import headroom as _headroom
 # Namespace import (not adopted): the $0 spawn runtime's helpers stay behind
 # one name so its spawn_env/readiness don't collide with engine globals.
 from ccc_server import free_runtime as _free_runtime
@@ -9096,6 +9097,9 @@ def _build_engine_model_catalog(force_refresh=False):
             default_id=catalog["antigravity"].get("default"),
         )
 
+    from ccc_server import domestic_providers
+    domestic_providers.add_to_model_catalog(catalog)
+
     for bucket in catalog.values():
         bucket.pop("_index", None)
         bucket["models"] = [
@@ -9273,11 +9277,15 @@ def _clean_disabled_engines(value, keep_enabled=()):
 
 def _write_spawn_defaults_file(payload):
     COMMAND_CENTER_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SPAWN_DEFAULTS_FILE.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    tmp.replace(SPAWN_DEFAULTS_FILE)
+    fd, tmp_name = tempfile.mkstemp(prefix="spawn-defaults-", suffix=".tmp", dir=SPAWN_DEFAULTS_FILE.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+        tmp.replace(SPAWN_DEFAULTS_FILE)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _load_spawn_defaults():
@@ -26204,6 +26212,9 @@ _adopt_ccc_module("usage_limit")
 # Limit-hit failover with approval (continue on a $0 model / approved
 # auto-resume at reset, staggered). Rides the usage-limit watcher's cadence.
 _adopt_ccc_module("free_failover")
+# Fleet-level view of the same state: one banner per limit wall instead of
+# a card per stopped session. Same cached stores, same per-session actions.
+_adopt_ccc_module("fleet_failover")
 # ---------------------------------------------------------------------------
 # Background coordination watcher
 # Tracks active group-chat coordinations and nudges participant sessions
@@ -26606,6 +26617,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if path == "/setup" or path == "/setup.html" or path.startswith("/api/setup/"):
             from ccc_server import setup_jobs as _setup_jobs_mod
             _setup_jobs_mod.handle_get(self, parsed)
+        if path == "/api/domestic-providers":
+            from ccc_server import domestic_providers
+            domestic_providers.handle(self, "GET")
+            return
         if path == "/api/free-router/providers":
             # Free-key wizard catalog (L03): registry rows + live key state
             # when the managed router answers. Contract: bare list.
@@ -26819,6 +26834,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             sid = urllib.parse.unquote(path.rsplit("/", 1)[-1])
             payload, status = compute_session_detail(sid)
             self.send_json(payload, status)
+        elif path == "/api/leftover/proposals":
+            from ccc_server import leftover
+            leftover.handle_api_get(self, parsed)
         elif path == "/api/config":
             self.send_json(get_app_config())
         elif path == "/api/onboarding/status":
@@ -27316,6 +27334,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(usage_reset_events_payload(days=raw_days))
         elif path == "/api/usage/current":
             self.send_json(usage_current_payload())
+        elif path == "/api/headroom":
+            self.send_json(_headroom.headroom_payload())
         elif path in ("/api/sessions/spawned", "/api/spawned"):
             qs = urllib.parse.parse_qs(parsed.query)
             rows = list_spawned_sessions()
@@ -27467,6 +27487,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # plus free-model readiness for the approval card. Reads only the
             # two cached JSON stores + the TTL'd router probe.
             self.send_json(free_failover_status())
+        elif path == "/api/free-failover/fleet":
+            # ccc_server/fleet_failover.py — the same state grouped into one
+            # banner per engine limit wall, for the fleet limit view.
+            self.send_json(free_failover_fleet())
         elif re.match(r"^/api/sessions/continuation-decision/.+$", path):
             # ccc_server/continuation.py — "resume in place, or spawn a fresh
             # session that continues it?" for one session, from cached
@@ -30880,6 +30904,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if path.startswith("/api/setup/"):
             from ccc_server import setup_jobs as _setup_jobs_mod
             _setup_jobs_mod.handle_post(self)
+        if path in ("/api/domestic-providers/keys", "/api/domestic-providers/keys/remove"):
+            from ccc_server import domestic_providers
+            domestic_providers.handle(self, "POST")
+            return
         if path == "/api/free-router/keys":
             # Free-key wizard submit (L03): {platform, key?, consent?} ->
             # {ok, validated, error}. The key is forwarded to the managed
@@ -31774,7 +31802,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "invalid JSON"}, 400)
                 return
             from ccc_server import first_task
-            job, err = first_task.start_task(payload.get("task_id"))
+            job, err = first_task.start_task(payload.get("task_id"), require_free=payload.get("runtime") == "free")
             if err:
                 code = err.get("code")
                 self.send_json(err, 409 if code == "busy" else 400)
@@ -34637,6 +34665,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # router via per-child env. Validated here — engine support is
             # per-engine and a $0 request must never silently run paid.
             spawn_runtime = str(payload.get("runtime") or "").strip().lower()
+            from ccc_server import domestic_providers
+            preset_error = domestic_providers.request_error(
+                engine, model, spawn_runtime, key_profile,
+                remote=bool(payload.get("remote") or (os.environ.get("CCC_SSH_HOST") and payload.get("remote") is not False)),
+            )
             runtime_error = None
             if spawn_runtime and spawn_runtime != "free":
                 runtime_error = f"unknown runtime: {spawn_runtime}"
@@ -34819,6 +34852,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     "error": f"unsupported engine: {engine_raw}",
                     "supported_engines": list(_ORCHESTRATION_SPAWN_ENGINES),
                 }, 400)
+            elif preset_error:
+                _log_activity("spawn", "REJECT", f"preset_error: {preset_error.get('code')}")
+                self.send_json(preset_error, 400)
             elif runtime_error:
                 _log_activity("spawn", "REJECT", f"runtime_error: {runtime_error}")
                 self.send_json({
@@ -37702,7 +37738,18 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 payload = {}
             sid = str(payload.get("session_id") or "").strip()
-            if not sid:
+            if path == "/api/free-failover/fleet":
+                # ccc_server/fleet_failover.py — one click fanned out to a
+                # selected set: {action: continue|arm|disarm|dismiss|
+                # switch_back, session_ids: [...], offer?, always?}
+                result = free_failover_fleet_action(
+                    str(payload.get("action") or ""),
+                    payload.get("session_ids"),
+                    offer=str(payload.get("offer") or "failover"),
+                    always=bool(payload.get("always")),
+                )
+                self.send_json(result, 200 if "action" in result else 400)
+            elif not sid:
                 self.send_json({"ok": False, "error": "missing session_id"}, 400)
             elif path == "/api/free-failover/continue":
                 result = free_failover_continue(

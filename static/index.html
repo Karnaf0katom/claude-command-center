@@ -65,6 +65,7 @@
 <title>Command Center for Claude, Codex, Cursor, and Anti-Gravity</title>
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/savings.css">
+<link rel="stylesheet" href="/static/headroom-bars.css">
 <!-- Simple-mode CSS lives in its own file (extracted from app.css) so that
      file's diff against upstream stays small — see simple.css's own header
      comment. Loaded unconditionally; it's inert (never matches) outside
@@ -81,6 +82,9 @@
 <link rel="stylesheet" href="/static/star-ask.css">
 <!-- Limit-hit failover card (see static/limit-failover.js). -->
 <link rel="stylesheet" href="/static/limit-failover.css">
+<!-- Fleet limit view: one banner per engine limit wall (see
+     static/fleet-failover.js). -->
+<link rel="stylesheet" href="/static/fleet-failover.css">
 <link rel="stylesheet" href="/static/router-detected.css">
 <style>
   body.hide-gh-issues .is-github-issue {
@@ -501,6 +505,11 @@
        inert on servers without /api/free-failover/status. -->
   <script src="/static/popups.js"></script>
   <script src="/static/limit-failover.js" defer></script>
+  <!-- Fleet limit view: one banner per engine limit wall. Owns the
+       failover lifecycle when /api/free-failover/fleet answers; the
+       per-session cards above stay as the fallback for older servers. -->
+  <script src="/static/fleet-failover.js" defer></script>
+  <script src="/static/headroom-bars.js" defer></script>
 
   <div class="sidebar" data-tour="lhs">
     <!-- Simple-mode slim header (body.ccc-mobile-redesign.ccc-simple-mode
@@ -799,6 +808,7 @@
              flip the palette via CSS so no chip needs to re-render. -->
         <button id="chipsColorToggle" class="sh-btn" title="Toggle folder chip color mode" aria-label="Toggle folder chip color mode"><span aria-hidden="true" id="chipsColorIcon">&#9899;</span></button>
       </div>
+      <div id="headroomBars" class="headroom-bars" role="group" aria-label="Plan usage left" hidden></div>
     </div>
 
     <div class="new-session-panel">
@@ -3771,6 +3781,7 @@
 <script src="/static/claude-reauth.js"></script>
 <script src="/static/phone-access.js"></script>
 <script src="/static/config-consent.js"></script>
+<script src="/static/domestic-providers.js" defer></script>
 <script src="/static/free-key-wizard.js" defer></script>
 <script src="/static/federated-sidebar.js"></script>
 <script src="/static/q2-worker-idle.js"></script>
@@ -3787,6 +3798,7 @@
 <script src="/static/router-detected.js" defer></script>
 <script src="/static/app.js"></script>
 <script src="/static/free-settings.js" defer></script>
+<script src="/static/leftover.js" defer></script>
 <script src="/static/codex-live-source.js"></script>
 <script src="/static/scheduled-jobs.js"></script>
 <script src="/static/jobs-tab.js"></script>
