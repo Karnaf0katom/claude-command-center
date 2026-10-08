@@ -25,6 +25,8 @@
     'router-detected',
     'limit-failover',
     'fleet-limit',
+    'leftover-offer',
+    'leftover-notification',
   ];
 
   // Approved pop-ups. Nothing else shows until Amir approves it.
@@ -37,6 +39,7 @@
     needs_input: 'notify-task',
     digest: 'notify-digest',
     milestone: 'notify-milestone',
+    leftover: 'leftover-notification',
   };
 
   function preview() {
