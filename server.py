@@ -19626,12 +19626,28 @@ def _car_mode_effective_keys():
     }
 
 
-def _car_mode_status_mode(keys):
-    """Map available keys -> capability mode string (see /api/car-mode/status)."""
+def _car_mode_speech_engine():
+    """"local" (default: whisper.cpp + Kokoro, unmetered) or "deepgram" (opt-in
+    with CCC_VOICE_ENGINE=deepgram, metered)."""
+    v = os.environ.get("CCC_VOICE_ENGINE", "").strip().lower()
+    return "deepgram" if v == "deepgram" else "local"
+
+
+_CAR_MODE_ENGINE_LABELS = {
+    "local": "Kokoro + whisper.cpp (local, free)",
+    "deepgram": "Deepgram nova-3 + aura-2 (metered)",
+}
+
+
+def _car_mode_status_mode(keys, engine=None):
+    """Map available keys + speech engine -> capability mode (see /api/car-mode/status)."""
+    engine = engine or _car_mode_speech_engine()
     if not keys["anthropic"]:
         return "unavailable_no_anthropic"
-    if not keys["deepgram"]:
+    if engine == "deepgram" and not keys["deepgram"]:
         return "degraded_no_deepgram"  # dispatcher works, but no STT/TTS -> no hands-free voice
+    if engine == "local" and not _free_runtime.local_tts_installed():
+        return "degraded_no_local_speech"  # Kokoro voice files not installed yet
     return "voice"
 
 
@@ -26349,6 +26365,7 @@ def _car_mode_running() -> bool:
 def _car_mode_snapshot() -> dict:
     """UI-facing status. Never leaks key values — only availability booleans."""
     keys = _car_mode_effective_keys()
+    engine = _car_mode_speech_engine()
     running = _car_mode_running()
     if not running:
         # clear stale slot so a crashed run doesn't look alive
@@ -26356,7 +26373,9 @@ def _car_mode_snapshot() -> dict:
     return {
         "ok": True,
         "running": running,
-        "mode": _car_mode_status_mode(keys),
+        "mode": _car_mode_status_mode(keys, engine),
+        "speech_engine": engine,
+        "speech_engine_label": _CAR_MODE_ENGINE_LABELS[engine],
         "anthropic_key_set": keys["anthropic"],
         "deepgram_key_set": keys["deepgram"],
         "pid": _CAR_MODE.get("pid") if running else None,
@@ -26379,9 +26398,13 @@ def _car_mode_start() -> dict:
         return {"ok": False, "error": "Car Mode needs an Anthropic API key (the dispatcher brain). "
                 "Add one in Car Mode settings.", "mode": mode, "running": False}
     if mode == "degraded_no_deepgram":
-        return {"ok": False, "error": "Hands-free voice needs a Deepgram API key (speech in + out). "
-                "Add one in Car Mode settings (about $0.35/hr), or use CCC's built-in browser "
-                "mic and read-aloud, which are free.", "mode": mode, "running": False}
+        return {"ok": False, "error": "CCC_VOICE_ENGINE=deepgram needs a Deepgram API key. "
+                "Add one in Car Mode settings, or unset CCC_VOICE_ENGINE to use the free "
+                "local voice (Kokoro + whisper.cpp).", "mode": mode, "running": False}
+    if mode == "degraded_no_local_speech":
+        return {"ok": False, "error": "The local voice isn't installed yet. Run "
+                "scripts/install_local_speech.sh in the CCC folder (one time, about 400 MB), "
+                "then press Start again.", "mode": mode, "running": False}
 
     launcher = _CAR_MODE_DIR / "run.sh"
     if not launcher.exists():
@@ -26393,6 +26416,7 @@ def _car_mode_start() -> dict:
         if val:
             env[env_name] = val
     env["CCC_BASE_URL"] = f"http://127.0.0.1:{PORT}"
+    env["CCC_VOICE_ENGINE"] = _car_mode_speech_engine()
 
     log_dir = COMMAND_CENTER_STATE_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -30787,10 +30811,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 return
             _t0 = time.time()
             if payload.get("stream"):
-                # Relay Deepgram's mp3 as it is made: playback starts at the
-                # first bytes (~0.3 s) instead of after the whole clip.
+                # Relay mp3 as it is made: playback starts at the first bytes
+                # instead of after the whole clip. Deepgram only when explicitly
+                # enabled; otherwise local Kokoro, which streams per sentence.
+                _voice_in = str(payload.get("voice") or "")
                 _resp, _label = _free_runtime.deepgram_open(
-                    payload.get("text"), str(payload.get("voice") or ""), "encoding=mp3")
+                    payload.get("text"), _voice_in, "encoding=mp3")
+                if (_resp is None and _free_runtime.local_tts_installed()
+                        and _voice_in not in _free_runtime.TTS_VOICES):
+                    _resp, _label = _free_runtime.local_tts_open(payload.get("text"), _voice_in)
                 if _resp is not None:
                     _sent = 0
                     try:

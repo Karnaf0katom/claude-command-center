@@ -3462,7 +3462,7 @@
           <input type="password" id="carModeAnthropicKey" class="bug-input" autocomplete="off" placeholder="sk-ant-…  (leave blank to keep the stored one)">
         </div>
         <div>
-          <label class="bug-label" for="carModeDeepgramKey">Deepgram API key <span style="color:var(--text-muted);font-weight:400;">(optional - enables speech in + out)</span></label>
+          <label class="bug-label" for="carModeDeepgramKey">Deepgram API key <span style="color:var(--text-muted);font-weight:400;">(optional - speech runs locally by default; set CCC_VOICE_ENGINE=deepgram to use it)</span></label>
           <input type="password" id="carModeDeepgramKey" class="bug-input" autocomplete="off" placeholder="leave blank to keep the stored one">
         </div>
         <div style="color:var(--text-muted);font-size:12px;">
@@ -3475,10 +3475,10 @@
         <div class="car-mode-cost">
           <strong>What it costs</strong>
           <div style="margin-top:4px;">
-            About <strong>$0.35/hr</strong> to run: routing agent on Claude Haiku 4.5
-            (~$0.10/hr), Deepgram speech-to-text (~$0.08-0.10/hr) and text-to-speech
-            (~$0.15/hr). Near-free if you skip Deepgram and use your Mac's built-in
-            speech. Your CCC sessions bill separately as usual.
+            About <strong>$0.10/hr</strong> to run: the routing agent on Claude Haiku 4.5.
+            Speech is local and free by default (whisper.cpp hears you, Kokoro speaks).
+            Opting into Deepgram (<code>CCC_VOICE_ENGINE=deepgram</code>) adds about
+            $0.25/hr. Your CCC sessions bill separately as usual.
           </div>
         </div>
 
@@ -3486,8 +3486,8 @@
         <div id="carModeDegradeNotice" class="car-mode-degrade">
           <strong>If a key is missing</strong> - Car Mode degrades instead of breaking:
           <ul style="margin:6px 0 0 18px;padding:0;">
-            <li>No Deepgram key → hands-free voice is off, but CCC's built-in browser
-              mic and read-aloud (free, no key) still let you work by voice in the UI.</li>
+            <li>Local voice not installed → run <code>scripts/install_local_speech.sh</code>
+              once; meanwhile CCC's built-in browser mic and read-aloud still work.</li>
             <li>No Anthropic key → Car Mode can't start; it tells you what's needed
               instead of erroring.</li>
           </ul>

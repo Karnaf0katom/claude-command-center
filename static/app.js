@@ -78266,10 +78266,13 @@
       msg = '● Car Mode is running. Talk to it in the voice window, or press Stop.';
     } else if (d.mode === 'voice') {
       cls = 'ok';
-      msg = '✓ Ready for hands-free voice (both keys set). Press Start Car Mode.';
+      msg = '✓ Ready for hands-free voice. Speech: ' + (d.speech_engine_label || 'local') + '. Press Start Car Mode.';
+    } else if (d.mode === 'degraded_no_local_speech') {
+      cls = 'warn';
+      msg = 'Anthropic key set, local voice not installed yet. Run scripts/install_local_speech.sh in the CCC folder (one time), then Start.';
     } else if (d.mode === 'degraded_no_deepgram') {
       cls = 'warn';
-      msg = "Anthropic key set, Deepgram key missing → hands-free voice is off. Add a Deepgram key below, or use CCC's built-in browser mic / read-aloud (free).";
+      msg = 'CCC_VOICE_ENGINE=deepgram but no Deepgram key. Add one below, or unset CCC_VOICE_ENGINE to use the free local voice (Kokoro + whisper.cpp).';
     } else {
       cls = 'warn';
       msg = 'Add an Anthropic API key below to enable Car Mode (the dispatcher brain).';
@@ -78283,7 +78286,7 @@
     }
     if ($carModeStopBtn) $carModeStopBtn.style.display = d.running ? '' : 'none';
     if ($carModeAnthropicKey) $carModeAnthropicKey.placeholder = d.anthropic_key_set ? 'stored ✓ - leave blank to keep it' : 'sk-ant-… (required)';
-    if ($carModeDeepgramKey) $carModeDeepgramKey.placeholder = d.deepgram_key_set ? 'stored ✓ - leave blank to keep it' : 'optional - enables hands-free voice';
+    if ($carModeDeepgramKey) $carModeDeepgramKey.placeholder = d.deepgram_key_set ? 'stored ✓ - leave blank to keep it' : 'optional - only used with CCC_VOICE_ENGINE=deepgram';
   }
   async function fetchCarModeStatus() {
     try {
