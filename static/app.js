@@ -71560,6 +71560,7 @@
     });
   }
   const refreshEngineModelCatalog = _gated('modelCatalog', loadEngineModelCatalog);
+  document.addEventListener('ccc-domestic-keys-changed', loadEngineModelCatalog);
   const modelCatalogReady = loadEngineModelCatalog();
   // The server refreshes Anthropic's catalog immediately after startup and
   // hourly. Retry once after that startup race, then keep already-open tabs
