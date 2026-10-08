@@ -12957,6 +12957,7 @@
       }).catch(() => {});
     } catch (_) {}
   }
+  let _ttsKeepVoice = '';   // carries the speaker across a restart (rate step, skip)
   let _ttsNeuralCooldownWhy = '';
   let _ttsStartWhy = '';
   function _ttsCool(ms, status) {
@@ -13084,7 +13085,7 @@
       p.catch(() => {});
       state.prefetch[i] = p;
     };
-    if (state.index === 0 && !state.prefetch[0]) {
+    if (state.index === 0 && !state.prefetch[0] && !state.geminiVoice) {
       const hit = _ttsHeadCache.get(chunk.text);
       if (hit) { state.prefetch[0] = hit.p; _ttsHeadCache.delete(chunk.text); }
     }
@@ -13096,6 +13097,15 @@
       const audio = new Audio(got.url);
       audio.playbackRate = _ttsRate;
       _ttsNeural = { audio, token };
+      // No word boundaries from an audio file: estimate the read position from
+      // playback progress so skip and rate changes continue from here.
+      audio.ontimeupdate = () => {
+        if (stale() || !chunk.text.length) return;
+        const d = audio.duration;
+        const frac = (isFinite(d) && d > 0) ? audio.currentTime / d
+          : Math.min(0.95, audio.currentTime * 15 / chunk.text.length);
+        _ttsLastCharIndex = chunk.start + Math.floor(Math.min(1, frac) * chunk.text.length);
+      };
       const label = 'Pause reading (free voice: ' + got.voice + ')';
       audio.onplay = () => {
         if (stale()) return;
@@ -13403,6 +13413,7 @@
     _ttsChunkState = {
       chunks,
       neuralOk: _ttsHeadReady,
+      geminiVoice: _ttsKeepVoice,
       index: 0,
       paneId: paneId || _ttsActivePaneId || activePaneId(),
       pauseOnStart: !!pauseOnStart,
@@ -13749,6 +13760,7 @@
     const rest = _ttsBoundUtteranceText.slice(offset);
     if (!rest.trim()) return;
     const wasPaused = _ttsPaused;
+    _ttsKeepVoice = (_ttsChunkState && _ttsChunkState.geminiVoice) || '';
     _ttsChunkState = null;
     try { _ttsEngineCancel(); } catch (_) {}
     // Keep _ttsBoundUtteranceText pointing at the full text so subsequent
@@ -13759,6 +13771,7 @@
       offset,
       wasPaused,
     );
+    _ttsKeepVoice = '';
   }
   // ">" button next to the rate knob: skip past the rest of the sentence
   // currently playing and resume from the start of the next one. Sentence
@@ -13795,8 +13808,11 @@
     _syncTtsRateUi();
     _refreshTtsRateBtns();
     if (_ttsRateRestartTimer) clearTimeout(_ttsRateRestartTimer);
+    // A neural clip just changes speed in place: no restart, same voice.
+    if (_ttsNeural && _ttsNeural.audio) _ttsNeural.audio.playbackRate = _ttsRate;
     _ttsRateRestartTimer = setTimeout(() => {
       _ttsRateRestartTimer = null;
+      if (_ttsNeural && _ttsNeural.audio) return;
       if (_ttsActive || _ttsPaused) _restartTtsAtCurrentPosition();
     }, 120);
   }
