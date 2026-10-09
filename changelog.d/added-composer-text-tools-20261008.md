@@ -1,0 +1,1 @@
+- Optional composer text tools in Settings → Tools: offline Hebrew ↔ English keyboard layout correction and spelling/grammar correction through a separate, configurable command. Both act on the selection or whole draft, support Undo, and keep results for review before sending.

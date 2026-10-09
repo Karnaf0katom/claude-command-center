@@ -1,0 +1,28 @@
+/* Use the existing composer and Settings tokens; hidden tools occupy no space. */
+.composer-text-tool[hidden] { display: none !important; }
+.composer-text-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.composer-text-tool:hover { color: var(--text); background: var(--surface-2); }
+.composer-text-tool:disabled { opacity: .45; cursor: not-allowed; }
+.composer-text-tool[aria-busy="true"] { cursor: wait; }
+.composer-text-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-text-tool.applied { color: var(--accent); border-color: var(--accent); }
+.composer-text-tools-status { min-height: 1.4em; }
+@media (max-width: 600px) {
+  .conv-input-buttons:has(.composer-text-tool:not([hidden])),
+  .simple-composer-actions:has(.composer-text-tool:not([hidden])) { flex-wrap: wrap; }
+}

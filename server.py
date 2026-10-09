@@ -26580,6 +26580,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
 
+        if path == "/api/text-tools":
+            from ccc_server.text_tools import text_tools_status
+            self.send_json(text_tools_status())
+            return
+
         if path.startswith("/api/codex/client/"):
             from ccc_server.codex_client import codex_client_call
             action = path.rsplit("/", 1)[-1]
@@ -31013,6 +31018,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)}, 403)
             except _aa.ActionError as e:
                 self.send_json({"ok": False, "error": str(e)}, 400)
+            return
+
+        if path == "/api/text-tools":
+            from ccc_server.text_tools import TEXT_TOOLS_MAX_BODY, handle_text_tools
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > TEXT_TOOLS_MAX_BODY:
+                    self.send_json({"ok": False, "error": "Text tool body is missing or too large."}, 413)
+                    return
+                payload = json.loads(self.rfile.read(length))
+            except (ValueError, OSError):
+                self.send_json({"ok": False, "error": "Invalid text tool request."}, 400)
+                return
+            result, status = handle_text_tools(payload)
+            self.send_json(result, status)
             return
 
         if path == "/api/model-picker/record":

@@ -307,6 +307,7 @@ secret storage, and safe CLI use.
 ## Configuration
 
 [Environment variables, defaults, and persistent settings](docs/configuration.md).
+[Optional composer layout and spelling tools](docs/text-tools.md) live in Settings → Tools.
 
 ## Python stack diagnostics
 

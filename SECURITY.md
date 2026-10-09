@@ -90,3 +90,18 @@ If you're adding a new endpoint:
 3. **Don't introduce wildcard CORS or weaken the same-origin check.** If you need cross-origin access, propose it in an issue first.
 4. **Don't spawn subprocesses on attacker-controlled paths.** Use caution when allowing operations on unbounded file paths.
 5. **Treat anything in a log file as potentially containing secrets.** Don't log raw request bodies or shell-out output if it's user-supplied.
+
+## Optional composer text tools
+
+Keyboard layout correction runs entirely in the browser, without a network call.
+Spelling/grammar correction runs only when its composer button is clicked after
+enabling it in Settings → Tools. Only the selection (or the whole draft when
+nothing is selected) is sent to a separate correction command. The default is
+Claude Code with tools and MCP disabled, no session persistence, and a temporary
+working directory. It uses your configured Claude account; it never resumes the
+active coding session. `CCC_TEXT_TOOLS_COMMAND` can select another server-local
+command, which owns its own access, credentials, data handling, and costs. No
+request body can choose an executable, model, or working directory. Requests
+retain the existing same-origin gate, are limited to 20,000 characters and one
+concurrent command, and time out after 60 seconds. Raw input, output, and command
+stderr are not logged by this endpoint. Results remain drafts until you send.

@@ -64,6 +64,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@600;700&display=swap">
 <title>Command Center for Claude, Codex, Cursor, and Anti-Gravity</title>
 <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/text-tools.css">
 <link rel="stylesheet" href="/static/savings.css">
 <link rel="stylesheet" href="/static/headroom-bars.css">
 <!-- Simple-mode CSS lives in its own file (extracted from app.css) so that
@@ -595,7 +596,15 @@
             <!-- Speak instead of type: same Web Speech recognition as the
                  advanced composer's #convMicBtn, targeting #simpleComposerInput.
                  Wired via toggleSpeechRecognition('simple-home') in app.js. -->
+            <div class="composer-text-tools-status" role="status" hidden></div>
             <div class="simple-composer-actions">
+              <button type="button" class="composer-text-tool" data-text-tool="layout" hidden
+                      title="Fix keyboard layout — Hebrew ↔ English, offline. Selection or whole draft."
+                      aria-label="Fix keyboard layout"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4 4-4-4 4-4"></path></svg></button>
+              <button type="button" class="composer-text-tool" data-text-tool="spell" hidden
+                      title="Fix spelling and grammar. Selection or whole draft."
+                      aria-label="Fix spelling and grammar"><span aria-hidden="true">A</span><svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6l3 3 5-6"></path></svg></button>
+
               <button type="button" class="mic-btn simple-mic-btn" id="simpleMicBtn"
                       title="Record speech to input" aria-label="Record speech to input" aria-pressed="false">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1582,6 +1591,7 @@
                session is focused; the panel states the reload price and
                offers one cheap alternative. Send stays the ordinary submit. -->
           <div class="f2c-rail rail" data-role="conv-f2-rail" hidden></div>
+          <div class="composer-text-tools-status" role="status" hidden></div>
           <div class="conv-input-row-top">
             <textarea id="convInput" rows="1" placeholder="Send to terminal..." autocomplete="off" autocapitalize="sentences" autocorrect="on" spellcheck="true" enterkeyhint="send" inputmode="text" dir="auto"></textarea>
           </div>
@@ -1661,6 +1671,13 @@
                   <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
                 </svg>
               </button>
+
+              <button type="button" class="composer-text-tool" data-text-tool="layout" hidden
+                      title="Fix keyboard layout — Hebrew ↔ English, offline. Selection or whole draft."
+                      aria-label="Fix keyboard layout"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4 4-4-4 4-4"></path></svg></button>
+              <button type="button" class="composer-text-tool" data-text-tool="spell" hidden
+                      title="Fix spelling and grammar. Selection or whole draft."
+                      aria-label="Fix spelling and grammar"><span aria-hidden="true">A</span><svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6l3 3 5-6"></path></svg></button>
               <button class="mic-btn" id="convMicBtn" title="Record speech to input" aria-label="Record speech to input" aria-pressed="false">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
@@ -3112,6 +3129,32 @@
 
           <section class="settings-section" id="settingsSection-tools" data-section-id="tools" role="tabpanel" aria-labelledby="settingsRailTab-tools">
             <div class="settings-section-eyebrow">Tools</div>
+            <div class="settings-row" data-keywords="keyboard layout typing hebrew english qwerty correction">
+              <div class="settings-row-main">
+                <div class="settings-row-label">Keyboard layout correction</div>
+                <div class="settings-row-desc">Show the layout button in the composer to flip Hebrew and English. Works offline on your selection or whole draft.</div>
+              </div>
+              <div class="settings-row-control">
+                <button type="button" class="settings-toggle" data-text-tool-toggle="layout" role="switch"
+                        aria-checked="false" aria-label="Keyboard layout correction">
+                  <span class="settings-toggle-track"><span class="settings-toggle-thumb"></span></span>
+                </button>
+              </div>
+            </div>
+            <div class="settings-row" data-keywords="spelling grammar typo correction language text composer">
+              <div class="settings-row-main">
+                <div class="settings-row-label">Spelling and grammar correction</div>
+                <div class="settings-row-desc">Show the spelling button in the composer. Keeps your language and meaning; review the draft before sending. Uses a separate correction request and your configured account's usage.</div>
+                <div class="settings-row-desc" id="settingsSpellingStatus" role="status">Enable to check spelling availability.</div>
+              </div>
+              <div class="settings-row-control">
+                <button type="button" class="settings-toggle" data-text-tool-toggle="spell" role="switch"
+                        aria-checked="false" aria-label="Spelling and grammar correction">
+                  <span class="settings-toggle-track"><span class="settings-toggle-thumb"></span></span>
+                </button>
+              </div>
+            </div>
+
 
             <!-- Slice B retargets the boot-time `_moveToHome` calls to drop
                  Terminal, History, Worktrees, Stats, Today, Notes, and COO
@@ -3797,6 +3840,7 @@
 <script src="/static/notify.js"></script>
 <script src="/static/router-detected.js" defer></script>
 <script src="/static/app.js"></script>
+<script src="/static/text-tools.js" defer></script>
 <script src="/static/free-settings.js" defer></script>
 <script src="/static/leftover.js" defer></script>
 <script src="/static/codex-live-source.js"></script>
